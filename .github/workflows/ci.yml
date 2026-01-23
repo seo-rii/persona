@@ -26,6 +26,13 @@ jobs:
             exit 1
           fi
           sudo unshare -m true
+      - name: Ensure bash
+        run: |
+          if ! command -v bash >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y bash
+          fi
+
 
       - name: Download modules
         working-directory: persona
@@ -33,4 +40,4 @@ jobs:
 
       - name: Run tests (unit + integration)
         working-directory: persona
-        run: ./test.sh
+        run: bash ./test.sh
