@@ -1,0 +1,16 @@
+# Build output
+/bin/
+
+# Go test artifacts
+*.test
+*.out
+
+# Logs and temp files
+*.log
+*.tmp
+*.rej
+
+# Editor/OS files
+.DS_Store
+.vscode/
+.idea/

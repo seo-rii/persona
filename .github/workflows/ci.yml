@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Verify overlayfs + mount namespace
+        run: |
+          sudo modprobe overlay || true
+          if ! grep -q overlay /proc/filesystems; then
+            echo "overlayfs not available" >&2
+            exit 1
+          fi
+          sudo unshare -m true
+
+      - name: Download modules
+        working-directory: persona
+        run: go mod download
+
+      - name: Run tests (unit + integration)
+        working-directory: persona
+        run: ./test.sh

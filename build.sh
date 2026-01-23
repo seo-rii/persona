@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+out_dir=${PERSONA_BUILD_DIR:-./bin}
+mkdir -p "$out_dir"
+
+bin="$out_dir/persona"
+
+if ! go build -o "$bin" ./cmd/persona; then
+  echo "build failed; running go mod tidy to resolve dependencies..." >&2
+  go mod tidy
+  go build -o "$bin" ./cmd/persona
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+  if command -v setcap >/dev/null 2>&1; then
+    if setcap cap_sys_admin,cap_dac_override+ep "$bin" 2>/dev/null; then
+      echo "capabilities set: $bin"
+    else
+      echo "warning: setcap failed (run with sudo or use ./bin/persona activate)" >&2
+    fi
+  else
+    echo "warning: setcap not found (install libcap2-bin) - skipping capabilities" >&2
+  fi
+else
+  if [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+    if sudo setcap cap_sys_admin,cap_dac_override+ep "$bin"; then
+      echo "capabilities set: $bin"
+    else
+      echo "warning: sudo setcap failed (use ./bin/persona activate)" >&2
+    fi
+  else
+    echo "warning: setcap requires sudo; run in an interactive shell or use ./bin/persona activate" >&2
+  fi
+fi
+
+echo "built: $bin"
