@@ -14,7 +14,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25.x'
 
@@ -26,18 +26,11 @@ jobs:
             exit 1
           fi
           sudo unshare -m true
-      - name: Ensure bash
-        run: |
-          if ! command -v bash >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y bash
-          fi
-
 
       - name: Download modules
-        working-directory: persona
+        working-directory: ${{ github.workspace }}
         run: go mod download
 
       - name: Run tests (unit + integration)
-        working-directory: persona
+        working-directory: ${{ github.workspace }}
         run: bash ./test.sh
