@@ -204,6 +204,7 @@ func ValidatePatchPaths(patch []byte) error {
 		for _, prefix := range []string{"rename from ", "rename to ", "copy from ", "copy to "} {
 			if strings.HasPrefix(line, prefix) {
 				path := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+				path = parseMaybeQuotedPath(path)
 				if err := checkPath(path); err != nil {
 					return err
 				}

@@ -116,6 +116,32 @@ func TestValidatePatchPathsRenameCopy(t *testing.T) {
 	}
 }
 
+func TestValidatePatchPathsRejectQuotedRenameDotDot(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git a/old.txt b/new.txt",
+		"similarity index 100%",
+		"rename from \"../old.txt\"",
+		"rename to new.txt",
+		"",
+	}, "\n")
+	if err := ValidatePatchPaths([]byte(patch)); err == nil {
+		t.Fatal("expected error for quoted rename .. path")
+	}
+}
+
+func TestValidatePatchPathsRejectQuotedCopyDotGit(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git a/old.txt b/new.txt",
+		"similarity index 100%",
+		"copy from \".git/config\"",
+		"copy to new.txt",
+		"",
+	}, "\n")
+	if err := ValidatePatchPaths([]byte(patch)); err == nil {
+		t.Fatal("expected error for quoted copy .git path")
+	}
+}
+
 func TestValidatePatchPathsQuotedSpaces(t *testing.T) {
 	patch := strings.Join([]string{
 		"diff --git \"a/dir with space/file.txt\" \"b/dir with space/file.txt\"",
