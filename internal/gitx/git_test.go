@@ -20,6 +20,18 @@ func TestIsClean(t *testing.T) {
 		t.Fatalf("expected clean repo")
 	}
 
+	writeFile(t, filepath.Join(repo, "untracked.txt"), "dirty\n")
+	clean, err = g.IsClean()
+	if err != nil {
+		t.Fatalf("IsClean error with untracked file: %v", err)
+	}
+	if clean {
+		t.Fatalf("expected dirty repo with untracked file")
+	}
+	if err := os.Remove(filepath.Join(repo, "untracked.txt")); err != nil {
+		t.Fatalf("remove untracked file: %v", err)
+	}
+
 	writeFile(t, filepath.Join(repo, "tracked.txt"), "dirty\n")
 	clean, err = g.IsClean()
 	if err != nil {

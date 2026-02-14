@@ -47,7 +47,22 @@ func (g Git) IsClean() (bool, error) {
 	if err != nil || !clean {
 		return clean, err
 	}
+	hasUntracked, err := g.hasUntracked()
+	if err != nil {
+		return false, err
+	}
+	if hasUntracked {
+		return false, nil
+	}
 	return true, nil
+}
+
+func (g Git) hasUntracked() (bool, error) {
+	out, err := g.gitOutputBytes(g.RepoRoot, g.env(), "git", "ls-files", "-o", "--exclude-standard")
+	if err != nil {
+		return false, err
+	}
+	return len(bytes.TrimSpace(out)) > 0, nil
 }
 
 func (g Git) diffQuiet() (bool, error) {
