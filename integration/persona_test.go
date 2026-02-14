@@ -719,7 +719,7 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 			"",
 		}, "\n")
 		writeFile(t, patchPath, []byte(patch))
-		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", "echo 1 >> test.txt"}, nil)
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath, "--allow-dirty"}, []string{"sh", "-c", "echo 1 >> test.txt"}, nil)
 		if code != 0 {
 			t.Fatalf("expected exit 0 got %d", code)
 		}
@@ -769,7 +769,7 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 			"",
 		}, "\n")
 		writeFile(t, patchPath, []byte(patch))
-		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", "cat fresh.txt > seen.txt"}, nil)
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath, "--allow-dirty"}, []string{"sh", "-c", "cat fresh.txt > seen.txt"}, nil)
 		if code != 0 {
 			t.Fatalf("expected exit 0 got %d", code)
 		}
@@ -795,7 +795,7 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 			"",
 		}, "\n")
 		writeFile(t, patchPath, []byte(patch))
-		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", "true"}, nil)
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath, "--allow-dirty"}, []string{"sh", "-c", "true"}, nil)
 		if code != 12 {
 			t.Fatalf("expected exit 12 got %d", code)
 		}
