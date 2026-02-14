@@ -125,6 +125,12 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 	}
 	logf("repo=%s gitdir=%s cwdRel=%s", repoRoot, gitDir, cwdRel)
 	logf("patch=%s base-mode=%s apply-mode=%s ignored-mode=%s keep-session=%s", patchPathEffective, opts.BaseMode, opts.ApplyMode, opts.IgnoredMode, opts.KeepSession)
+	repoReal := resolvePath(repoRoot)
+	patchReal := resolvePath(patchPathEffective)
+	patchInRepo, patchRel := isSubpath(repoReal, patchReal)
+	if patchInRepo {
+		patchRel = filepath.ToSlash(patchRel)
+	}
 
 	patchDirFile, err := os.Open(filepath.Dir(patchPathEffective))
 	if err != nil {
@@ -177,7 +183,11 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 	worktreeAdded := false
 	if opts.BaseMode == model.BaseRepo {
 		if !opts.AllowDirty {
-			clean, err := g.IsClean()
+			ignoreUntracked := []string{}
+			if patchInRepo && patchRel != "" && patchRel != "." {
+				ignoreUntracked = append(ignoreUntracked, patchRel)
+			}
+			clean, err := g.IsCleanExceptUntracked(ignoreUntracked)
 			if err != nil {
 				reportErr("git clean check", err)
 				return model.ExitRepo
@@ -292,13 +302,6 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 		}
 		return ns.Umount(repoRoot)
 	})
-
-	repoReal := resolvePath(repoRoot)
-	patchReal := resolvePath(patchPathEffective)
-	patchInRepo, patchRel := isSubpath(repoReal, patchReal)
-	if patchInRepo {
-		patchRel = filepath.ToSlash(patchRel)
-	}
 
 	if opts.IgnoredMode != model.IgnoredTransparent {
 		ignored, err := g.ListIgnoredCandidates(repoRoot, gitDirForOps, opts.IgnoredMax)

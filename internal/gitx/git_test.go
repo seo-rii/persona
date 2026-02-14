@@ -42,6 +42,29 @@ func TestIsClean(t *testing.T) {
 	}
 }
 
+func TestIsCleanExceptUntracked(t *testing.T) {
+	repo := initRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	writeFile(t, filepath.Join(repo, "state.patch"), "seed\n")
+
+	clean, err := g.IsCleanExceptUntracked([]string{"state.patch"})
+	if err != nil {
+		t.Fatalf("IsCleanExceptUntracked error: %v", err)
+	}
+	if !clean {
+		t.Fatalf("expected clean when excluded untracked path is the only change")
+	}
+
+	clean, err = g.IsCleanExceptUntracked([]string{"other.patch"})
+	if err != nil {
+		t.Fatalf("IsCleanExceptUntracked error with non-matching exclude: %v", err)
+	}
+	if clean {
+		t.Fatalf("expected dirty with non-matching exclude")
+	}
+}
+
 func TestListIgnoredCandidates(t *testing.T) {
 	repo := initRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}

@@ -39,6 +39,10 @@ func DetectRepo(cwd string) (string, string, error) {
 }
 
 func (g Git) IsClean() (bool, error) {
+	return g.IsCleanExceptUntracked(nil)
+}
+
+func (g Git) IsCleanExceptUntracked(ignoreUntracked []string) (bool, error) {
 	clean, err := g.diffQuiet()
 	if err != nil || !clean {
 		return clean, err
@@ -47,7 +51,7 @@ func (g Git) IsClean() (bool, error) {
 	if err != nil || !clean {
 		return clean, err
 	}
-	hasUntracked, err := g.hasUntracked()
+	hasUntracked, err := g.hasUntrackedExcept(ignoreUntracked)
 	if err != nil {
 		return false, err
 	}
@@ -57,12 +61,30 @@ func (g Git) IsClean() (bool, error) {
 	return true, nil
 }
 
-func (g Git) hasUntracked() (bool, error) {
-	out, err := g.gitOutputBytes(g.RepoRoot, g.env(), "git", "ls-files", "-o", "--exclude-standard")
+func (g Git) hasUntrackedExcept(ignoreUntracked []string) (bool, error) {
+	out, err := g.gitOutputBytes(g.RepoRoot, g.env(), "git", "ls-files", "-o", "--exclude-standard", "-z")
 	if err != nil {
 		return false, err
 	}
-	return len(bytes.TrimSpace(out)) > 0, nil
+	paths := splitNullList(out)
+	if len(paths) == 0 {
+		return false, nil
+	}
+	ignoreSet := make(map[string]struct{}, len(ignoreUntracked))
+	for _, path := range ignoreUntracked {
+		path = filepath.ToSlash(strings.TrimSpace(path))
+		if path == "" {
+			continue
+		}
+		ignoreSet[path] = struct{}{}
+	}
+	for _, path := range paths {
+		if _, ok := ignoreSet[path]; ok {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func (g Git) diffQuiet() (bool, error) {
