@@ -654,10 +654,12 @@ func isSubpath(root, path string) (bool, string) {
 	if err != nil {
 		return false, ""
 	}
+	rel = filepath.Clean(rel)
 	if rel == "." {
 		return true, rel
 	}
-	if strings.HasPrefix(rel, "..") {
+	parentPrefix := ".." + string(filepath.Separator)
+	if rel == ".." || strings.HasPrefix(rel, parentPrefix) {
 		return false, ""
 	}
 	return true, rel
