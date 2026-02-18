@@ -464,6 +464,57 @@ func TestPersonaIntegrationConcurrency(t *testing.T) {
 		<-done
 	})
 
+	t.Run("real and symlink patch paths serialize", func(t *testing.T) {
+		repo := createRepo(t)
+		patchDir := t.TempDir()
+		realPatch := filepath.Join(patchDir, "state.patch")
+		linkPatch := filepath.Join(patchDir, "state.link.patch")
+		if err := os.Symlink(realPatch, linkPatch); err != nil {
+			t.Fatalf("symlink patch: %v", err)
+		}
+		start := time.Now()
+		done := make(chan struct{})
+		go func() {
+			runPersona(t, persona, repo, []string{"--patch", realPatch}, []string{"sh", "-c", "sleep 2"}, nil)
+			close(done)
+		}()
+		time.Sleep(200 * time.Millisecond)
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", linkPatch}, []string{"sh", "-c", "true"}, nil)
+		elapsed := time.Since(start)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		if elapsed < 2*time.Second {
+			t.Fatalf("expected serialization between real/symlink patch paths, elapsed %s", elapsed)
+		}
+		<-done
+	})
+
+	t.Run("real and symlink patch paths share state", func(t *testing.T) {
+		repo := createRepo(t)
+		patchDir := t.TempDir()
+		realPatch := filepath.Join(patchDir, "state.patch")
+		linkPatch := filepath.Join(patchDir, "state.link.patch")
+		if err := os.Symlink(realPatch, linkPatch); err != nil {
+			t.Fatalf("symlink patch: %v", err)
+		}
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", realPatch}, []string{"sh", "-c", "echo hello > one.txt"}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		code, _, _ = runPersona(t, persona, repo, []string{"--patch", linkPatch}, []string{"sh", "-c", "cat one.txt > seen.txt"}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		data := readFile(t, realPatch)
+		if !bytes.Contains(data, []byte("one.txt")) {
+			t.Fatalf("patch missing one.txt")
+		}
+		if !bytes.Contains(data, []byte("seen.txt")) {
+			t.Fatalf("patch missing seen.txt")
+		}
+	})
+
 	t.Run("concurrent worktree mode different patches", func(t *testing.T) {
 		repo := createRepo(t)
 		patchA := filepath.Join(t.TempDir(), "wta.patch")
@@ -571,6 +622,26 @@ func TestPersonaIntegrationSecurity(t *testing.T) {
 		}
 		if !bytes.Contains(data, []byte("foo.txt")) {
 			t.Fatalf("patch missing foo.txt")
+		}
+	})
+
+	t.Run("print patch path resolves symlink target", func(t *testing.T) {
+		repo := createRepo(t)
+		patchDir := t.TempDir()
+		realPatch := filepath.Join(patchDir, "state.patch")
+		linkPatch := filepath.Join(patchDir, "state.link.patch")
+		if err := os.Symlink(realPatch, linkPatch); err != nil {
+			t.Fatalf("symlink patch: %v", err)
+		}
+		code, out, _ := runPersona(t, persona, repo, []string{"--patch", linkPatch, "--print-patch-path"}, []string{"sh", "-c", "true"}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		if strings.TrimSpace(out) != realPatch {
+			t.Fatalf("expected printed path %q got %q", realPatch, strings.TrimSpace(out))
+		}
+		if _, err := os.Stat(realPatch); err != nil {
+			t.Fatalf("expected real patch file to exist: %v", err)
 		}
 	})
 

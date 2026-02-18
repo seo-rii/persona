@@ -447,3 +447,132 @@ func TestFilterExistingNewFilesBinaryNotSkipped(t *testing.T) {
 		t.Fatalf("expected binary patch unchanged")
 	}
 }
+
+func TestValidatePatchPathsRejectEscapedDotDot(t *testing.T) {
+	patch := "diff --git a/\\056\\056/evil b/\\056\\056/evil\n+++ b/\\056\\056/evil\n"
+	if err := ValidatePatchPaths([]byte(patch)); err == nil {
+		t.Fatal("expected error for escaped .. path")
+	}
+}
+
+func TestValidatePatchPathsRejectEscapedAbsolute(t *testing.T) {
+	patch := "diff --git a/\\057tmp/evil b/\\057tmp/evil\n+++ b/\\057tmp/evil\n"
+	if err := ValidatePatchPaths([]byte(patch)); err == nil {
+		t.Fatal("expected error for escaped absolute path")
+	}
+}
+
+func TestValidatePatchPathsRejectEscapedDotGit(t *testing.T) {
+	patch := "diff --git a/\\056git/config b/\\056git/config\n+++ b/\\056git/config\n"
+	if err := ValidatePatchPaths([]byte(patch)); err == nil {
+		t.Fatal("expected error for escaped .git path")
+	}
+}
+
+func TestValidatePatchPathsRejectEscapedRenameDotDot(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git a/a.txt b/b.txt",
+		"rename from \\056\\056/evil.txt",
+		"rename to b.txt",
+		"",
+	}, "\n")
+	if err := ValidatePatchPaths([]byte(patch)); err == nil {
+		t.Fatal("expected error for escaped rename .. path")
+	}
+}
+
+func TestValidatePatchPathsRejectEscapedCopyDotGit(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git a/a.txt b/b.txt",
+		"copy from \\056git/config",
+		"copy to b.txt",
+		"",
+	}, "\n")
+	if err := ValidatePatchPaths([]byte(patch)); err == nil {
+		t.Fatal("expected error for escaped copy .git path")
+	}
+}
+
+func TestAtomicWriteFilePreservesMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.patch")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := AtomicWriteFile(path, []byte("new")); err != nil {
+		t.Fatalf("atomic write: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("unexpected content %q", string(data))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("expected mode 600 got %o", info.Mode().Perm())
+	}
+}
+
+func TestReadAllMissingReturnsNil(t *testing.T) {
+	data, err := ReadAll(filepath.Join(t.TempDir(), "missing.patch"))
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if data != nil {
+		t.Fatalf("expected nil data for missing file, got %q", string(data))
+	}
+}
+
+func TestPatchLockUnlockNilSafe(t *testing.T) {
+	var nilLock *PatchLock
+	if err := nilLock.Unlock(); err != nil {
+		t.Fatalf("expected nil lock unlock to succeed: %v", err)
+	}
+
+	empty := &PatchLock{}
+	if err := empty.Unlock(); err != nil {
+		t.Fatalf("expected empty lock unlock to succeed: %v", err)
+	}
+}
+
+func TestFilterUntrackedPathsPrefixBoundary(t *testing.T) {
+	paths := []string{"foo", "foo/bar", "foobar", "bar/foo"}
+	filtered := FilterUntrackedPaths(paths, []string{"foo/"}, nil)
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 paths got %v", filtered)
+	}
+	if filtered[0] != "foobar" || filtered[1] != "bar/foo" {
+		t.Fatalf("unexpected filtered paths: %v", filtered)
+	}
+}
+
+func TestFilterExistingNewFilesFallbackPlusPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fallback.txt"), []byte("data\n"), 0o644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	patch := strings.Join([]string{
+		"diff --git",
+		"new file mode 100644",
+		"index 0000000..e69de29",
+		"--- /dev/null",
+		"+++ b/fallback.txt",
+		"@@ -0,0 +1 @@",
+		"+data",
+		"",
+	}, "\n")
+	filtered, skipped, err := FilterExistingNewFiles([]byte(patch), dir)
+	if err != nil {
+		t.Fatalf("filter existing new files: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0] != "fallback.txt" {
+		t.Fatalf("expected fallback.txt skipped, got %v", skipped)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("expected filtered patch to be empty")
+	}
+}

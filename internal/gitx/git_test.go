@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"persona/internal/model"
 )
 
 func TestIsClean(t *testing.T) {
@@ -150,6 +152,120 @@ func TestDetectRepoIgnoresEnv(t *testing.T) {
 	if gitDir != expectedGitDir {
 		t.Fatalf("expected git dir %s got %s", expectedGitDir, gitDir)
 	}
+}
+
+func TestListUntracked(t *testing.T) {
+	repo := initRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	writeFile(t, filepath.Join(repo, "a.txt"), "a\n")
+	if err := os.MkdirAll(filepath.Join(repo, "dir"), 0o755); err != nil {
+		t.Fatalf("mkdir dir: %v", err)
+	}
+	writeFile(t, filepath.Join(repo, "dir", "b.txt"), "b\n")
+
+	paths, err := g.ListUntracked(repo, g.GitDir)
+	if err != nil {
+		t.Fatalf("ListUntracked error: %v", err)
+	}
+	if !containsPath(paths, "a.txt") || !containsPath(paths, "dir/b.txt") {
+		t.Fatalf("expected untracked paths in %v", paths)
+	}
+}
+
+func TestApplyPatchStrictSuccess(t *testing.T) {
+	repo := initRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	patch := strings.Join([]string{
+		"diff --git a/new.txt b/new.txt",
+		"new file mode 100644",
+		"index 0000000..e69de29",
+		"--- /dev/null",
+		"+++ b/new.txt",
+		"@@ -0,0 +1 @@",
+		"+hello",
+		"",
+	}, "\n")
+
+	if err := g.ApplyPatch("", model.ApplyStrict, repo, g.GitDir, []byte(patch)); err != nil {
+		t.Fatalf("ApplyPatch strict error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "new.txt"))
+	if err != nil {
+		t.Fatalf("read new file: %v", err)
+	}
+	if string(data) != "hello\n" {
+		t.Fatalf("unexpected new.txt content %q", string(data))
+	}
+}
+
+func TestApplyPatchStrictFailure(t *testing.T) {
+	repo := initRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	patch := strings.Join([]string{
+		"diff --git a/tracked.txt b/tracked.txt",
+		"index 1111111..2222222 100644",
+		"--- a/tracked.txt",
+		"+++ b/tracked.txt",
+		"@@ -1 +1 @@",
+		"-nope",
+		"+changed",
+		"",
+	}, "\n")
+
+	if err := g.ApplyPatch("", model.ApplyStrict, repo, g.GitDir, []byte(patch)); err == nil {
+		t.Fatalf("expected strict apply failure")
+	}
+}
+
+func TestApplyPatchRejectFailure(t *testing.T) {
+	repo := initRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	patch := strings.Join([]string{
+		"diff --git a/tracked.txt b/tracked.txt",
+		"index 1111111..2222222 100644",
+		"--- a/tracked.txt",
+		"+++ b/tracked.txt",
+		"@@ -1 +1 @@",
+		"-nope",
+		"+changed",
+		"",
+	}, "\n")
+
+	if err := g.ApplyPatch("", model.ApplyReject, repo, g.GitDir, []byte(patch)); err == nil {
+		t.Fatalf("expected reject apply failure")
+	}
+}
+
+func TestWorktreeAddDetachAndRemoveForce(t *testing.T) {
+	repo := initRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+	wt := filepath.Join(t.TempDir(), "wt")
+
+	if err := g.WorktreeAddDetach(wt, "HEAD"); err != nil {
+		t.Fatalf("WorktreeAddDetach error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "tracked.txt")); err != nil {
+		t.Fatalf("expected tracked.txt in worktree: %v", err)
+	}
+	if err := g.WorktreeRemoveForce(wt); err != nil {
+		t.Fatalf("WorktreeRemoveForce error: %v", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree path removed, got %v", err)
+	}
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, path := range paths {
+		if path == want {
+			return true
+		}
+	}
+	return false
 }
 
 func initRepo(t *testing.T) string {
