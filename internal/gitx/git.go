@@ -183,7 +183,7 @@ func (g Git) ListIgnoredCandidates(ctx context.Context, workTree, gitDir string,
 func (g Git) hasHead(ctx context.Context, workTree, gitDir string) (bool, error) {
 	args := g.withDirArgs(workTree, gitDir, "rev-parse", "--verify", "HEAD")
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = g.RepoRoot
+	cmd.Dir = workTree
 	cmd.Env = g.envWith(workTree, gitDir)
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
