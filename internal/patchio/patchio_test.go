@@ -213,6 +213,64 @@ func TestAtomicWriteFileAtPreservesMode(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteFileAtNoTempFileLeftOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.patch")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	dh, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("open dir: %v", err)
+	}
+	defer dh.Close()
+	if err := AtomicWriteFileAt(dh, "state.patch", []byte("new")); err != nil {
+		t.Fatalf("atomic write: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".persona-") {
+			t.Fatalf("temp file %q left behind after successful write", entry.Name())
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("expected content %q got %q", "new", string(data))
+	}
+}
+
+func TestAtomicWriteFileAtCleansTempOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dir, 0o755)
+	})
+	dh, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("open dir: %v", err)
+	}
+	defer dh.Close()
+	_ = AtomicWriteFileAt(dh, "state.patch", []byte("new"))
+	_ = os.Chmod(dir, 0o755)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".persona-") {
+			t.Fatalf("temp file %q left behind after failed write", entry.Name())
+		}
+	}
+}
+
 func TestAtomicWriteFileAtReadOnlyDir(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.patch")

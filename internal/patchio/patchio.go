@@ -150,9 +150,12 @@ func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 		return err
 	}
 	file := os.NewFile(uintptr(fd), tmpName)
+	renamed := false
 	defer func() {
-		file.Close()
-		_ = unix.Unlinkat(int(dir.Fd()), tmpName, 0)
+		if !renamed {
+			file.Close()
+			_ = unix.Unlinkat(int(dir.Fd()), tmpName, 0)
+		}
 	}()
 	if _, err := file.Write(data); err != nil {
 		return err
@@ -169,6 +172,7 @@ func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 	if err := unix.Renameat(int(dir.Fd()), tmpName, int(dir.Fd()), name); err != nil {
 		return err
 	}
+	renamed = true
 	return unix.Fsync(int(dir.Fd()))
 }
 
