@@ -142,6 +142,19 @@ func TestValidatePatchPathsRejectQuotedCopyDotGit(t *testing.T) {
 	}
 }
 
+func TestValidatePatchPathsAllowsLeadingSpaceDotDotLiteralInRename(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git a/src.txt b/src.txt",
+		"similarity index 100%",
+		"rename from  ../safe.txt",
+		"rename to src.txt",
+		"",
+	}, "\n")
+	if err := ValidatePatchPaths([]byte(patch)); err != nil {
+		t.Fatalf("expected leading-space literal path to be allowed, got %v", err)
+	}
+}
+
 func TestValidatePatchPathsQuotedSpaces(t *testing.T) {
 	patch := strings.Join([]string{
 		"diff --git \"a/dir with space/file.txt\" \"b/dir with space/file.txt\"",

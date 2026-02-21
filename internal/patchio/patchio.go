@@ -195,7 +195,7 @@ func ValidatePatchPaths(patch []byte) error {
 			continue
 		}
 		if strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- ") {
-			path := strings.TrimSpace(line[4:])
+			path := trimLine(line[4:])
 			if path == "/dev/null" {
 				continue
 			}
@@ -208,7 +208,7 @@ func ValidatePatchPaths(patch []byte) error {
 		}
 		for _, prefix := range []string{"rename from ", "rename to ", "copy from ", "copy to "} {
 			if strings.HasPrefix(line, prefix) {
-				path := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+				path := trimLine(strings.TrimPrefix(line, prefix))
 				path = parseMaybeQuotedPath(path)
 				if err := checkPath(path); err != nil {
 					return err
@@ -467,7 +467,6 @@ func stripDiffPathMeta(path string) string {
 }
 
 func parseMaybeQuotedPath(path string) string {
-	path = strings.TrimLeft(path, " ")
 	if path == "" {
 		return path
 	}
@@ -605,7 +604,6 @@ func randSuffix() (string, error) {
 }
 
 func checkPath(path string) error {
-	path = strings.TrimSpace(path)
 	path = strings.TrimPrefix(path, "a/")
 	path = strings.TrimPrefix(path, "b/")
 	if path == "" || path == "/dev/null" {
