@@ -164,7 +164,7 @@ func (g Git) ListIgnoredCandidates(ctx context.Context, workTree, gitDir string,
 	result := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if strings.HasPrefix(entry, "!! ") {
-			path := strings.TrimSpace(strings.TrimPrefix(entry, "!! "))
+			path := strings.TrimPrefix(entry, "!! ")
 			if path == "" {
 				continue
 			}

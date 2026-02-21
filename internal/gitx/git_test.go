@@ -93,6 +93,27 @@ func TestListIgnoredCandidates(t *testing.T) {
 	}
 }
 
+func TestListIgnoredCandidatesPreservesLeadingSpace(t *testing.T) {
+	repo := initRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	writeFile(t, filepath.Join(repo, ".gitignore"), " lead.txt\n")
+	runCmd(t, repo, "git", "add", ".gitignore")
+	runCmd(t, repo, "git", "commit", "-m", "ignore leading-space file")
+
+	writeFile(t, filepath.Join(repo, " lead.txt"), "skip\n")
+	ignored, err := g.ListIgnoredCandidates(context.Background(), repo, g.GitDir, 10)
+	if err != nil {
+		t.Fatalf("ListIgnoredCandidates error: %v", err)
+	}
+	if !containsPath(ignored, " lead.txt") {
+		t.Fatalf("expected exact ignored path with leading space, got %q", ignored)
+	}
+	if containsPath(ignored, "lead.txt") {
+		t.Fatalf("leading space must not be trimmed, got %q", ignored)
+	}
+}
+
 func TestDiffNewFileNoIndex(t *testing.T) {
 	repo := initRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
