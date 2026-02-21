@@ -36,7 +36,7 @@ func Create(gitDir string) (*Session, error) {
 
 	paths := []string{upper, work, mntBase, mntGitDir, baseWT, tmp}
 	for _, path := range paths {
-		if err := os.MkdirAll(path, 0o755); err != nil {
+		if err := os.MkdirAll(path, 0o700); err != nil {
 			return nil, err
 		}
 	}

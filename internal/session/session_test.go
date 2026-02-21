@@ -27,6 +27,37 @@ func TestCreateAndRemoveAll(t *testing.T) {
 	}
 }
 
+func TestCreateSessionPathsOwnerOnlyPermissions(t *testing.T) {
+	gitDir := t.TempDir()
+	s, err := Create(gitDir)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	paths := []struct {
+		name string
+		path string
+	}{
+		{name: "root", path: s.Root},
+		{name: "upper", path: s.Upper},
+		{name: "work", path: s.Work},
+		{name: "mnt-base", path: s.MntBase},
+		{name: "mnt-gitdir", path: s.MntGitDir},
+		{name: "basewt", path: s.BaseWT},
+		{name: "tmp", path: s.Tmp},
+	}
+
+	for _, p := range paths {
+		info, err := os.Stat(p.path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p.name, err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Fatalf("%s expected mode 700, got %o", p.name, got)
+		}
+	}
+}
+
 func TestCreateUsesGitDir(t *testing.T) {
 	gitDir := t.TempDir()
 	s, err := Create(gitDir)
