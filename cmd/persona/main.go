@@ -72,17 +72,17 @@ func (e *exitError) Error() string {
 	return ""
 }
 
-func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
+func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 
 	repoRoot, gitDir, err := gitx.DetectRepo(cwd)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return model.ExitRepo
+		return model.ExitRepo, 0
 	}
 
 	cwdRel, err := filepath.Rel(repoRoot, cwd)
@@ -107,13 +107,13 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 	patchPath, err := patchio.EnsurePatchPath(opts, gitDir, time.Now())
 	if err != nil {
 		reportErr("ensure patch path", err)
-		return model.ExitWrite
+		return model.ExitWrite, 0
 	}
 
 	patchPath, err = filepath.Abs(patchPath)
 	if err != nil {
 		reportErr("resolve patch path", err)
-		return model.ExitWrite
+		return model.ExitWrite, 0
 	}
 	patchPathEffective := resolvePath(patchPath)
 	if patchPathEffective == "" {
@@ -121,7 +121,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 	}
 	if err := os.MkdirAll(filepath.Dir(patchPathEffective), 0o755); err != nil {
 		reportErr("ensure patch directory", err)
-		return model.ExitWrite
+		return model.ExitWrite, 0
 	}
 	logf("repo=%s gitdir=%s cwdRel=%s", repoRoot, gitDir, cwdRel)
 	logf("patch=%s base-mode=%s apply-mode=%s ignored-mode=%s keep-session=%s", patchPathEffective, opts.BaseMode, opts.ApplyMode, opts.IgnoredMode, opts.KeepSession)
@@ -135,14 +135,14 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 	patchDirFile, err := os.Open(filepath.Dir(patchPathEffective))
 	if err != nil {
 		reportErr("open patch directory", err)
-		return model.ExitWrite
+		return model.ExitWrite, 0
 	}
 	defer patchDirFile.Close()
 
 	lock, err := patchio.LockPatch(patchPathEffective)
 	if err != nil {
 		reportErr("lock patch", err)
-		return model.ExitWrite
+		return model.ExitWrite, 0
 	}
 	cleanup := &cleanupStack{}
 	cleanup.Push(func() error { return lock.Unlock() })
@@ -152,6 +152,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 			fmt.Fprintln(os.Stderr, err)
 			if exitCode == model.ExitOK {
 				exitCode = model.ExitEnv
+				childCode = 0
 			}
 		}
 	}()
@@ -159,14 +160,14 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 	patchData, err := patchio.ReadAll(patchPathEffective)
 	if err != nil {
 		reportErr("read patch", err)
-		return model.ExitWrite
+		return model.ExitWrite, 0
 	}
 	logf("patch bytes=%d", len(patchData))
 
 	sess, err = session.Create(gitDir)
 	if err != nil {
 		reportErr("create session", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	logf("session root=%s", sess.Root)
 
@@ -190,17 +191,17 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 			clean, err := g.IsCleanExceptUntracked(ignoreUntracked)
 			if err != nil {
 				reportErr("git clean check", err)
-				return model.ExitRepo
+				return model.ExitRepo, 0
 			}
 			if !clean {
 				fmt.Fprintln(os.Stderr, "repository is dirty")
-				return model.ExitRepo
+				return model.ExitRepo, 0
 			}
 		}
 	} else if opts.BaseMode == model.BaseWorktree {
 		if err := g.WorktreeAddDetach(sess.BaseWT, opts.BaseRef); err != nil {
 			reportErr("git worktree add", err)
-			return model.ExitRepo
+			return model.ExitRepo, 0
 		}
 		worktreeAdded = true
 		cleanup.Push(func() error {
@@ -211,24 +212,24 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 		})
 	} else {
 		fmt.Fprintln(os.Stderr, "invalid base mode")
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	if err := ns.UnshareMountNS(); err != nil {
 		reportErr("unshare mount namespace", err)
 		reportPermissionHint("unshare mount namespace", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	if err := ns.MakeMountsPrivate(); err != nil {
 		reportErr("make mounts private", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 
 	extRoot, err := os.MkdirTemp("", "persona-session-")
 	if err != nil {
 		reportErr("create external session dir", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	cleanup.Push(func() error {
 		return os.RemoveAll(extRoot)
@@ -238,16 +239,16 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 	extGitDir := filepath.Join(extRoot, "mnt", "gitdir")
 	if err := os.MkdirAll(extEmptyDir, 0o755); err != nil {
 		reportErr("create external empty dir", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	if err := os.MkdirAll(filepath.Dir(extEmptyFile), 0o755); err != nil {
 		reportErr("create external empty file dir", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	file, err := os.OpenFile(extEmptyFile, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		reportErr("create external empty file", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	file.Close()
 	basePath := repoRoot
@@ -257,23 +258,23 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 
 	if err := ns.BindMount(gitDir, extGitDir); err != nil {
 		reportErr("bind mount external gitdir", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	cleanup.Push(func() error { return ns.Umount(extGitDir) })
 
 	if err := ns.BindMount(basePath, sess.MntBase); err != nil {
 		reportErr("bind mount base", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	cleanup.Push(func() error { return ns.Umount(sess.MntBase) })
 	if err := ns.RemountRO(sess.MntBase); err != nil {
 		reportErr("remount base ro", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 
 	if err := ns.BindMount(gitDir, sess.MntGitDir); err != nil {
 		reportErr("bind mount gitdir", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	cleanup.Push(func() error { return ns.Umount(sess.MntGitDir) })
 	gitDirForOps := extGitDir
@@ -282,7 +283,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 	if err := ns.MountOverlay(repoRoot, ns.OverlayOpts{LowerDir: sess.MntBase, UpperDir: sess.Upper, WorkDir: sess.Work}); err != nil {
 		reportErr("mount overlay", err)
 		reportPermissionHint("mount overlay", err)
-		return model.ExitEnv
+		return model.ExitEnv, 0
 	}
 	logf("overlay mounted lower=%s upper=%s work=%s target=%s", sess.MntBase, sess.Upper, sess.Work, repoRoot)
 
@@ -307,7 +308,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 		ignored, err := g.ListIgnoredCandidates(repoRoot, gitDirForOps, opts.IgnoredMax)
 		if err != nil {
 			reportErr("list ignored", err)
-			return model.ExitEnv
+			return model.ExitEnv, 0
 		}
 		logf("ignored count=%d", len(ignored))
 		for _, path := range ignored {
@@ -316,11 +317,11 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 			case model.IgnoredReadonly:
 				if err := ns.BindMount(target, target); err != nil {
 					reportErr("bind mount ignored readonly", err)
-					return model.ExitEnv
+					return model.ExitEnv, 0
 				}
 				if err := ns.RemountRO(target); err != nil {
 					reportErr("remount ignored readonly", err)
-					return model.ExitEnv
+					return model.ExitEnv, 0
 				}
 				maskTargets = append(maskTargets, target)
 			case model.IgnoredMasked:
@@ -334,7 +335,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 				}
 				if err := ns.MaskPath(target, kind, extEmptyFile, extEmptyDir); err != nil {
 					reportErr("mask ignored", err)
-					return model.ExitEnv
+					return model.ExitEnv, 0
 				}
 				maskTargets = append(maskTargets, target)
 			}
@@ -344,7 +345,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 	if len(patchData) > 0 {
 		if err := patchio.ValidatePatchPaths(patchData); err != nil {
 			reportErr("validate patch", err)
-			return model.ExitApply
+			return model.ExitApply, 0
 		}
 		applyData := patchData
 		if err := g.ApplyPatch(patchPathEffective, opts.ApplyMode, repoRoot, gitDirForOps, applyData); err != nil {
@@ -363,7 +364,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode) {
 				}
 			}
 			reportErr("apply patch", err)
-			return model.ExitApply
+			return model.ExitApply, 0
 		}
 	}
 appliedPatch:
@@ -373,7 +374,7 @@ appliedPatch:
 		patchMaskPath = filepath.Join(repoRoot, patchRel)
 		if err := ns.MaskPath(patchMaskPath, ns.MaskFile, extEmptyFile, extEmptyDir); err != nil {
 			reportErr("mask patch file", err)
-			return model.ExitEnv
+			return model.ExitEnv, 0
 		}
 		maskTargets = append(maskTargets, patchMaskPath)
 	}
@@ -387,13 +388,13 @@ appliedPatch:
 		}
 		if err := ns.MaskPath(gitPath, kind, extEmptyFile, extEmptyDir); err != nil {
 			reportErr("mask .git", err)
-			return model.ExitEnv
+			return model.ExitEnv, 0
 		}
 		gitMaskPath = gitPath
 		maskTargets = append(maskTargets, gitPath)
 	}
 
-	runCommand(repoRoot, cwdRel, opts.Command)
+	childCode = runCommand(repoRoot, cwdRel, opts.Command)
 
 	if patchMaskPath != "" {
 		_ = ns.Umount(patchMaskPath)
@@ -405,19 +406,19 @@ appliedPatch:
 	patchOut, err := exportPatch(g, repoRoot, gitDirForOps, patchInRepo, patchRel)
 	if err != nil {
 		reportErr("export patch", err)
-		return model.ExitExport
+		return model.ExitExport, 0
 	}
 	logf("export bytes=%d", len(patchOut))
 
 	if err := patchio.AtomicWriteFileAt(patchDirFile, filepath.Base(patchPathEffective), patchOut); err != nil {
 		reportErr("write patch", err)
-		return model.ExitWrite
+		return model.ExitWrite, 0
 	}
 
 	if opts.PrintPatchPath {
 		fmt.Fprintln(os.Stdout, patchPathEffective)
 	}
-	return model.ExitOK
+	return model.ExitOK, childCode
 }
 
 func newRootCmd() *cobra.Command {
@@ -461,9 +462,12 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return &model.PersonaError{Code: model.ExitEnv, Op: "parse options", Err: err}
 			}
-			code := runWithOptions(opts)
+			code, childExit := runWithOptions(opts)
 			if code != model.ExitOK {
 				return &exitError{code: code}
+			}
+			if childExit != 0 {
+				return &exitError{code: model.ExitCode(childExit)}
 			}
 			return nil
 		},

@@ -123,8 +123,8 @@ func TestPersonaIntegrationBasic(t *testing.T) {
 		repo := createRepo(t)
 		patchPath := filepath.Join(t.TempDir(), "state.patch")
 		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", "false"}, nil)
-		if code != 0 {
-			t.Fatalf("expected exit 0 got %d", code)
+		if code != 1 {
+			t.Fatalf("expected child exit code 1 got %d", code)
 		}
 		info, err := os.Stat(patchPath)
 		if err != nil {
@@ -132,6 +132,30 @@ func TestPersonaIntegrationBasic(t *testing.T) {
 		}
 		if info.Size() != 0 {
 			t.Fatalf("expected empty patch, got %d", info.Size())
+		}
+	})
+	t.Run("child exit code propagated", func(t *testing.T) {
+		repo := createRepo(t)
+		patchPath := filepath.Join(t.TempDir(), "state.patch")
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", "echo data > child.txt; exit 42"}, nil)
+		if code != 42 {
+			t.Fatalf("expected child exit code 42 got %d", code)
+		}
+		data := readFile(t, patchPath)
+		if !bytes.Contains(data, []byte("child.txt")) {
+			t.Fatalf("patch missing child.txt despite child exit")
+		}
+	})
+	t.Run("child success propagates zero", func(t *testing.T) {
+		repo := createRepo(t)
+		patchPath := filepath.Join(t.TempDir(), "state.patch")
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", "echo ok > ok.txt"}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		data := readFile(t, patchPath)
+		if !bytes.Contains(data, []byte("ok.txt")) {
+			t.Fatalf("patch missing ok.txt")
 		}
 	})
 	t.Run("git command fails inside view", func(t *testing.T) {
