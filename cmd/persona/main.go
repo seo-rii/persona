@@ -245,10 +245,6 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		return model.Wrap(model.ExitEnv, "remount base ro", err), 0
 	}
 
-	if err := ns.BindMount(gitDir, sess.MntGitDir); err != nil {
-		return model.Wrap(model.ExitEnv, "bind mount gitdir", err), 0
-	}
-	cleanup.Push(func() error { return ns.Umount(sess.MntGitDir) })
 	gitDirForOps := extGitDir
 	logf("gitdir-for-ops=%s", gitDirForOps)
 
