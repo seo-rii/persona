@@ -249,15 +249,73 @@ func findmntInfo(path string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseFindmntPairs(string(out)), nil
+}
+
+func parseFindmntPairs(raw string) map[string]string {
+	s := strings.TrimSpace(raw)
 	info := make(map[string]string)
-	for _, field := range strings.Fields(strings.TrimSpace(string(out))) {
-		parts := strings.SplitN(field, "=", 2)
-		if len(parts) != 2 {
+	i := 0
+	for i < len(s) {
+		for i < len(s) && isFindmntSpace(s[i]) {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+
+		keyStart := i
+		for i < len(s) && !isFindmntSpace(s[i]) && s[i] != '=' {
+			i++
+		}
+		if i >= len(s) || s[i] != '=' {
+			for i < len(s) && !isFindmntSpace(s[i]) {
+				i++
+			}
 			continue
 		}
-		info[parts[0]] = strings.Trim(parts[1], "\"")
+		key := s[keyStart:i]
+		i++
+		if key == "" {
+			continue
+		}
+
+		if i < len(s) && s[i] == '"' {
+			i++
+			var b strings.Builder
+			escaped := false
+			for i < len(s) {
+				ch := s[i]
+				i++
+				if escaped {
+					b.WriteByte(ch)
+					escaped = false
+					continue
+				}
+				if ch == '\\' {
+					escaped = true
+					continue
+				}
+				if ch == '"' {
+					break
+				}
+				b.WriteByte(ch)
+			}
+			info[key] = b.String()
+			continue
+		}
+
+		valueStart := i
+		for i < len(s) && !isFindmntSpace(s[i]) {
+			i++
+		}
+		info[key] = s[valueStart:i]
 	}
-	return info, nil
+	return info
+}
+
+func isFindmntSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 
 func reportPermissionHint(op string, err error) {

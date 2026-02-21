@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -61,4 +62,29 @@ func TestResolveBinaryPath(t *testing.T) {
 			t.Fatalf("expected error for missing binary")
 		}
 	})
+}
+
+func TestFindmntInfoParsesQuotedValuesWithSpaces(t *testing.T) {
+	tmp := t.TempDir()
+	findmnt := filepath.Join(tmp, "findmnt")
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"echo 'OPTIONS=\"rw,nosuid,nodev,relatime\" FSTYPE=\"ext4\" SOURCE=\"/dev/mapper/root vg\" TARGET=\"/mnt/my mount\"'",
+		"",
+	}, "\n")
+	if err := os.WriteFile(findmnt, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake findmnt: %v", err)
+	}
+
+	t.Setenv("PATH", tmp+":"+os.Getenv("PATH"))
+	info, err := findmntInfo("/irrelevant/path")
+	if err != nil {
+		t.Fatalf("findmntInfo error: %v", err)
+	}
+	if got, want := info["SOURCE"], "/dev/mapper/root vg"; got != want {
+		t.Fatalf("SOURCE parse mismatch: got %q want %q", got, want)
+	}
+	if got, want := info["TARGET"], "/mnt/my mount"; got != want {
+		t.Fatalf("TARGET parse mismatch: got %q want %q", got, want)
+	}
 }
