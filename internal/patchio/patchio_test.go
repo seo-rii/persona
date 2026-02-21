@@ -1,6 +1,7 @@
 package patchio
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,25 @@ func TestValidatePatchPathsRejectGit(t *testing.T) {
 	patch := "diff --git a/.git/config b/.git/config\n+++ b/.git/config\n"
 	if err := ValidatePatchPaths([]byte(patch)); err == nil {
 		t.Fatal("expected error for .git path")
+	}
+}
+
+func TestValidatePatchPathsRejectGitCaseInsensitive(t *testing.T) {
+	cases := []struct {
+		name  string
+		path  string
+	}{
+		{"uppercase", ".GIT"},
+		{"mixed case", ".Git"},
+		{"mixed case 2", ".gIt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			patch := fmt.Sprintf("diff --git a/%s/config b/%s/config\n+++ b/%s/config\n", tc.path, tc.path, tc.path)
+			if err := ValidatePatchPaths([]byte(patch)); err == nil {
+				t.Fatalf("expected error for %s path", tc.path)
+			}
+		})
 	}
 }
 

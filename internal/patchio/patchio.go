@@ -580,7 +580,7 @@ func checkPath(path string) error {
 		if part == ".." {
 			return fmt.Errorf("parent path in patch: %s", path)
 		}
-		if part == ".git" {
+		if strings.EqualFold(part, ".git") {
 			return fmt.Errorf(".git path in patch: %s", path)
 		}
 	}
