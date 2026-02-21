@@ -188,7 +188,7 @@ func TestApplyPatchStrictSuccess(t *testing.T) {
 		"",
 	}, "\n")
 
-	if err := g.ApplyPatch("", model.ApplyStrict, repo, g.GitDir, []byte(patch)); err != nil {
+	if err := g.ApplyPatch(model.ApplyStrict, repo, g.GitDir, []byte(patch)); err != nil {
 		t.Fatalf("ApplyPatch strict error: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(repo, "new.txt"))
@@ -215,7 +215,7 @@ func TestApplyPatchStrictFailure(t *testing.T) {
 		"",
 	}, "\n")
 
-	if err := g.ApplyPatch("", model.ApplyStrict, repo, g.GitDir, []byte(patch)); err == nil {
+	if err := g.ApplyPatch(model.ApplyStrict, repo, g.GitDir, []byte(patch)); err == nil {
 		t.Fatalf("expected strict apply failure")
 	}
 }
@@ -235,7 +235,7 @@ func TestApplyPatchRejectFailure(t *testing.T) {
 		"",
 	}, "\n")
 
-	if err := g.ApplyPatch("", model.ApplyReject, repo, g.GitDir, []byte(patch)); err == nil {
+	if err := g.ApplyPatch(model.ApplyReject, repo, g.GitDir, []byte(patch)); err == nil {
 		t.Fatalf("expected reject apply failure")
 	}
 }

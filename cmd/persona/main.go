@@ -348,7 +348,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int)
 			return model.ExitApply, 0
 		}
 		applyData := patchData
-		if err := g.ApplyPatch(patchPathEffective, opts.ApplyMode, repoRoot, gitDirForOps, applyData); err != nil {
+		if err := g.ApplyPatch(opts.ApplyMode, repoRoot, gitDirForOps, applyData); err != nil {
 			if patchio.IsAlreadyExistsError(err) {
 				filtered, skipped, ferr := patchio.FilterExistingNewFiles(patchData, repoRoot)
 				if ferr == nil && len(skipped) > 0 {
@@ -356,7 +356,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int)
 					if len(filtered) == 0 {
 						goto appliedPatch
 					}
-					if err2 := g.ApplyPatch(patchPathEffective, opts.ApplyMode, repoRoot, gitDirForOps, filtered); err2 == nil {
+					if err2 := g.ApplyPatch(opts.ApplyMode, repoRoot, gitDirForOps, filtered); err2 == nil {
 						goto appliedPatch
 					} else {
 						err = err2

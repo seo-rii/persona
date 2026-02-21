@@ -118,8 +118,7 @@ func (g Git) WorktreeRemoveForce(path string) error {
 	return g.gitRun(g.RepoRoot, g.env(), "git", "worktree", "remove", "--force", path)
 }
 
-func (g Git) ApplyPatch(patchPath string, mode model.ApplyMode, workTree, gitDir string, patchData []byte) error {
-	_ = patchPath
+func (g Git) ApplyPatch(mode model.ApplyMode, workTree, gitDir string, patchData []byte) error {
 	args := g.withDirArgs(workTree, gitDir, "apply", "--whitespace=nowarn")
 	if mode == model.ApplyReject {
 		args = append(args, "--reject")
