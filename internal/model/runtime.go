@@ -2,21 +2,6 @@ package model
 
 import "fmt"
 
-type Runtime struct {
-	RepoRoot string
-	GitDir   string
-	CwdRel   string
-
-	PatchPath   string
-	PatchInRepo bool
-	PatchRel    string
-
-	BasePath string
-	Session  any
-
-	ChildExit int
-}
-
 type ExitCode int
 
 const (
