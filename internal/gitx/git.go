@@ -298,12 +298,14 @@ func (g Git) gitOutputBytes(dir string, env []string, name string, args ...strin
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if g.Verbose {
 		fmt.Fprintf(os.Stderr, "[git] %s %s\n", name, strings.Join(args, " "))
 	}
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", err, string(out))
+		return nil, fmt.Errorf("%w: %s", err, stderr.String())
 	}
 	return out, nil
 }
@@ -312,15 +314,17 @@ func (g Git) gitDiffOutputBytes(dir string, env []string, name string, args ...s
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if g.Verbose {
 		fmt.Fprintf(os.Stderr, "[git] %s %s\n", name, strings.Join(args, " "))
 	}
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return out, nil
 		}
-		return nil, fmt.Errorf("%w: %s", err, string(out))
+		return nil, fmt.Errorf("%w: %s", err, stderr.String())
 	}
 	return out, nil
 }
@@ -329,9 +333,11 @@ func gitOutput(dir string, env []string, name string, args ...string) (string, e
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("%w: %s", err, string(out))
+		return "", fmt.Errorf("%w: %s", err, stderr.String())
 	}
 	return string(bytes.TrimSpace(out)), nil
 }

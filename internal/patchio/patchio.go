@@ -2,6 +2,7 @@ package patchio
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -324,7 +325,7 @@ func shouldSkipNewFileBlock(block patchBlock, workTree string) bool {
 	if noFinalNL {
 		return string(existing) == content
 	}
-	return bytesEqual(existing, []byte(content))
+	return bytes.Equal(existing, []byte(content))
 }
 
 func extractNewFileContent(lines []string) (string, bool, bool) {
@@ -561,17 +562,7 @@ func trimLine(line string) string {
 	return strings.TrimSuffix(line, "\r")
 }
 
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
+
 
 func FilterUntrackedPaths(paths []string, excludePrefixes []string, excludeExact []string) []string {
 	if len(paths) == 0 {

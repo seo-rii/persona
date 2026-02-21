@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
@@ -26,7 +27,7 @@ func BindMount(src, dst string) error {
 			return err
 		}
 	} else {
-		if err := os.MkdirAll(dirOf(dst), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
 		if _, err := os.Stat(dst); err != nil {
@@ -99,14 +100,4 @@ func MaskPath(target string, kind MaskKind, emptyFile, emptyDir string) error {
 	}
 }
 
-func dirOf(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' {
-			if i == 0 {
-				return "/"
-			}
-			return path[:i]
-		}
-	}
-	return "."
-}
+
