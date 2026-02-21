@@ -310,6 +310,10 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 
 	childCode = runCommand(repoRoot, cwdRel, opts.Command)
 
+	// After the child exits, use a fresh context for export/write —
+	// the signal was intended for the child, not for our cleanup path.
+	postCtx := context.Background()
+
 	if patchMaskPath != "" {
 		_ = ns.Umount(patchMaskPath)
 	}
@@ -317,7 +321,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		_ = ns.Umount(gitMaskPath)
 	}
 
-	patchOut, err := exportPatch(ctx, g, repoRoot, gitDirForOps, patchInRepo, patchRel)
+	patchOut, err := exportPatch(postCtx, g, repoRoot, gitDirForOps, patchInRepo, patchRel)
 	if err != nil {
 		return model.Wrap(model.ExitExport, "export patch", err), 0
 	}
