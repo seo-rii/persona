@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,59 +217,60 @@ func TestBuildOptionsInvalidValues(t *testing.T) {
 }
 
 func TestShouldRemoveSession(t *testing.T) {
+	testErr := fmt.Errorf("test error")
 	cases := []struct {
 		name string
 		opts model.Options
-		code model.ExitCode
+		err  error
 		want bool
 	}{
 		{
 			name: "keep always success",
 			opts: model.Options{KeepSession: model.KeepAlways},
-			code: model.ExitOK,
+			err:  nil,
 			want: false,
 		},
 		{
 			name: "keep always failure",
 			opts: model.Options{KeepSession: model.KeepAlways},
-			code: model.ExitApply,
+			err:  model.Wrap(model.ExitApply, "test", testErr),
 			want: false,
 		},
 		{
 			name: "keep never success",
 			opts: model.Options{KeepSession: model.KeepNever},
-			code: model.ExitOK,
+			err:  nil,
 			want: true,
 		},
 		{
 			name: "keep never failure",
 			opts: model.Options{KeepSession: model.KeepNever},
-			code: model.ExitApply,
+			err:  model.Wrap(model.ExitApply, "test", testErr),
 			want: true,
 		},
 		{
 			name: "keep on fail success",
 			opts: model.Options{KeepSession: model.KeepOnFail},
-			code: model.ExitOK,
+			err:  nil,
 			want: true,
 		},
 		{
 			name: "keep on fail failure",
 			opts: model.Options{KeepSession: model.KeepOnFail},
-			code: model.ExitApply,
+			err:  model.Wrap(model.ExitApply, "test", testErr),
 			want: false,
 		},
 		{
 			name: "unknown policy defaults remove",
 			opts: model.Options{KeepSession: model.KeepSessionPolicy("unknown")},
-			code: model.ExitApply,
+			err:  model.Wrap(model.ExitApply, "test", testErr),
 			want: true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shouldRemoveSession(tc.code, tc.opts)
+			got := shouldRemoveSession(tc.err, tc.opts)
 			if got != tc.want {
 				t.Fatalf("expected %v got %v", tc.want, got)
 			}
