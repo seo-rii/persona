@@ -58,8 +58,8 @@ func TestValidatePatchPathsRejectGit(t *testing.T) {
 
 func TestValidatePatchPathsRejectGitCaseInsensitive(t *testing.T) {
 	cases := []struct {
-		name  string
-		path  string
+		name string
+		path string
 	}{
 		{"uppercase", ".GIT"},
 		{"mixed case", ".Git"},
