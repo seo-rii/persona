@@ -13,14 +13,11 @@ func TestCreateAndRemoveAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	paths := []string{s.Root, s.Upper, s.Work, s.MntBase, s.MntGitDir, s.BaseWT, s.Tmp, s.EmptyDir}
+	paths := []string{s.Root, s.Upper, s.Work, s.MntBase, s.MntGitDir, s.BaseWT, s.Tmp}
 	for _, path := range paths {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected path %s: %v", path, err)
 		}
-	}
-	if _, err := os.Stat(s.EmptyFile); err != nil {
-		t.Fatalf("expected empty file: %v", err)
 	}
 	if err := s.RemoveAll(); err != nil {
 		t.Fatalf("remove session: %v", err)

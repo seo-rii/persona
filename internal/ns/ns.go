@@ -99,5 +99,3 @@ func MaskPath(target string, kind MaskKind, emptyFile, emptyDir string) error {
 		return fmt.Errorf("unknown mask kind")
 	}
 }
-
-

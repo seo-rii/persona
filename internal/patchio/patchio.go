@@ -562,8 +562,6 @@ func trimLine(line string) string {
 	return strings.TrimSuffix(line, "\r")
 }
 
-
-
 func FilterUntrackedPaths(paths []string, excludePrefixes []string, excludeExact []string) []string {
 	if len(paths) == 0 {
 		return nil

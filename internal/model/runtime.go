@@ -36,9 +36,9 @@ type PersonaError struct {
 
 func (e *PersonaError) Error() string {
 	if e.Err == nil {
-		return fmt.Sprintf("%s", e.Op)
+		return fmt.Sprintf("%s (exit %d)", e.Op, e.Code)
 	}
-	return fmt.Sprintf("%s: %v", e.Op, e.Err)
+	return fmt.Sprintf("%s: %v (exit %d)", e.Op, e.Err, e.Code)
 }
 
 func (e *PersonaError) Unwrap() error { return e.Err }

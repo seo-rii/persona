@@ -18,8 +18,6 @@ type Session struct {
 	MntGitDir string
 	BaseWT    string
 	Tmp       string
-	EmptyFile string
-	EmptyDir  string
 }
 
 func Create(gitDir string) (*Session, error) {
@@ -35,22 +33,13 @@ func Create(gitDir string) (*Session, error) {
 	mntGitDir := filepath.Join(mnt, "gitdir")
 	baseWT := filepath.Join(root, "basewt")
 	tmp := filepath.Join(root, "tmp")
-	emptyRoot := filepath.Join(root, "empty")
-	emptyFile := filepath.Join(emptyRoot, "emptyfile")
-	emptyDir := filepath.Join(emptyRoot, "emptydir")
 
-	paths := []string{upper, work, mntBase, mntGitDir, baseWT, tmp, emptyDir}
+	paths := []string{upper, work, mntBase, mntGitDir, baseWT, tmp}
 	for _, path := range paths {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return nil, err
 		}
 	}
-
-	file, err := os.OpenFile(emptyFile, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	file.Close()
 
 	return &Session{
 		ID:        id,
@@ -61,8 +50,6 @@ func Create(gitDir string) (*Session, error) {
 		MntGitDir: mntGitDir,
 		BaseWT:    baseWT,
 		Tmp:       tmp,
-		EmptyFile: emptyFile,
-		EmptyDir:  emptyDir,
 	}, nil
 }
 

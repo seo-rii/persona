@@ -304,70 +304,17 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int)
 		return ns.Umount(repoRoot)
 	})
 
-	if opts.IgnoredMode != model.IgnoredTransparent {
-		ignored, err := g.ListIgnoredCandidates(repoRoot, gitDirForOps, opts.IgnoredMax)
-		if err != nil {
-			reportErr("list ignored", err)
-			return model.ExitEnv, 0
-		}
-		logf("ignored count=%d", len(ignored))
-		for _, path := range ignored {
-			target := filepath.Join(repoRoot, filepath.FromSlash(path))
-			switch opts.IgnoredMode {
-			case model.IgnoredReadonly:
-				if err := ns.BindMount(target, target); err != nil {
-					reportErr("bind mount ignored readonly", err)
-					return model.ExitEnv, 0
-				}
-				if err := ns.RemountRO(target); err != nil {
-					reportErr("remount ignored readonly", err)
-					return model.ExitEnv, 0
-				}
-				maskTargets = append(maskTargets, target)
-			case model.IgnoredMasked:
-				info, err := os.Lstat(target)
-				if err != nil {
-					continue
-				}
-				kind := ns.MaskDir
-				if !info.IsDir() {
-					kind = ns.MaskFile
-				}
-				if err := ns.MaskPath(target, kind, extEmptyFile, extEmptyDir); err != nil {
-					reportErr("mask ignored", err)
-					return model.ExitEnv, 0
-				}
-				maskTargets = append(maskTargets, target)
-			}
-		}
+	ignoredMasks, err := maskIgnoredFiles(g, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir, opts, logf)
+	if err != nil {
+		reportErr("mask ignored files", err)
+		return model.ExitEnv, 0
 	}
+	maskTargets = append(maskTargets, ignoredMasks...)
 
-	if len(patchData) > 0 {
-		if err := patchio.ValidatePatchPaths(patchData); err != nil {
-			reportErr("validate patch", err)
-			return model.ExitApply, 0
-		}
-		applyData := patchData
-		if err := g.ApplyPatch(opts.ApplyMode, repoRoot, gitDirForOps, applyData); err != nil {
-			if patchio.IsAlreadyExistsError(err) {
-				filtered, skipped, ferr := patchio.FilterExistingNewFiles(patchData, repoRoot)
-				if ferr == nil && len(skipped) > 0 {
-					logf("apply patch: skipping existing new files: %s", strings.Join(skipped, ", "))
-					if len(filtered) == 0 {
-						goto appliedPatch
-					}
-					if err2 := g.ApplyPatch(opts.ApplyMode, repoRoot, gitDirForOps, filtered); err2 == nil {
-						goto appliedPatch
-					} else {
-						err = err2
-					}
-				}
-			}
-			reportErr("apply patch", err)
-			return model.ExitApply, 0
-		}
+	if err := applyPatchData(g, opts.ApplyMode, patchData, repoRoot, gitDirForOps, logf); err != nil {
+		reportErr("apply patch", err)
+		return model.ExitApply, 0
 	}
-appliedPatch:
 
 	var patchMaskPath string
 	if patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git" {
@@ -419,6 +366,78 @@ appliedPatch:
 		fmt.Fprintln(os.Stdout, patchPathEffective)
 	}
 	return model.ExitOK, childCode
+}
+
+// applyPatchData validates and applies patchData to the overlay.
+// If the initial apply fails due to already-existing new files, it retries
+// with those files filtered out.
+func applyPatchData(g gitx.Git, applyMode model.ApplyMode, patchData []byte, repoRoot, gitDirForOps string, logf func(string, ...any)) error {
+	if len(patchData) == 0 {
+		return nil
+	}
+	if err := patchio.ValidatePatchPaths(patchData); err != nil {
+		return err
+	}
+	err := g.ApplyPatch(applyMode, repoRoot, gitDirForOps, patchData)
+	if err == nil {
+		return nil
+	}
+	if !patchio.IsAlreadyExistsError(err) {
+		return err
+	}
+	filtered, skipped, ferr := patchio.FilterExistingNewFiles(patchData, repoRoot)
+	if ferr != nil || len(skipped) == 0 {
+		return err
+	}
+	logf("apply patch: skipping existing new files: %s", strings.Join(skipped, ", "))
+	if len(filtered) == 0 {
+		return nil
+	}
+	if err2 := g.ApplyPatch(applyMode, repoRoot, gitDirForOps, filtered); err2 != nil {
+		return err2
+	}
+	return nil
+}
+
+// maskIgnoredFiles applies the configured ignored-file policy (readonly bind
+// mount or empty-file/dir mask) and returns the list of mount targets created.
+func maskIgnoredFiles(g gitx.Git, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, logf func(string, ...any)) ([]string, error) {
+	if opts.IgnoredMode == model.IgnoredTransparent {
+		return nil, nil
+	}
+	ignored, err := g.ListIgnoredCandidates(repoRoot, gitDirForOps, opts.IgnoredMax)
+	if err != nil {
+		return nil, fmt.Errorf("list ignored: %w", err)
+	}
+	logf("ignored count=%d", len(ignored))
+	var targets []string
+	for _, path := range ignored {
+		target := filepath.Join(repoRoot, filepath.FromSlash(path))
+		switch opts.IgnoredMode {
+		case model.IgnoredReadonly:
+			if err := ns.BindMount(target, target); err != nil {
+				return targets, fmt.Errorf("bind mount ignored readonly %s: %w", path, err)
+			}
+			if err := ns.RemountRO(target); err != nil {
+				return targets, fmt.Errorf("remount ignored readonly %s: %w", path, err)
+			}
+			targets = append(targets, target)
+		case model.IgnoredMasked:
+			info, err := os.Lstat(target)
+			if err != nil {
+				continue
+			}
+			kind := ns.MaskDir
+			if !info.IsDir() {
+				kind = ns.MaskFile
+			}
+			if err := ns.MaskPath(target, kind, extEmptyFile, extEmptyDir); err != nil {
+				return targets, fmt.Errorf("mask ignored %s: %w", path, err)
+			}
+			targets = append(targets, target)
+		}
+	}
+	return targets, nil
 }
 
 func newRootCmd() *cobra.Command {
