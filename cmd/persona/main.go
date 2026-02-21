@@ -569,19 +569,24 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 127
+	}
+
+	// Set up signal forwarding only after the process has started,
+	// so cmd.Process is guaranteed to be non-nil and we avoid the
+	// race where a signal arrives before Start() completes.
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		for sig := range sigCh {
-			if cmd.Process == nil {
-				continue
-			}
 			_ = syscall.Kill(-cmd.Process.Pid, sig.(syscall.Signal))
 		}
 	}()
 
-	err := cmd.Run()
+	err := cmd.Wait()
 	signal.Stop(sigCh)
 	close(sigCh)
 	if err == nil {
