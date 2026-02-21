@@ -623,3 +623,56 @@ func TestFilterExistingNewFilesFallbackPlusPath(t *testing.T) {
 		t.Fatalf("expected filtered patch to be empty")
 	}
 }
+
+func TestFilterExistingNewFilesPreHeaderLinesDiscarded(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "existing.txt"), []byte("data\n"), 0o644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	// Patch with leading comment lines before the first diff header.
+	// When the new-file block is skipped (identical content), the pre-header
+	// lines must also be discarded — they don't belong to any diff block.
+	patch := strings.Join([]string{
+		"# some comment",
+		"# another comment",
+		"diff --git a/existing.txt b/existing.txt",
+		"new file mode 100644",
+		"index 0000000..e69de29",
+		"--- /dev/null",
+		"+++ b/existing.txt",
+		"@@ -0,0 +1 @@",
+		"+data",
+		"",
+	}, "\n")
+	filtered, skipped, err := FilterExistingNewFiles([]byte(patch), dir)
+	if err != nil {
+		t.Fatalf("filter existing new files: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0] != "existing.txt" {
+		t.Fatalf("expected existing.txt skipped, got %v", skipped)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("expected filtered patch to be empty, got %q", string(filtered))
+	}
+}
+
+func TestParsePatchBlocksIgnoresPreHeaderLines(t *testing.T) {
+	lines := splitLinesKeepEOL(strings.Join([]string{
+		"# leading comment",
+		"some preamble text",
+		"diff --git a/foo.txt b/foo.txt",
+		"new file mode 100644",
+		"--- /dev/null",
+		"+++ b/foo.txt",
+		"@@ -0,0 +1 @@",
+		"+hello",
+		"",
+	}, "\n"))
+	blocks := parsePatchBlocks(lines)
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blocks))
+	}
+	if blocks[0].path != "foo.txt" {
+		t.Fatalf("expected path foo.txt, got %q", blocks[0].path)
+	}
+}

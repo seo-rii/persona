@@ -223,17 +223,18 @@ type patchBlock struct {
 func parsePatchBlocks(lines []string) []patchBlock {
 	var blocks []patchBlock
 	var current patchBlock
+	seenDiff := false
 	for _, line := range lines {
 		raw := trimLine(line)
-		if strings.HasPrefix(raw, "diff --git ") {
-			if len(current.lines) > 0 {
+		if strings.HasPrefix(raw, "diff --git ") || raw == "diff --git" {
+			if seenDiff && len(current.lines) > 0 {
 				blocks = append(blocks, current)
 			}
+			seenDiff = true
 			current = patchBlock{lines: []string{line}, path: parseDiffGitPath(raw)}
 			continue
 		}
-		if current.lines == nil {
-			current.lines = append(current.lines, line)
+		if !seenDiff {
 			continue
 		}
 		current.lines = append(current.lines, line)
