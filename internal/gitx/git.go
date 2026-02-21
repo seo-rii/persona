@@ -18,6 +18,15 @@ type Git struct {
 	Verbose  bool
 }
 
+// Compile-time check that Git satisfies model.GitOps.
+var _ model.GitOps = (*Git)(nil)
+
+// RepoRootPath returns the repository root directory.
+func (g *Git) RepoRootPath() string { return g.RepoRoot }
+
+// GitDirPath returns the .git directory path.
+func (g *Git) GitDirPath() string { return g.GitDir }
+
 func DetectRepo(ctx context.Context, cwd string) (string, string, error) {
 	env := filterEnv(os.Environ(), "GIT_WORK_TREE", "GIT_DIR")
 	repoRoot, err := gitOutput(ctx, cwd, env, "git", "rev-parse", "--show-toplevel")

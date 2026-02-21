@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"persona/internal/gitx"
 	"persona/internal/model"
+	"persona/internal/testutil"
 )
 
 func TestIsSubpathInsideWithDotDotPrefixName(t *testing.T) {
@@ -375,12 +375,12 @@ func TestResolvePath(t *testing.T) {
 }
 
 func TestExportPatchSortAndExclude(t *testing.T) {
-	repo := initMainTestRepo(t)
-	writeMainTestFile(t, filepath.Join(repo, "b.txt"), "b\n")
-	writeMainTestFile(t, filepath.Join(repo, "a.txt"), "a\n")
-	writeMainTestFile(t, filepath.Join(repo, "state.patch"), "seed\n")
+	repo := testutil.InitRepo(t)
+	testutil.WriteFile(t, filepath.Join(repo, "b.txt"), "b\n")
+	testutil.WriteFile(t, filepath.Join(repo, "a.txt"), "a\n")
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
-	g := gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 	patch1, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch")
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
@@ -410,10 +410,10 @@ func TestExportPatchSortAndExclude(t *testing.T) {
 }
 
 func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
-	repo := initMainTestRepo(t)
-	writeMainTestFile(t, filepath.Join(repo, "state.patch"), "seed\n")
+	repo := testutil.InitRepo(t)
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
-	g := gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, false, "")
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
@@ -423,32 +423,4 @@ func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
 	}
 }
 
-func initMainTestRepo(t *testing.T) string {
-	dir := t.TempDir()
-	runMainTestCmd(t, dir, "git", "init")
-	runMainTestCmd(t, dir, "git", "config", "user.email", "you@example.com")
-	runMainTestCmd(t, dir, "git", "config", "user.name", "You")
-	writeMainTestFile(t, filepath.Join(dir, "tracked.txt"), "base\n")
-	runMainTestCmd(t, dir, "git", "add", "tracked.txt")
-	runMainTestCmd(t, dir, "git", "commit", "-m", "init")
-	return dir
-}
 
-func writeMainTestFile(t *testing.T, path, data string) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir parent: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-}
-
-func runMainTestCmd(t *testing.T, dir, name string, args ...string) string {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("command failed: %s %v: %v: %s", name, args, err, string(out))
-	}
-	return string(out)
-}

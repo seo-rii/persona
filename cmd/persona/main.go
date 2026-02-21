@@ -95,7 +95,8 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		fmt.Fprintf(os.Stderr, "[persona] "+format+"\n", args...)
 	}
 
-	g := gitx.Git{RepoRoot: repoRoot, GitDir: gitDir, Verbose: opts.Verbose}
+	var g model.GitOps = &gitx.Git{RepoRoot: repoRoot, GitDir: gitDir, Verbose: opts.Verbose}
+	var mount model.NSOps = ns.RealNS{}
 
 	patchPath, err := patchio.EnsurePatchPath(opts, gitDir, time.Now())
 	if err != nil {
@@ -173,15 +174,15 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if err := ns.UnshareMountNS(); err != nil {
+	if err := mount.UnshareMountNS(); err != nil {
 		reportPermissionHint("unshare mount namespace", err)
 		return model.Wrap(model.ExitEnv, "unshare mount namespace", err), 0
 	}
-	if err := ns.MakeMountsPrivate(); err != nil {
+	if err := mount.MakeMountsPrivate(); err != nil {
 		return model.Wrap(model.ExitEnv, "make mounts private", err), 0
 	}
 
-	menv, err := setupMountEnv(repoRoot, gitDir, basePath, sess, cleanup, logf)
+	menv, err := setupMountEnv(repoRoot, gitDir, basePath, sess, mount, cleanup, logf)
 	if err != nil {
 		return err, 0
 	}
@@ -190,7 +191,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	cleanup.Push(func() error {
 		var errs []error
 		for i := len(maskTargets) - 1; i >= 0; i-- {
-			if err := ns.Umount(maskTargets[i]); err != nil {
+			if err := mount.Umount(maskTargets[i]); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -200,10 +201,10 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		if err := os.Chdir("/"); err != nil {
 			return err
 		}
-		return ns.Umount(repoRoot)
+		return mount.Umount(repoRoot)
 	})
 
-	ignoredMasks, err := maskIgnoredFiles(ctx, g, repoRoot, menv.gitDirForOps, menv.emptyFile, menv.emptyDir, opts, logf)
+	ignoredMasks, err := maskIgnoredFiles(ctx, g, repoRoot, menv.gitDirForOps, menv.emptyFile, menv.emptyDir, opts, mount, logf)
 	if err != nil {
 		return model.Wrap(model.ExitEnv, "mask ignored files", err), 0
 	}
@@ -216,7 +217,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	var patchMaskPath string
 	if patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git" {
 		patchMaskPath = filepath.Join(repoRoot, patchRel)
-		if err := ns.MaskPath(patchMaskPath, ns.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
+		if err := mount.MaskPath(patchMaskPath, model.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
 			return model.Wrap(model.ExitEnv, "mask patch file", err), 0
 		}
 		maskTargets = append(maskTargets, patchMaskPath)
@@ -225,11 +226,11 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	var gitMaskPath string
 	gitPath := filepath.Join(repoRoot, ".git")
 	if info, err := os.Lstat(gitPath); err == nil {
-		kind := ns.MaskDir
+		kind := model.MaskDir
 		if !info.IsDir() {
-			kind = ns.MaskFile
+			kind = model.MaskFile
 		}
-		if err := ns.MaskPath(gitPath, kind, menv.emptyFile, menv.emptyDir); err != nil {
+		if err := mount.MaskPath(gitPath, kind, menv.emptyFile, menv.emptyDir); err != nil {
 			return model.Wrap(model.ExitEnv, "mask .git", err), 0
 		}
 		gitMaskPath = gitPath
@@ -243,10 +244,10 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	postCtx := context.Background()
 
 	if patchMaskPath != "" {
-		_ = ns.Umount(patchMaskPath)
+		_ = mount.Umount(patchMaskPath)
 	}
 	if gitMaskPath != "" {
-		_ = ns.Umount(gitMaskPath)
+		_ = mount.Umount(gitMaskPath)
 	}
 
 	patchOut, err := exportPatch(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel)
@@ -267,7 +268,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 
 // prepareBase sets up the base layer: either the current repo (with an
 // optional dirty check) or a detached worktree at the requested ref.
-func prepareBase(ctx context.Context, g gitx.Git, opts model.Options, sess *session.Session, patchInRepo bool, patchRel string, cleanup *cleanupStack) (basePath string, err error) {
+func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *session.Session, patchInRepo bool, patchRel string, cleanup *cleanupStack) (basePath string, err error) {
 	switch opts.BaseMode {
 	case model.BaseRepo:
 		if !opts.AllowDirty {
@@ -283,7 +284,7 @@ func prepareBase(ctx context.Context, g gitx.Git, opts model.Options, sess *sess
 				return "", model.Wrap(model.ExitRepo, "repository is dirty", fmt.Errorf("uncommitted changes exist"))
 			}
 		}
-		return g.RepoRoot, nil
+		return g.RepoRootPath(), nil
 	case model.BaseWorktree:
 		if err := g.WorktreeAddDetach(ctx, sess.BaseWT, opts.BaseRef); err != nil {
 			return "", model.Wrap(model.ExitRepo, "git worktree add", err)
@@ -307,7 +308,7 @@ type mountEnv struct {
 // setupMountEnv creates the external temp dirs, bind-mounts the git dir and
 // base layer, and mounts the overlay.  All mounts are registered on the
 // cleanup stack for teardown.
-func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, cleanup *cleanupStack, logf func(string, ...any)) (*mountEnv, error) {
+func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mount model.NSOps, cleanup *cleanupStack, logf func(string, ...any)) (*mountEnv, error) {
 	extRoot, err := os.MkdirTemp("", "persona-session-")
 	if err != nil {
 		return nil, model.Wrap(model.ExitEnv, "create external session dir", err)
@@ -331,22 +332,22 @@ func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, cle
 	}
 	f.Close()
 
-	if err := ns.BindMount(gitDir, env.gitDirForOps); err != nil {
+	if err := mount.BindMount(gitDir, env.gitDirForOps); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "bind mount external gitdir", err)
 	}
-	cleanup.Push(func() error { return ns.Umount(env.gitDirForOps) })
+	cleanup.Push(func() error { return mount.Umount(env.gitDirForOps) })
 
-	if err := ns.BindMount(basePath, sess.MntBase); err != nil {
+	if err := mount.BindMount(basePath, sess.MntBase); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "bind mount base", err)
 	}
-	cleanup.Push(func() error { return ns.Umount(sess.MntBase) })
-	if err := ns.RemountRO(sess.MntBase); err != nil {
+	cleanup.Push(func() error { return mount.Umount(sess.MntBase) })
+	if err := mount.RemountRO(sess.MntBase); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "remount base ro", err)
 	}
 
 	logf("gitdir-for-ops=%s", env.gitDirForOps)
 
-	if err := ns.MountOverlay(repoRoot, ns.OverlayOpts{LowerDir: sess.MntBase, UpperDir: sess.Upper, WorkDir: sess.Work}); err != nil {
+	if err := mount.MountOverlay(repoRoot, model.OverlayOpts{LowerDir: sess.MntBase, UpperDir: sess.Upper, WorkDir: sess.Work}); err != nil {
 		reportPermissionHint("mount overlay", err)
 		return nil, model.Wrap(model.ExitEnv, "mount overlay", err)
 	}
@@ -358,7 +359,7 @@ func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, cle
 // applyPatchData validates and applies patchData to the overlay.
 // If the initial apply fails due to already-existing new files, it retries
 // with those files filtered out.
-func applyPatchData(ctx context.Context, g gitx.Git, applyMode model.ApplyMode, patchData []byte, repoRoot, gitDirForOps string, logf func(string, ...any)) error {
+func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMode, patchData []byte, repoRoot, gitDirForOps string, logf func(string, ...any)) error {
 	if len(patchData) == 0 {
 		return nil
 	}
@@ -388,7 +389,7 @@ func applyPatchData(ctx context.Context, g gitx.Git, applyMode model.ApplyMode, 
 
 // maskIgnoredFiles applies the configured ignored-file policy (readonly bind
 // mount or empty-file/dir mask) and returns the list of mount targets created.
-func maskIgnoredFiles(ctx context.Context, g gitx.Git, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, logf func(string, ...any)) ([]string, error) {
+func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, mount model.NSOps, logf func(string, ...any)) ([]string, error) {
 	if opts.IgnoredMode == model.IgnoredTransparent {
 		return nil, nil
 	}
@@ -402,10 +403,10 @@ func maskIgnoredFiles(ctx context.Context, g gitx.Git, repoRoot, gitDirForOps, e
 		target := filepath.Join(repoRoot, filepath.FromSlash(path))
 		switch opts.IgnoredMode {
 		case model.IgnoredReadonly:
-			if err := ns.BindMount(target, target); err != nil {
+			if err := mount.BindMount(target, target); err != nil {
 				return targets, fmt.Errorf("bind mount ignored readonly %s: %w", path, err)
 			}
-			if err := ns.RemountRO(target); err != nil {
+			if err := mount.RemountRO(target); err != nil {
 				return targets, fmt.Errorf("remount ignored readonly %s: %w", path, err)
 			}
 			targets = append(targets, target)
@@ -414,11 +415,11 @@ func maskIgnoredFiles(ctx context.Context, g gitx.Git, repoRoot, gitDirForOps, e
 			if err != nil {
 				continue
 			}
-			kind := ns.MaskDir
+			kind := model.MaskDir
 			if !info.IsDir() {
-				kind = ns.MaskFile
+				kind = model.MaskFile
 			}
-			if err := ns.MaskPath(target, kind, extEmptyFile, extEmptyDir); err != nil {
+			if err := mount.MaskPath(target, kind, extEmptyFile, extEmptyDir); err != nil {
 				return targets, fmt.Errorf("mask ignored %s: %w", path, err)
 			}
 			targets = append(targets, target)
@@ -612,7 +613,7 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 	return 127
 }
 
-func exportPatch(ctx context.Context, g gitx.Git, repoRoot, gitDir string, patchInRepo bool, patchRel string) ([]byte, error) {
+func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string) ([]byte, error) {
 	tracked, err := g.DiffHeadBinary(ctx, repoRoot, gitDir)
 	if err != nil {
 		return nil, err
