@@ -278,6 +278,42 @@ func TestShouldRemoveSession(t *testing.T) {
 	}
 }
 
+func TestShouldForceMountFail(t *testing.T) {
+	prev, hadPrev := os.LookupEnv(forceMountFailEnv)
+	t.Cleanup(func() {
+		if hadPrev {
+			if err := os.Setenv(forceMountFailEnv, prev); err != nil {
+				t.Fatalf("restore env: %v", err)
+			}
+			return
+		}
+		if err := os.Unsetenv(forceMountFailEnv); err != nil {
+			t.Fatalf("unset env: %v", err)
+		}
+	})
+
+	if err := os.Unsetenv(forceMountFailEnv); err != nil {
+		t.Fatalf("unset env: %v", err)
+	}
+	if shouldForceMountFail() {
+		t.Fatalf("expected false when env is unset")
+	}
+
+	if err := os.Setenv(forceMountFailEnv, "0"); err != nil {
+		t.Fatalf("set env: %v", err)
+	}
+	if shouldForceMountFail() {
+		t.Fatalf("expected false when env is not 1")
+	}
+
+	if err := os.Setenv(forceMountFailEnv, "1"); err != nil {
+		t.Fatalf("set env: %v", err)
+	}
+	if !shouldForceMountFail() {
+		t.Fatalf("expected true when env is 1")
+	}
+}
+
 func TestCleanupStackRunOrderAndErrors(t *testing.T) {
 	var c cleanupStack
 	var order []int
@@ -422,5 +458,3 @@ func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
 		t.Fatalf("expected state.patch to be included when not excluded")
 	}
 }
-
-

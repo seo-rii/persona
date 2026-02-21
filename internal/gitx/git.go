@@ -247,6 +247,19 @@ func (g Git) envWith(workTree, gitDir string) []string {
 	return base
 }
 
+// maxErrOutput is the maximum number of bytes from command output included
+// in error messages.  Anything beyond this limit is truncated with a hint.
+const maxErrOutput = 512
+
+// truncateOutput clips msg to at most maxErrOutput bytes, appending a
+// truncation marker when the original was longer.
+func truncateOutput(msg string) string {
+	if len(msg) <= maxErrOutput {
+		return msg
+	}
+	return msg[:maxErrOutput] + "... (truncated)"
+}
+
 func (g Git) gitRun(ctx context.Context, dir string, env []string, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
@@ -261,7 +274,7 @@ func (g Git) gitRun(ctx context.Context, dir string, env []string, name string, 
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(out))
+		return fmt.Errorf("%w: %s", err, truncateOutput(string(out)))
 	}
 	return nil
 }
@@ -299,7 +312,7 @@ func (g Git) gitRunWithInput(ctx context.Context, dir string, env []string, inpu
 		_, _ = os.Stderr.Write(out)
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(out))
+		return fmt.Errorf("%w: %s", err, truncateOutput(string(out)))
 	}
 	return nil
 }
@@ -315,7 +328,7 @@ func (g Git) gitOutputBytes(ctx context.Context, dir string, env []string, name 
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", err, stderr.String())
+		return nil, fmt.Errorf("%w: %s", err, truncateOutput(stderr.String()))
 	}
 	return out, nil
 }
@@ -334,7 +347,7 @@ func (g Git) gitDiffOutputBytes(ctx context.Context, dir string, env []string, n
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return out, nil
 		}
-		return nil, fmt.Errorf("%w: %s", err, stderr.String())
+		return nil, fmt.Errorf("%w: %s", err, truncateOutput(stderr.String()))
 	}
 	return out, nil
 }
@@ -347,7 +360,7 @@ func gitOutput(ctx context.Context, dir string, env []string, name string, args 
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("%w: %s", err, stderr.String())
+		return "", fmt.Errorf("%w: %s", err, truncateOutput(stderr.String()))
 	}
 	return string(bytes.TrimSpace(out)), nil
 }
