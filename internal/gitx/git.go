@@ -2,6 +2,7 @@ package gitx
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,13 +18,13 @@ type Git struct {
 	Verbose  bool
 }
 
-func DetectRepo(cwd string) (string, string, error) {
+func DetectRepo(ctx context.Context, cwd string) (string, string, error) {
 	env := filterEnv(os.Environ(), "GIT_WORK_TREE", "GIT_DIR")
-	repoRoot, err := gitOutput(cwd, env, "git", "rev-parse", "--show-toplevel")
+	repoRoot, err := gitOutput(ctx, cwd, env, "git", "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", "", err
 	}
-	gitDir, err := gitOutput(cwd, env, "git", "rev-parse", "--git-dir")
+	gitDir, err := gitOutput(ctx, cwd, env, "git", "rev-parse", "--git-dir")
 	if err != nil {
 		return "", "", err
 	}
@@ -38,20 +39,20 @@ func DetectRepo(cwd string) (string, string, error) {
 	return repoRoot, gitDir, nil
 }
 
-func (g Git) IsClean() (bool, error) {
-	return g.IsCleanExceptUntracked(nil)
+func (g Git) IsClean(ctx context.Context) (bool, error) {
+	return g.IsCleanExceptUntracked(ctx, nil)
 }
 
-func (g Git) IsCleanExceptUntracked(ignoreUntracked []string) (bool, error) {
-	clean, err := g.diffQuiet()
+func (g Git) IsCleanExceptUntracked(ctx context.Context, ignoreUntracked []string) (bool, error) {
+	clean, err := g.diffQuiet(ctx)
 	if err != nil || !clean {
 		return clean, err
 	}
-	clean, err = g.diffCachedQuiet()
+	clean, err = g.diffCachedQuiet(ctx)
 	if err != nil || !clean {
 		return clean, err
 	}
-	hasUntracked, err := g.hasUntrackedExcept(ignoreUntracked)
+	hasUntracked, err := g.hasUntrackedExcept(ctx, ignoreUntracked)
 	if err != nil {
 		return false, err
 	}
@@ -61,8 +62,8 @@ func (g Git) IsCleanExceptUntracked(ignoreUntracked []string) (bool, error) {
 	return true, nil
 }
 
-func (g Git) hasUntrackedExcept(ignoreUntracked []string) (bool, error) {
-	out, err := g.gitOutputBytes(g.RepoRoot, g.env(), "git", "ls-files", "-o", "--exclude-standard", "-z")
+func (g Git) hasUntrackedExcept(ctx context.Context, ignoreUntracked []string) (bool, error) {
+	out, err := g.gitOutputBytes(ctx, g.RepoRoot, g.env(), "git", "ls-files", "-o", "--exclude-standard", "-z")
 	if err != nil {
 		return false, err
 	}
@@ -87,16 +88,16 @@ func (g Git) hasUntrackedExcept(ignoreUntracked []string) (bool, error) {
 	return false, nil
 }
 
-func (g Git) diffQuiet() (bool, error) {
-	return g.runQuiet("git", "diff", "--quiet")
+func (g Git) diffQuiet(ctx context.Context) (bool, error) {
+	return g.runQuiet(ctx, "git", "diff", "--quiet")
 }
 
-func (g Git) diffCachedQuiet() (bool, error) {
-	return g.runQuiet("git", "diff", "--cached", "--quiet")
+func (g Git) diffCachedQuiet(ctx context.Context) (bool, error) {
+	return g.runQuiet(ctx, "git", "diff", "--cached", "--quiet")
 }
 
-func (g Git) runQuiet(name string, args ...string) (bool, error) {
-	cmd := exec.Command(name, args...)
+func (g Git) runQuiet(ctx context.Context, name string, args ...string) (bool, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = g.RepoRoot
 	cmd.Env = g.env()
 	if err := cmd.Run(); err != nil {
@@ -110,25 +111,25 @@ func (g Git) runQuiet(name string, args ...string) (bool, error) {
 	return true, nil
 }
 
-func (g Git) WorktreeAddDetach(path, ref string) error {
-	return g.gitRun(g.RepoRoot, g.env(), "git", "worktree", "add", "--detach", path, ref)
+func (g Git) WorktreeAddDetach(ctx context.Context, path, ref string) error {
+	return g.gitRun(ctx, g.RepoRoot, g.env(), "git", "worktree", "add", "--detach", path, ref)
 }
 
-func (g Git) WorktreeRemoveForce(path string) error {
-	return g.gitRun(g.RepoRoot, g.env(), "git", "worktree", "remove", "--force", path)
+func (g Git) WorktreeRemoveForce(ctx context.Context, path string) error {
+	return g.gitRun(ctx, g.RepoRoot, g.env(), "git", "worktree", "remove", "--force", path)
 }
 
-func (g Git) ApplyPatch(mode model.ApplyMode, workTree, gitDir string, patchData []byte) error {
+func (g Git) ApplyPatch(ctx context.Context, mode model.ApplyMode, workTree, gitDir string, patchData []byte) error {
 	args := g.withDirArgs(workTree, gitDir, "apply", "--whitespace=nowarn")
 	if mode == model.ApplyReject {
 		args = append(args, "--reject")
 	}
 	args = append(args, "-")
-	return g.gitRunWithInput(workTree, g.envWith(workTree, gitDir), patchData, "git", args...)
+	return g.gitRunWithInput(ctx, workTree, g.envWith(workTree, gitDir), patchData, "git", args...)
 }
 
-func (g Git) DiffHeadBinary(workTree, gitDir string) ([]byte, error) {
-	hasHead, err := g.hasHead(workTree, gitDir)
+func (g Git) DiffHeadBinary(ctx context.Context, workTree, gitDir string) ([]byte, error) {
+	hasHead, err := g.hasHead(ctx, workTree, gitDir)
 	if err != nil {
 		return nil, err
 	}
@@ -136,26 +137,26 @@ func (g Git) DiffHeadBinary(workTree, gitDir string) ([]byte, error) {
 		return nil, nil
 	}
 	args := g.withDirArgs(workTree, gitDir, "-c", "core.quotepath=false", "diff", "--binary", "--full-index", "-M", "--no-ext-diff", "HEAD")
-	return g.gitDiffOutputBytes(workTree, g.envWith(workTree, gitDir), "git", args...)
+	return g.gitDiffOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
 }
 
-func (g Git) ListUntracked(workTree, gitDir string) ([]string, error) {
+func (g Git) ListUntracked(ctx context.Context, workTree, gitDir string) ([]string, error) {
 	args := g.withDirArgs(workTree, gitDir, "ls-files", "-o", "--exclude-standard", "-z")
-	out, err := g.gitOutputBytes(workTree, g.envWith(workTree, gitDir), "git", args...)
+	out, err := g.gitOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
 	if err != nil {
 		return nil, err
 	}
 	return splitNullList(out), nil
 }
 
-func (g Git) DiffNewFileNoIndex(workTree, gitDir, relPath string) ([]byte, error) {
+func (g Git) DiffNewFileNoIndex(ctx context.Context, workTree, gitDir, relPath string) ([]byte, error) {
 	args := g.withDirArgs(workTree, gitDir, "-c", "core.quotepath=false", "diff", "--no-index", "--binary", "--", "/dev/null", relPath)
-	return g.gitDiffOutputBytes(workTree, g.envWith(workTree, gitDir), "git", args...)
+	return g.gitDiffOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
 }
 
-func (g Git) ListIgnoredCandidates(workTree, gitDir string, maxN int) ([]string, error) {
+func (g Git) ListIgnoredCandidates(ctx context.Context, workTree, gitDir string, maxN int) ([]string, error) {
 	args := g.withDirArgs(workTree, gitDir, "status", "--porcelain=v1", "-z", "--ignored=matching")
-	out, err := g.gitOutputBytes(workTree, g.envWith(workTree, gitDir), "git", args...)
+	out, err := g.gitOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -179,9 +180,9 @@ func (g Git) ListIgnoredCandidates(workTree, gitDir string, maxN int) ([]string,
 	return result, nil
 }
 
-func (g Git) hasHead(workTree, gitDir string) (bool, error) {
+func (g Git) hasHead(ctx context.Context, workTree, gitDir string) (bool, error) {
 	args := g.withDirArgs(workTree, gitDir, "rev-parse", "--verify", "HEAD")
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.RepoRoot
 	cmd.Env = g.envWith(workTree, gitDir)
 	if err := cmd.Run(); err != nil {
@@ -237,8 +238,8 @@ func (g Git) envWith(workTree, gitDir string) []string {
 	return base
 }
 
-func (g Git) gitRun(dir string, env []string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+func (g Git) gitRun(ctx context.Context, dir string, env []string, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	if g.Verbose {
@@ -276,8 +277,8 @@ func filterEnv(env []string, keys ...string) []string {
 	return out
 }
 
-func (g Git) gitRunWithInput(dir string, env []string, input []byte, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+func (g Git) gitRunWithInput(ctx context.Context, dir string, env []string, input []byte, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdin = bytes.NewReader(input)
@@ -294,8 +295,8 @@ func (g Git) gitRunWithInput(dir string, env []string, input []byte, name string
 	return nil
 }
 
-func (g Git) gitOutputBytes(dir string, env []string, name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
+func (g Git) gitOutputBytes(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	var stderr bytes.Buffer
@@ -310,8 +311,8 @@ func (g Git) gitOutputBytes(dir string, env []string, name string, args ...strin
 	return out, nil
 }
 
-func (g Git) gitDiffOutputBytes(dir string, env []string, name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
+func (g Git) gitDiffOutputBytes(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	var stderr bytes.Buffer
@@ -329,8 +330,8 @@ func (g Git) gitDiffOutputBytes(dir string, env []string, name string, args ...s
 	return out, nil
 }
 
-func gitOutput(dir string, env []string, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+func gitOutput(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	var stderr bytes.Buffer

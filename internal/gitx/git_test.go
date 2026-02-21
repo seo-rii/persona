@@ -1,6 +1,7 @@
 package gitx
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +15,7 @@ func TestIsClean(t *testing.T) {
 	repo := initRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 
-	clean, err := g.IsClean()
+	clean, err := g.IsClean(context.Background())
 	if err != nil {
 		t.Fatalf("IsClean error: %v", err)
 	}
@@ -23,7 +24,7 @@ func TestIsClean(t *testing.T) {
 	}
 
 	writeFile(t, filepath.Join(repo, "untracked.txt"), "dirty\n")
-	clean, err = g.IsClean()
+	clean, err = g.IsClean(context.Background())
 	if err != nil {
 		t.Fatalf("IsClean error with untracked file: %v", err)
 	}
@@ -35,7 +36,7 @@ func TestIsClean(t *testing.T) {
 	}
 
 	writeFile(t, filepath.Join(repo, "tracked.txt"), "dirty\n")
-	clean, err = g.IsClean()
+	clean, err = g.IsClean(context.Background())
 	if err != nil {
 		t.Fatalf("IsClean error on dirty repo: %v", err)
 	}
@@ -50,7 +51,7 @@ func TestIsCleanExceptUntracked(t *testing.T) {
 
 	writeFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
-	clean, err := g.IsCleanExceptUntracked([]string{"state.patch"})
+	clean, err := g.IsCleanExceptUntracked(context.Background(), []string{"state.patch"})
 	if err != nil {
 		t.Fatalf("IsCleanExceptUntracked error: %v", err)
 	}
@@ -58,7 +59,7 @@ func TestIsCleanExceptUntracked(t *testing.T) {
 		t.Fatalf("expected clean when excluded untracked path is the only change")
 	}
 
-	clean, err = g.IsCleanExceptUntracked([]string{"other.patch"})
+	clean, err = g.IsCleanExceptUntracked(context.Background(), []string{"other.patch"})
 	if err != nil {
 		t.Fatalf("IsCleanExceptUntracked error with non-matching exclude: %v", err)
 	}
@@ -76,7 +77,7 @@ func TestListIgnoredCandidates(t *testing.T) {
 	runCmd(t, repo, "git", "commit", "-m", "ignore")
 
 	writeFile(t, filepath.Join(repo, "ignored.txt"), "skip\n")
-	ignored, err := g.ListIgnoredCandidates(repo, g.GitDir, 10)
+	ignored, err := g.ListIgnoredCandidates(context.Background(), repo, g.GitDir, 10)
 	if err != nil {
 		t.Fatalf("ListIgnoredCandidates error: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestDiffNewFileNoIndex(t *testing.T) {
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 
 	writeFile(t, filepath.Join(repo, "new.txt"), "hello\n")
-	patch, err := g.DiffNewFileNoIndex(repo, g.GitDir, "new.txt")
+	patch, err := g.DiffNewFileNoIndex(context.Background(), repo, g.GitDir, "new.txt")
 	if err != nil {
 		t.Fatalf("DiffNewFileNoIndex error: %v", err)
 	}
@@ -114,7 +115,7 @@ func TestDiffHeadBinary(t *testing.T) {
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 
 	writeFile(t, filepath.Join(repo, "tracked.txt"), "changed\n")
-	patch, err := g.DiffHeadBinary(repo, g.GitDir)
+	patch, err := g.DiffHeadBinary(context.Background(), repo, g.GitDir)
 	if err != nil {
 		t.Fatalf("DiffHeadBinary error: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestDiffHeadBinaryNoHead(t *testing.T) {
 	repo := initEmptyRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 
-	patch, err := g.DiffHeadBinary(repo, g.GitDir)
+	patch, err := g.DiffHeadBinary(context.Background(), repo, g.GitDir)
 	if err != nil {
 		t.Fatalf("DiffHeadBinary error: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestDetectRepoIgnoresEnv(t *testing.T) {
 	t.Setenv("GIT_DIR", "/tmp/nogit")
 	t.Setenv("GIT_WORK_TREE", "/tmp/nogit")
 
-	root, gitDir, err := DetectRepo(repo)
+	root, gitDir, err := DetectRepo(context.Background(), repo)
 	if err != nil {
 		t.Fatalf("DetectRepo error: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestListUntracked(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(repo, "dir", "b.txt"), "b\n")
 
-	paths, err := g.ListUntracked(repo, g.GitDir)
+	paths, err := g.ListUntracked(context.Background(), repo, g.GitDir)
 	if err != nil {
 		t.Fatalf("ListUntracked error: %v", err)
 	}
@@ -188,7 +189,7 @@ func TestApplyPatchStrictSuccess(t *testing.T) {
 		"",
 	}, "\n")
 
-	if err := g.ApplyPatch(model.ApplyStrict, repo, g.GitDir, []byte(patch)); err != nil {
+	if err := g.ApplyPatch(context.Background(), model.ApplyStrict, repo, g.GitDir, []byte(patch)); err != nil {
 		t.Fatalf("ApplyPatch strict error: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(repo, "new.txt"))
@@ -215,7 +216,7 @@ func TestApplyPatchStrictFailure(t *testing.T) {
 		"",
 	}, "\n")
 
-	if err := g.ApplyPatch(model.ApplyStrict, repo, g.GitDir, []byte(patch)); err == nil {
+	if err := g.ApplyPatch(context.Background(), model.ApplyStrict, repo, g.GitDir, []byte(patch)); err == nil {
 		t.Fatalf("expected strict apply failure")
 	}
 }
@@ -235,7 +236,7 @@ func TestApplyPatchRejectFailure(t *testing.T) {
 		"",
 	}, "\n")
 
-	if err := g.ApplyPatch(model.ApplyReject, repo, g.GitDir, []byte(patch)); err == nil {
+	if err := g.ApplyPatch(context.Background(), model.ApplyReject, repo, g.GitDir, []byte(patch)); err == nil {
 		t.Fatalf("expected reject apply failure")
 	}
 }
@@ -245,13 +246,13 @@ func TestWorktreeAddDetachAndRemoveForce(t *testing.T) {
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 	wt := filepath.Join(t.TempDir(), "wt")
 
-	if err := g.WorktreeAddDetach(wt, "HEAD"); err != nil {
+	if err := g.WorktreeAddDetach(context.Background(), wt, "HEAD"); err != nil {
 		t.Fatalf("WorktreeAddDetach error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(wt, "tracked.txt")); err != nil {
 		t.Fatalf("expected tracked.txt in worktree: %v", err)
 	}
-	if err := g.WorktreeRemoveForce(wt); err != nil {
+	if err := g.WorktreeRemoveForce(context.Background(), wt); err != nil {
 		t.Fatalf("WorktreeRemoveForce error: %v", err)
 	}
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -378,7 +379,7 @@ func TestExportPatchSortAndExclude(t *testing.T) {
 	writeMainTestFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
 	g := gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch1, err := exportPatch(g, repo, g.GitDir, true, "state.patch")
+	patch1, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch")
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -397,7 +398,7 @@ func TestExportPatchSortAndExclude(t *testing.T) {
 		t.Fatalf("unexpected .git path in patch")
 	}
 
-	patch2, err := exportPatch(g, repo, g.GitDir, true, "state.patch")
+	patch2, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch")
 	if err != nil {
 		t.Fatalf("exportPatch second call error: %v", err)
 	}
@@ -411,7 +412,7 @@ func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
 	writeMainTestFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
 	g := gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch, err := exportPatch(g, repo, g.GitDir, false, "")
+	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, false, "")
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}

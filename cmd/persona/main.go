@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -72,14 +73,14 @@ func (e *exitError) Error() string {
 	return ""
 }
 
-func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int) {
+func runWithOptions(ctx context.Context, opts model.Options) (exitCode model.ExitCode, childCode int) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return model.ExitEnv, 0
 	}
 
-	repoRoot, gitDir, err := gitx.DetectRepo(cwd)
+	repoRoot, gitDir, err := gitx.DetectRepo(ctx, cwd)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return model.ExitRepo, 0
@@ -188,7 +189,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int)
 			if patchInRepo && patchRel != "" && patchRel != "." {
 				ignoreUntracked = append(ignoreUntracked, patchRel)
 			}
-			clean, err := g.IsCleanExceptUntracked(ignoreUntracked)
+			clean, err := g.IsCleanExceptUntracked(ctx, ignoreUntracked)
 			if err != nil {
 				reportErr("git clean check", err)
 				return model.ExitRepo, 0
@@ -199,14 +200,14 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int)
 			}
 		}
 	} else if opts.BaseMode == model.BaseWorktree {
-		if err := g.WorktreeAddDetach(sess.BaseWT, opts.BaseRef); err != nil {
+		if err := g.WorktreeAddDetach(ctx, sess.BaseWT, opts.BaseRef); err != nil {
 			reportErr("git worktree add", err)
 			return model.ExitRepo, 0
 		}
 		worktreeAdded = true
 		cleanup.Push(func() error {
 			if worktreeAdded {
-				return g.WorktreeRemoveForce(sess.BaseWT)
+				return g.WorktreeRemoveForce(context.Background(), sess.BaseWT)
 			}
 			return nil
 		})
@@ -304,14 +305,14 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int)
 		return ns.Umount(repoRoot)
 	})
 
-	ignoredMasks, err := maskIgnoredFiles(g, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir, opts, logf)
+	ignoredMasks, err := maskIgnoredFiles(ctx, g, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir, opts, logf)
 	if err != nil {
 		reportErr("mask ignored files", err)
 		return model.ExitEnv, 0
 	}
 	maskTargets = append(maskTargets, ignoredMasks...)
 
-	if err := applyPatchData(g, opts.ApplyMode, patchData, repoRoot, gitDirForOps, logf); err != nil {
+	if err := applyPatchData(ctx, g, opts.ApplyMode, patchData, repoRoot, gitDirForOps, logf); err != nil {
 		reportErr("apply patch", err)
 		return model.ExitApply, 0
 	}
@@ -350,7 +351,7 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int)
 		_ = ns.Umount(gitMaskPath)
 	}
 
-	patchOut, err := exportPatch(g, repoRoot, gitDirForOps, patchInRepo, patchRel)
+	patchOut, err := exportPatch(ctx, g, repoRoot, gitDirForOps, patchInRepo, patchRel)
 	if err != nil {
 		reportErr("export patch", err)
 		return model.ExitExport, 0
@@ -371,14 +372,14 @@ func runWithOptions(opts model.Options) (exitCode model.ExitCode, childCode int)
 // applyPatchData validates and applies patchData to the overlay.
 // If the initial apply fails due to already-existing new files, it retries
 // with those files filtered out.
-func applyPatchData(g gitx.Git, applyMode model.ApplyMode, patchData []byte, repoRoot, gitDirForOps string, logf func(string, ...any)) error {
+func applyPatchData(ctx context.Context, g gitx.Git, applyMode model.ApplyMode, patchData []byte, repoRoot, gitDirForOps string, logf func(string, ...any)) error {
 	if len(patchData) == 0 {
 		return nil
 	}
 	if err := patchio.ValidatePatchPaths(patchData); err != nil {
 		return err
 	}
-	err := g.ApplyPatch(applyMode, repoRoot, gitDirForOps, patchData)
+	err := g.ApplyPatch(ctx, applyMode, repoRoot, gitDirForOps, patchData)
 	if err == nil {
 		return nil
 	}
@@ -393,7 +394,7 @@ func applyPatchData(g gitx.Git, applyMode model.ApplyMode, patchData []byte, rep
 	if len(filtered) == 0 {
 		return nil
 	}
-	if err2 := g.ApplyPatch(applyMode, repoRoot, gitDirForOps, filtered); err2 != nil {
+	if err2 := g.ApplyPatch(ctx, applyMode, repoRoot, gitDirForOps, filtered); err2 != nil {
 		return err2
 	}
 	return nil
@@ -401,11 +402,11 @@ func applyPatchData(g gitx.Git, applyMode model.ApplyMode, patchData []byte, rep
 
 // maskIgnoredFiles applies the configured ignored-file policy (readonly bind
 // mount or empty-file/dir mask) and returns the list of mount targets created.
-func maskIgnoredFiles(g gitx.Git, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, logf func(string, ...any)) ([]string, error) {
+func maskIgnoredFiles(ctx context.Context, g gitx.Git, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, logf func(string, ...any)) ([]string, error) {
 	if opts.IgnoredMode == model.IgnoredTransparent {
 		return nil, nil
 	}
-	ignored, err := g.ListIgnoredCandidates(repoRoot, gitDirForOps, opts.IgnoredMax)
+	ignored, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDirForOps, opts.IgnoredMax)
 	if err != nil {
 		return nil, fmt.Errorf("list ignored: %w", err)
 	}
@@ -481,7 +482,9 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return &model.PersonaError{Code: model.ExitEnv, Op: "parse options", Err: err}
 			}
-			code, childExit := runWithOptions(opts)
+			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			code, childExit := runWithOptions(ctx, opts)
 			if code != model.ExitOK {
 				return &exitError{code: code}
 			}
@@ -627,12 +630,12 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 	return 127
 }
 
-func exportPatch(g gitx.Git, repoRoot, gitDir string, patchInRepo bool, patchRel string) ([]byte, error) {
-	tracked, err := g.DiffHeadBinary(repoRoot, gitDir)
+func exportPatch(ctx context.Context, g gitx.Git, repoRoot, gitDir string, patchInRepo bool, patchRel string) ([]byte, error) {
+	tracked, err := g.DiffHeadBinary(ctx, repoRoot, gitDir)
 	if err != nil {
 		return nil, err
 	}
-	untracked, err := g.ListUntracked(repoRoot, gitDir)
+	untracked, err := g.ListUntracked(ctx, repoRoot, gitDir)
 	if err != nil {
 		return nil, err
 	}
@@ -654,7 +657,7 @@ func exportPatch(g gitx.Git, repoRoot, gitDir string, patchInRepo bool, patchRel
 			fmt.Fprintln(os.Stderr, "skip special file", path)
 			continue
 		}
-		patch, err := g.DiffNewFileNoIndex(repoRoot, gitDir, path)
+		patch, err := g.DiffNewFileNoIndex(ctx, repoRoot, gitDir, path)
 		if err != nil {
 			return nil, err
 		}
