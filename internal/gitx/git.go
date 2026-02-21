@@ -261,18 +261,18 @@ func filterEnv(env []string, keys ...string) []string {
 	if len(keys) == 0 {
 		return env
 	}
+	exclude := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		exclude[key] = struct{}{}
+	}
 	out := make([]string, 0, len(env))
 	for _, item := range env {
-		keep := true
-		for _, key := range keys {
-			if strings.HasPrefix(item, key+"=") {
-				keep = false
-				break
+		if idx := strings.IndexByte(item, '='); idx > 0 {
+			if _, ok := exclude[item[:idx]]; ok {
+				continue
 			}
 		}
-		if keep {
-			out = append(out, item)
-		}
+		out = append(out, item)
 	}
 	return out
 }

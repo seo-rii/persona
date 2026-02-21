@@ -167,34 +167,9 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		return nil
 	})
 
-	worktreeAdded := false
-	if opts.BaseMode == model.BaseRepo {
-		if !opts.AllowDirty {
-			ignoreUntracked := []string{}
-			if patchInRepo && patchRel != "" && patchRel != "." {
-				ignoreUntracked = append(ignoreUntracked, patchRel)
-			}
-			clean, err := g.IsCleanExceptUntracked(ctx, ignoreUntracked)
-			if err != nil {
-				return model.Wrap(model.ExitRepo, "git clean check", err), 0
-			}
-			if !clean {
-				return model.Wrap(model.ExitRepo, "repository is dirty", fmt.Errorf("uncommitted changes exist")), 0
-			}
-		}
-	} else if opts.BaseMode == model.BaseWorktree {
-		if err := g.WorktreeAddDetach(ctx, sess.BaseWT, opts.BaseRef); err != nil {
-			return model.Wrap(model.ExitRepo, "git worktree add", err), 0
-		}
-		worktreeAdded = true
-		cleanup.Push(func() error {
-			if worktreeAdded {
-				return g.WorktreeRemoveForce(context.Background(), sess.BaseWT)
-			}
-			return nil
-		})
-	} else {
-		return model.Wrap(model.ExitEnv, "invalid base mode", fmt.Errorf("%s", opts.BaseMode)), 0
+	basePath, err := prepareBase(ctx, g, opts, sess, patchInRepo, patchRel, cleanup)
+	if err != nil {
+		return err, 0
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -206,53 +181,10 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		return model.Wrap(model.ExitEnv, "make mounts private", err), 0
 	}
 
-	extRoot, err := os.MkdirTemp("", "persona-session-")
+	menv, err := setupMountEnv(repoRoot, gitDir, basePath, sess, cleanup, logf)
 	if err != nil {
-		return model.Wrap(model.ExitEnv, "create external session dir", err), 0
+		return err, 0
 	}
-	cleanup.Push(func() error {
-		return os.RemoveAll(extRoot)
-	})
-	extEmptyDir := filepath.Join(extRoot, "empty", "emptydir")
-	extEmptyFile := filepath.Join(extRoot, "empty", "emptyfile")
-	extGitDir := filepath.Join(extRoot, "mnt", "gitdir")
-	if err := os.MkdirAll(extEmptyDir, 0o755); err != nil {
-		return model.Wrap(model.ExitEnv, "create external empty dir", err), 0
-	}
-	if err := os.MkdirAll(filepath.Dir(extEmptyFile), 0o755); err != nil {
-		return model.Wrap(model.ExitEnv, "create external empty file dir", err), 0
-	}
-	file, err := os.OpenFile(extEmptyFile, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return model.Wrap(model.ExitEnv, "create external empty file", err), 0
-	}
-	file.Close()
-	basePath := repoRoot
-	if opts.BaseMode == model.BaseWorktree {
-		basePath = sess.BaseWT
-	}
-
-	if err := ns.BindMount(gitDir, extGitDir); err != nil {
-		return model.Wrap(model.ExitEnv, "bind mount external gitdir", err), 0
-	}
-	cleanup.Push(func() error { return ns.Umount(extGitDir) })
-
-	if err := ns.BindMount(basePath, sess.MntBase); err != nil {
-		return model.Wrap(model.ExitEnv, "bind mount base", err), 0
-	}
-	cleanup.Push(func() error { return ns.Umount(sess.MntBase) })
-	if err := ns.RemountRO(sess.MntBase); err != nil {
-		return model.Wrap(model.ExitEnv, "remount base ro", err), 0
-	}
-
-	gitDirForOps := extGitDir
-	logf("gitdir-for-ops=%s", gitDirForOps)
-
-	if err := ns.MountOverlay(repoRoot, ns.OverlayOpts{LowerDir: sess.MntBase, UpperDir: sess.Upper, WorkDir: sess.Work}); err != nil {
-		reportPermissionHint("mount overlay", err)
-		return model.Wrap(model.ExitEnv, "mount overlay", err), 0
-	}
-	logf("overlay mounted lower=%s upper=%s work=%s target=%s", sess.MntBase, sess.Upper, sess.Work, repoRoot)
 
 	maskTargets := make([]string, 0, 16)
 	cleanup.Push(func() error {
@@ -271,20 +203,20 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		return ns.Umount(repoRoot)
 	})
 
-	ignoredMasks, err := maskIgnoredFiles(ctx, g, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir, opts, logf)
+	ignoredMasks, err := maskIgnoredFiles(ctx, g, repoRoot, menv.gitDirForOps, menv.emptyFile, menv.emptyDir, opts, logf)
 	if err != nil {
 		return model.Wrap(model.ExitEnv, "mask ignored files", err), 0
 	}
 	maskTargets = append(maskTargets, ignoredMasks...)
 
-	if err := applyPatchData(ctx, g, opts.ApplyMode, patchData, repoRoot, gitDirForOps, logf); err != nil {
+	if err := applyPatchData(ctx, g, opts.ApplyMode, patchData, repoRoot, menv.gitDirForOps, logf); err != nil {
 		return model.Wrap(model.ExitApply, "apply patch", err), 0
 	}
 
 	var patchMaskPath string
 	if patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git" {
 		patchMaskPath = filepath.Join(repoRoot, patchRel)
-		if err := ns.MaskPath(patchMaskPath, ns.MaskFile, extEmptyFile, extEmptyDir); err != nil {
+		if err := ns.MaskPath(patchMaskPath, ns.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
 			return model.Wrap(model.ExitEnv, "mask patch file", err), 0
 		}
 		maskTargets = append(maskTargets, patchMaskPath)
@@ -297,7 +229,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		if !info.IsDir() {
 			kind = ns.MaskFile
 		}
-		if err := ns.MaskPath(gitPath, kind, extEmptyFile, extEmptyDir); err != nil {
+		if err := ns.MaskPath(gitPath, kind, menv.emptyFile, menv.emptyDir); err != nil {
 			return model.Wrap(model.ExitEnv, "mask .git", err), 0
 		}
 		gitMaskPath = gitPath
@@ -317,7 +249,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		_ = ns.Umount(gitMaskPath)
 	}
 
-	patchOut, err := exportPatch(postCtx, g, repoRoot, gitDirForOps, patchInRepo, patchRel)
+	patchOut, err := exportPatch(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel)
 	if err != nil {
 		return model.Wrap(model.ExitExport, "export patch", err), 0
 	}
@@ -331,6 +263,96 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		fmt.Fprintln(os.Stdout, patchPathEffective)
 	}
 	return nil, childCode
+}
+
+// prepareBase sets up the base layer: either the current repo (with an
+// optional dirty check) or a detached worktree at the requested ref.
+func prepareBase(ctx context.Context, g gitx.Git, opts model.Options, sess *session.Session, patchInRepo bool, patchRel string, cleanup *cleanupStack) (basePath string, err error) {
+	switch opts.BaseMode {
+	case model.BaseRepo:
+		if !opts.AllowDirty {
+			ignoreUntracked := []string{}
+			if patchInRepo && patchRel != "" && patchRel != "." {
+				ignoreUntracked = append(ignoreUntracked, patchRel)
+			}
+			clean, err := g.IsCleanExceptUntracked(ctx, ignoreUntracked)
+			if err != nil {
+				return "", model.Wrap(model.ExitRepo, "git clean check", err)
+			}
+			if !clean {
+				return "", model.Wrap(model.ExitRepo, "repository is dirty", fmt.Errorf("uncommitted changes exist"))
+			}
+		}
+		return g.RepoRoot, nil
+	case model.BaseWorktree:
+		if err := g.WorktreeAddDetach(ctx, sess.BaseWT, opts.BaseRef); err != nil {
+			return "", model.Wrap(model.ExitRepo, "git worktree add", err)
+		}
+		cleanup.Push(func() error {
+			return g.WorktreeRemoveForce(context.Background(), sess.BaseWT)
+		})
+		return sess.BaseWT, nil
+	default:
+		return "", model.Wrap(model.ExitEnv, "invalid base mode", fmt.Errorf("%s", opts.BaseMode))
+	}
+}
+
+// mountEnv holds paths created during namespace setup that later phases need.
+type mountEnv struct {
+	emptyDir     string // empty directory for mask-dir bind mounts
+	emptyFile    string // empty file for mask-file bind mounts
+	gitDirForOps string // bind-mounted .git dir accessible from overlay
+}
+
+// setupMountEnv creates the external temp dirs, bind-mounts the git dir and
+// base layer, and mounts the overlay.  All mounts are registered on the
+// cleanup stack for teardown.
+func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, cleanup *cleanupStack, logf func(string, ...any)) (*mountEnv, error) {
+	extRoot, err := os.MkdirTemp("", "persona-session-")
+	if err != nil {
+		return nil, model.Wrap(model.ExitEnv, "create external session dir", err)
+	}
+	cleanup.Push(func() error { return os.RemoveAll(extRoot) })
+
+	env := &mountEnv{
+		emptyDir:     filepath.Join(extRoot, "empty", "emptydir"),
+		emptyFile:    filepath.Join(extRoot, "empty", "emptyfile"),
+		gitDirForOps: filepath.Join(extRoot, "mnt", "gitdir"),
+	}
+	if err := os.MkdirAll(env.emptyDir, 0o755); err != nil {
+		return nil, model.Wrap(model.ExitEnv, "create external empty dir", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(env.emptyFile), 0o755); err != nil {
+		return nil, model.Wrap(model.ExitEnv, "create external empty file dir", err)
+	}
+	f, err := os.OpenFile(env.emptyFile, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, model.Wrap(model.ExitEnv, "create external empty file", err)
+	}
+	f.Close()
+
+	if err := ns.BindMount(gitDir, env.gitDirForOps); err != nil {
+		return nil, model.Wrap(model.ExitEnv, "bind mount external gitdir", err)
+	}
+	cleanup.Push(func() error { return ns.Umount(env.gitDirForOps) })
+
+	if err := ns.BindMount(basePath, sess.MntBase); err != nil {
+		return nil, model.Wrap(model.ExitEnv, "bind mount base", err)
+	}
+	cleanup.Push(func() error { return ns.Umount(sess.MntBase) })
+	if err := ns.RemountRO(sess.MntBase); err != nil {
+		return nil, model.Wrap(model.ExitEnv, "remount base ro", err)
+	}
+
+	logf("gitdir-for-ops=%s", env.gitDirForOps)
+
+	if err := ns.MountOverlay(repoRoot, ns.OverlayOpts{LowerDir: sess.MntBase, UpperDir: sess.Upper, WorkDir: sess.Work}); err != nil {
+		reportPermissionHint("mount overlay", err)
+		return nil, model.Wrap(model.ExitEnv, "mount overlay", err)
+	}
+	logf("overlay mounted lower=%s upper=%s work=%s target=%s", sess.MntBase, sess.Upper, sess.Work, repoRoot)
+
+	return env, nil
 }
 
 // applyPatchData validates and applies patchData to the overlay.
@@ -481,6 +503,16 @@ func newRootCmd() *cobra.Command {
 	return cmd
 }
 
+func parseEnum[T ~string](input, name string, valid ...T) (T, error) {
+	for _, v := range valid {
+		if input == string(v) {
+			return v, nil
+		}
+	}
+	var zero T
+	return zero, fmt.Errorf("invalid %s: %s", name, input)
+}
+
 func buildOptions(
 	patchPath, patchDir string,
 	printPatchPath bool,
@@ -503,50 +535,31 @@ func buildOptions(
 	opts.PatchDir = strings.TrimSpace(patchDir)
 	opts.PrintPatchPath = printPatchPath
 
-	switch baseMode {
-	case string(model.BaseRepo):
-		opts.BaseMode = model.BaseRepo
-	case string(model.BaseWorktree):
-		opts.BaseMode = model.BaseWorktree
-	default:
-		return opts, fmt.Errorf("invalid base-mode: %s", baseMode)
+	var err error
+	opts.BaseMode, err = parseEnum(baseMode, "base-mode", model.BaseRepo, model.BaseWorktree)
+	if err != nil {
+		return opts, err
 	}
 	opts.BaseRef = baseRef
 	opts.AllowDirty = allowDirty
 
-	switch ignoredMode {
-	case string(model.IgnoredTransparent):
-		opts.IgnoredMode = model.IgnoredTransparent
-	case string(model.IgnoredReadonly):
-		opts.IgnoredMode = model.IgnoredReadonly
-	case string(model.IgnoredMasked):
-		opts.IgnoredMode = model.IgnoredMasked
-	default:
-		return opts, fmt.Errorf("invalid ignored-mode: %s", ignoredMode)
+	opts.IgnoredMode, err = parseEnum(ignoredMode, "ignored-mode", model.IgnoredTransparent, model.IgnoredReadonly, model.IgnoredMasked)
+	if err != nil {
+		return opts, err
 	}
 	if ignoredMax < 0 {
 		return opts, fmt.Errorf("ignored-max must be >= 0")
 	}
 	opts.IgnoredMax = ignoredMax
 
-	switch applyMode {
-	case string(model.ApplyStrict):
-		opts.ApplyMode = model.ApplyStrict
-	case string(model.ApplyReject):
-		opts.ApplyMode = model.ApplyReject
-	default:
-		return opts, fmt.Errorf("invalid apply-mode: %s", applyMode)
+	opts.ApplyMode, err = parseEnum(applyMode, "apply-mode", model.ApplyStrict, model.ApplyReject)
+	if err != nil {
+		return opts, err
 	}
 
-	switch keepSession {
-	case string(model.KeepOnFail):
-		opts.KeepSession = model.KeepOnFail
-	case string(model.KeepAlways):
-		opts.KeepSession = model.KeepAlways
-	case string(model.KeepNever):
-		opts.KeepSession = model.KeepNever
-	default:
-		return opts, fmt.Errorf("invalid keep-session: %s", keepSession)
+	opts.KeepSession, err = parseEnum(keepSession, "keep-session", model.KeepOnFail, model.KeepAlways, model.KeepNever)
+	if err != nil {
+		return opts, err
 	}
 	opts.Verbose = verbose
 	opts.Command = args
