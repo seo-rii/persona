@@ -564,30 +564,6 @@ func TestValidatePatchPathsRejectEscapedCopyDotGit(t *testing.T) {
 	}
 }
 
-func TestAtomicWriteFilePreservesMode(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.patch")
-	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	if err := AtomicWriteFile(path, []byte("new")); err != nil {
-		t.Fatalf("atomic write: %v", err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read file: %v", err)
-	}
-	if string(data) != "new" {
-		t.Fatalf("unexpected content %q", string(data))
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat file: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("expected mode 600 got %o", info.Mode().Perm())
-	}
-}
-
 func TestReadAllMissingReturnsNil(t *testing.T) {
 	data, err := ReadAll(filepath.Join(t.TempDir(), "missing.patch"))
 	if err != nil {

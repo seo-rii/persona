@@ -86,47 +86,6 @@ func EnsurePatchPath(opts model.Options, gitDir string, now time.Time) (string, 
 	return filepath.Join(patchDir, name), nil
 }
 
-func AtomicWriteFile(path string, data []byte) error {
-	info, err := os.Stat(path)
-	mode := os.FileMode(0o644)
-	var uid, gid int
-	if err == nil {
-		mode = info.Mode().Perm()
-		stat := info.Sys()
-		if statT, ok := stat.(*unix.Stat_t); ok {
-			uid = int(statT.Uid)
-			gid = int(statT.Gid)
-		}
-	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".persona-*.patch")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	_ = tmp.Chmod(mode)
-	if uid != 0 || gid != 0 {
-		_ = tmp.Chown(uid, gid)
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		return err
-	}
-	return fsyncDir(dir)
-}
-
 func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 	if dir == nil {
 		return errors.New("dir is nil")
@@ -625,15 +584,6 @@ func checkPath(path string) error {
 		}
 	}
 	return nil
-}
-
-func fsyncDir(dir string) error {
-	fd, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer fd.Close()
-	return fd.Sync()
 }
 
 func ReadAll(path string) ([]byte, error) {

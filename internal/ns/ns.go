@@ -75,9 +75,6 @@ type OverlayOpts struct {
 }
 
 func MountOverlay(target string, opt OverlayOpts) error {
-	if os.Getenv("PERSONA_FORCE_MOUNT_FAIL") == "1" {
-		return fmt.Errorf("forced mount failure")
-	}
 	data := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", opt.LowerDir, opt.UpperDir, opt.WorkDir)
 	return unix.Mount("overlay", target, "overlay", 0, data)
 }

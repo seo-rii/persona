@@ -13,7 +13,7 @@ func TestCreateAndRemoveAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	paths := []string{s.Root, s.Upper, s.Work, s.MntBase, s.MntGitDir, s.BaseWT, s.Tmp}
+	paths := []string{s.Root, s.Upper, s.Work, s.MntBase, s.BaseWT, s.Tmp}
 	for _, path := range paths {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected path %s: %v", path, err)
@@ -42,7 +42,6 @@ func TestCreateSessionPathsOwnerOnlyPermissions(t *testing.T) {
 		{name: "upper", path: s.Upper},
 		{name: "work", path: s.Work},
 		{name: "mnt-base", path: s.MntBase},
-		{name: "mnt-gitdir", path: s.MntGitDir},
 		{name: "basewt", path: s.BaseWT},
 		{name: "tmp", path: s.Tmp},
 	}

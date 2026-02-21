@@ -10,14 +10,13 @@ import (
 )
 
 type Session struct {
-	ID        string
-	Root      string
-	Upper     string
-	Work      string
-	MntBase   string
-	MntGitDir string
-	BaseWT    string
-	Tmp       string
+	ID      string
+	Root    string
+	Upper   string
+	Work    string
+	MntBase string
+	BaseWT  string
+	Tmp     string
 }
 
 func Create(gitDir string) (*Session, error) {
@@ -28,13 +27,11 @@ func Create(gitDir string) (*Session, error) {
 	root := filepath.Join(gitDir, "persona", "sessions", id)
 	upper := filepath.Join(root, "upper")
 	work := filepath.Join(root, "work")
-	mnt := filepath.Join(root, "mnt")
-	mntBase := filepath.Join(mnt, "base")
-	mntGitDir := filepath.Join(mnt, "gitdir")
+	mntBase := filepath.Join(root, "mnt", "base")
 	baseWT := filepath.Join(root, "basewt")
 	tmp := filepath.Join(root, "tmp")
 
-	paths := []string{upper, work, mntBase, mntGitDir, baseWT, tmp}
+	paths := []string{upper, work, mntBase, baseWT, tmp}
 	for _, path := range paths {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return nil, err
@@ -42,14 +39,13 @@ func Create(gitDir string) (*Session, error) {
 	}
 
 	return &Session{
-		ID:        id,
-		Root:      root,
-		Upper:     upper,
-		Work:      work,
-		MntBase:   mntBase,
-		MntGitDir: mntGitDir,
-		BaseWT:    baseWT,
-		Tmp:       tmp,
+		ID:      id,
+		Root:    root,
+		Upper:   upper,
+		Work:    work,
+		MntBase: mntBase,
+		BaseWT:  baseWT,
+		Tmp:     tmp,
 	}, nil
 }
 
