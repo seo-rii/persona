@@ -340,6 +340,59 @@ func TestLockPatchReadOnlyDir(t *testing.T) {
 	}
 }
 
+func TestLockPatchBlocksAcrossAtomicRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.patch")
+
+	lock1, err := LockPatch(path)
+	if err != nil {
+		t.Fatalf("lock1: %v", err)
+	}
+	defer lock1.Unlock()
+
+	dh, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("open dir: %v", err)
+	}
+	defer dh.Close()
+	if err := AtomicWriteFileAt(dh, "state.patch", []byte("new")); err != nil {
+		t.Fatalf("atomic write: %v", err)
+	}
+
+	lockedCh := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		lock2, err := LockPatch(path)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer lock2.Unlock()
+		close(lockedCh)
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("lock2: %v", err)
+	case <-lockedCh:
+		t.Fatalf("expected second lock to stay blocked until first unlock")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if err := lock1.Unlock(); err != nil {
+		t.Fatalf("unlock1: %v", err)
+	}
+	lock1 = nil
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("lock2 after unlock: %v", err)
+	case <-lockedCh:
+	case <-time.After(time.Second):
+		t.Fatalf("expected second lock after first unlock")
+	}
+}
+
 func TestFilterExistingNewFiles(t *testing.T) {
 	dir := t.TempDir()
 	existingPath := filepath.Join(dir, "test.patch")
