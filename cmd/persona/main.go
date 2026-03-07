@@ -411,10 +411,22 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 		target := filepath.Join(repoRoot, filepath.FromSlash(path))
 		switch opts.IgnoredMode {
 		case model.IgnoredReadonly:
+			if _, err := os.Lstat(target); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return targets, fmt.Errorf("stat ignored readonly %s: %w", path, err)
+			}
 			if err := mount.BindMount(target, target); err != nil {
+				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
+					continue
+				}
 				return targets, fmt.Errorf("bind mount ignored readonly %s: %w", path, err)
 			}
 			if err := mount.RemountRO(target); err != nil {
+				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
+					continue
+				}
 				return targets, fmt.Errorf("remount ignored readonly %s: %w", path, err)
 			}
 			targets = append(targets, target)

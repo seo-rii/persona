@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +69,80 @@ type buildOptionsInput struct {
 	verbose        bool
 	args           []string
 }
+
+type ignoredListGitOps struct {
+	ignored []string
+	err     error
+}
+
+func (g ignoredListGitOps) RepoRootPath() string { return "" }
+
+func (g ignoredListGitOps) GitDirPath() string { return "" }
+
+func (g ignoredListGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) WorktreeAddDetach(context.Context, string, string) error {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) WorktreeRemoveForce(context.Context, string) error {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) ApplyPatch(context.Context, model.ApplyMode, string, string, []byte) error {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) DiffHeadBinary(context.Context, string, string, []string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) ListUntracked(context.Context, string, string) ([]string, error) {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) DiffNewFileNoIndex(context.Context, string, string, string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
+	return g.ignored, g.err
+}
+
+type recordingNSOps struct {
+	bindCalls    []string
+	remountCalls []string
+	bindErrs     map[string]error
+	remountErrs  map[string]error
+}
+
+func (m *recordingNSOps) UnshareMountNS() error { return nil }
+
+func (m *recordingNSOps) MakeMountsPrivate() error { return nil }
+
+func (m *recordingNSOps) BindMount(_, dst string) error {
+	m.bindCalls = append(m.bindCalls, dst)
+	if err, ok := m.bindErrs[dst]; ok {
+		return err
+	}
+	return nil
+}
+
+func (m *recordingNSOps) RemountRO(target string) error {
+	m.remountCalls = append(m.remountCalls, target)
+	if err, ok := m.remountErrs[target]; ok {
+		return err
+	}
+	return nil
+}
+
+func (m *recordingNSOps) Umount(string) error { return nil }
+
+func (m *recordingNSOps) MountOverlay(string, model.OverlayOpts) error { return nil }
+
+func (m *recordingNSOps) MaskPath(string, model.MaskKind, string, string) error { return nil }
 
 func defaultBuildOptionsInput() buildOptionsInput {
 	return buildOptionsInput{
@@ -312,6 +388,66 @@ func TestShouldForceMountFail(t *testing.T) {
 	}
 	if !shouldForceMountFail() {
 		t.Fatalf("expected true when env is 1")
+	}
+}
+
+func TestMaskIgnoredFilesReadonlySkipsMissingTargets(t *testing.T) {
+	repoRoot := t.TempDir()
+	existing := filepath.Join(repoRoot, "existing.txt")
+	if err := os.WriteFile(existing, []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write existing: %v", err)
+	}
+	g := ignoredListGitOps{ignored: []string{"missing.txt", "existing.txt"}}
+	mount := &recordingNSOps{}
+	opts := model.Options{IgnoredMode: model.IgnoredReadonly, IgnoredMax: 10}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	targets, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
+	if err != nil {
+		t.Fatalf("maskIgnoredFiles error: %v", err)
+	}
+	if len(targets) != 1 || targets[0] != existing {
+		t.Fatalf("expected only existing target, got %v", targets)
+	}
+	if len(mount.bindCalls) != 1 || mount.bindCalls[0] != existing {
+		t.Fatalf("expected bind only for existing target, got %v", mount.bindCalls)
+	}
+	if len(mount.remountCalls) != 1 || mount.remountCalls[0] != existing {
+		t.Fatalf("expected remount only for existing target, got %v", mount.remountCalls)
+	}
+}
+
+func TestMaskIgnoredFilesReadonlySkipsBindMountENOENT(t *testing.T) {
+	repoRoot := t.TempDir()
+	raced := filepath.Join(repoRoot, "raced.txt")
+	if err := os.WriteFile(raced, []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write raced: %v", err)
+	}
+	existing := filepath.Join(repoRoot, "existing.txt")
+	if err := os.WriteFile(existing, []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write existing: %v", err)
+	}
+	g := ignoredListGitOps{ignored: []string{"raced.txt", "existing.txt"}}
+	mount := &recordingNSOps{
+		bindErrs: map[string]error{
+			raced: os.ErrNotExist,
+		},
+	}
+	opts := model.Options{IgnoredMode: model.IgnoredReadonly, IgnoredMax: 10}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	targets, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
+	if err != nil {
+		t.Fatalf("maskIgnoredFiles error: %v", err)
+	}
+	if len(targets) != 1 || targets[0] != existing {
+		t.Fatalf("expected only existing target after bind ENOENT, got %v", targets)
+	}
+	if len(mount.bindCalls) != 2 || mount.bindCalls[0] != raced || mount.bindCalls[1] != existing {
+		t.Fatalf("unexpected bind calls: %v", mount.bindCalls)
+	}
+	if len(mount.remountCalls) != 1 || mount.remountCalls[0] != existing {
+		t.Fatalf("expected remount only for existing target, got %v", mount.remountCalls)
 	}
 }
 
