@@ -622,7 +622,11 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 }
 
 func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string) ([]byte, error) {
-	tracked, err := g.DiffHeadBinary(ctx, repoRoot, gitDir)
+	trackedExclude := []string{}
+	if patchInRepo && patchRel != "" {
+		trackedExclude = append(trackedExclude, filepath.ToSlash(patchRel))
+	}
+	tracked, err := g.DiffHeadBinary(ctx, repoRoot, gitDir, trackedExclude)
 	if err != nil {
 		return nil, err
 	}

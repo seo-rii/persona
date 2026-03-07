@@ -458,3 +458,24 @@ func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
 		t.Fatalf("expected state.patch to be included when not excluded")
 	}
 }
+
+func TestExportPatchExcludesTrackedPatchFile(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
+	testutil.RunCmd(t, repo, "git", "add", "state.patch")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "track patch")
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "updated\n")
+	testutil.WriteFile(t, filepath.Join(repo, "other.txt"), "other\n")
+
+	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch")
+	if err != nil {
+		t.Fatalf("exportPatch error: %v", err)
+	}
+	if bytes.Contains(patch, []byte("state.patch")) {
+		t.Fatalf("expected tracked patch file to be excluded from export: %s", string(patch))
+	}
+	if !bytes.Contains(patch, []byte("other.txt")) {
+		t.Fatalf("expected other changes to remain in export: %s", string(patch))
+	}
+}

@@ -136,7 +136,7 @@ func TestDiffHeadBinary(t *testing.T) {
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 
 	testutil.WriteFile(t, filepath.Join(repo, "tracked.txt"), "changed\n")
-	patch, err := g.DiffHeadBinary(context.Background(), repo, g.GitDir)
+	patch, err := g.DiffHeadBinary(context.Background(), repo, g.GitDir, nil)
 	if err != nil {
 		t.Fatalf("DiffHeadBinary error: %v", err)
 	}
@@ -145,11 +145,33 @@ func TestDiffHeadBinary(t *testing.T) {
 	}
 }
 
+func TestDiffHeadBinaryExcludePaths(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
+	testutil.RunCmd(t, repo, "git", "add", "state.patch")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "track patch")
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "updated\n")
+	testutil.WriteFile(t, filepath.Join(repo, "tracked.txt"), "changed\n")
+
+	patch, err := g.DiffHeadBinary(context.Background(), repo, g.GitDir, []string{"state.patch"})
+	if err != nil {
+		t.Fatalf("DiffHeadBinary error: %v", err)
+	}
+	if strings.Contains(string(patch), "state.patch") {
+		t.Fatalf("expected excluded tracked path to be omitted from diff: %s", string(patch))
+	}
+	if !strings.Contains(string(patch), "tracked.txt") {
+		t.Fatalf("expected other tracked changes to remain in diff: %s", string(patch))
+	}
+}
+
 func TestDiffHeadBinaryNoHead(t *testing.T) {
 	repo := testutil.InitEmptyRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 
-	patch, err := g.DiffHeadBinary(context.Background(), repo, g.GitDir)
+	patch, err := g.DiffHeadBinary(context.Background(), repo, g.GitDir, nil)
 	if err != nil {
 		t.Fatalf("DiffHeadBinary error: %v", err)
 	}

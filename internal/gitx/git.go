@@ -137,7 +137,7 @@ func (g Git) ApplyPatch(ctx context.Context, mode model.ApplyMode, workTree, git
 	return g.gitRunWithInput(ctx, workTree, g.envWith(workTree, gitDir), patchData, "git", args...)
 }
 
-func (g Git) DiffHeadBinary(ctx context.Context, workTree, gitDir string) ([]byte, error) {
+func (g Git) DiffHeadBinary(ctx context.Context, workTree, gitDir string, excludePaths []string) ([]byte, error) {
 	hasHead, err := g.hasHead(ctx, workTree, gitDir)
 	if err != nil {
 		return nil, err
@@ -146,6 +146,15 @@ func (g Git) DiffHeadBinary(ctx context.Context, workTree, gitDir string) ([]byt
 		return nil, nil
 	}
 	args := g.withDirArgs(workTree, gitDir, "-c", "core.quotepath=false", "diff", "--binary", "--full-index", "-M", "--no-ext-diff", "HEAD")
+	if len(excludePaths) > 0 {
+		args = append(args, "--", ".")
+		for _, path := range excludePaths {
+			if path == "" {
+				continue
+			}
+			args = append(args, ":(exclude)"+filepath.ToSlash(path))
+		}
+	}
 	return g.gitDiffOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
 }
 

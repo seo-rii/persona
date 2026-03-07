@@ -21,7 +21,7 @@ type GitOps interface {
 	ApplyPatch(ctx context.Context, mode ApplyMode, workTree, gitDir string, patchData []byte) error
 
 	// Diff / export
-	DiffHeadBinary(ctx context.Context, workTree, gitDir string) ([]byte, error)
+	DiffHeadBinary(ctx context.Context, workTree, gitDir string, excludePaths []string) ([]byte, error)
 	ListUntracked(ctx context.Context, workTree, gitDir string) ([]string, error)
 	DiffNewFileNoIndex(ctx context.Context, workTree, gitDir, relPath string) ([]byte, error)
 
