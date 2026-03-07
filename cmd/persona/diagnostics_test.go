@@ -64,6 +64,28 @@ func TestResolveBinaryPath(t *testing.T) {
 	})
 }
 
+func TestActivateCapabilitySpec(t *testing.T) {
+	if got := activateCapabilitySpec(false); got != "cap_sys_admin+ep" {
+		t.Fatalf("expected least-privilege default spec, got %q", got)
+	}
+	if got := activateCapabilitySpec(true); got != "cap_sys_admin,cap_dac_override+ep" {
+		t.Fatalf("expected opt-in DAC override spec, got %q", got)
+	}
+}
+
+func TestLeastPrivilegeCapabilityHint(t *testing.T) {
+	hint := leastPrivilegeCapabilityHint()
+	if !strings.Contains(hint, "cap_sys_admin+ep") {
+		t.Fatalf("expected default hint to use CAP_SYS_ADMIN only: %q", hint)
+	}
+	if strings.Contains(hint, "cap_sys_admin,cap_dac_override+ep") {
+		t.Fatalf("expected default hint not to recommend DAC override by default: %q", hint)
+	}
+	if !strings.Contains(hint, "--allow-dac-override") {
+		t.Fatalf("expected hint to document DAC override as opt-in: %q", hint)
+	}
+}
+
 func TestFindmntInfoParsesQuotedValuesWithSpaces(t *testing.T) {
 	tmp := t.TempDir()
 	findmnt := filepath.Join(tmp, "findmnt")

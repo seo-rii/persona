@@ -81,7 +81,7 @@ func newDoctorCmd() *cobra.Command {
 			}
 			if !info.HasSysAdmin {
 				fmt.Fprintln(w, "hint: CAP_SYS_ADMIN is required for unshare and OverlayFS mount.")
-				fmt.Fprintln(w, "hint: run `sudo persona activate` or `sudo setcap cap_sys_admin,cap_dac_override+ep /path/to/persona`.")
+				fmt.Fprintf(w, "hint: %s\n", leastPrivilegeCapabilityHint())
 			}
 			if strings.Contains(info.MountOptions, "nosuid") {
 				fmt.Fprintln(w, "hint: mount has nosuid; file capabilities are ignored. Use sudo or move the binary.")
@@ -93,6 +93,7 @@ func newDoctorCmd() *cobra.Command {
 
 func newActivateCmd() *cobra.Command {
 	var target string
+	var allowDACOverride bool
 	cmd := &cobra.Command{
 		Use:   "activate",
 		Short: "Grant required file capabilities to the persona binary",
@@ -109,7 +110,7 @@ func newActivateCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("setcap not found; install libcap2-bin")
 			}
-			perm := "cap_sys_admin,cap_dac_override+ep"
+			perm := activateCapabilitySpec(allowDACOverride)
 			out, err := exec.Command(setcapPath, perm, path).CombinedOutput()
 			if err != nil {
 				msg := strings.TrimSpace(string(out))
@@ -123,7 +124,22 @@ func newActivateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&target, "binary", "", "path to persona binary (default: current executable)")
+	cmd.Flags().BoolVar(&allowDACOverride, "allow-dac-override", false, "also grant CAP_DAC_OVERRIDE for patch writes that must bypass DAC checks")
 	return cmd
+}
+
+func activateCapabilitySpec(allowDACOverride bool) string {
+	if allowDACOverride {
+		return "cap_sys_admin,cap_dac_override+ep"
+	}
+	return "cap_sys_admin+ep"
+}
+
+func leastPrivilegeCapabilityHint() string {
+	return fmt.Sprintf(
+		"run `sudo persona activate` or `sudo setcap %s /path/to/persona`; add `--allow-dac-override` only when patch writes must bypass DAC checks.",
+		activateCapabilitySpec(false),
+	)
 }
 
 func resolveBinaryPath(target string) (string, error) {
@@ -333,6 +349,6 @@ func reportPermissionHint(op string, err error) {
 	if info.MountOptions != "" {
 		fmt.Fprintf(os.Stderr, "persona: hint: mount_options=%s\n", info.MountOptions)
 	}
-	fmt.Fprintln(os.Stderr, "persona: hint: try `sudo persona activate` or `sudo setcap cap_sys_admin,cap_dac_override+ep /path/to/persona`.")
+	fmt.Fprintf(os.Stderr, "persona: hint: %s\n", leastPrivilegeCapabilityHint())
 	fmt.Fprintln(os.Stderr, "persona: hint: if still denied, check nosuid mounts or LSM (AppArmor/SELinux) policies.")
 }
