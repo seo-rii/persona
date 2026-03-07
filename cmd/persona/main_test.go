@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"persona/internal/gitx"
 	"persona/internal/model"
@@ -381,6 +382,17 @@ func TestRunCommandExitCodes(t *testing.T) {
 		}
 		if strings.TrimSpace(string(data)) != sub {
 			t.Fatalf("expected cwd %q got %q", sub, strings.TrimSpace(string(data)))
+		}
+	})
+	t.Run("quiesces background descendants", func(t *testing.T) {
+		repo := t.TempDir()
+		code := runCommand(repo, ".", []string{"sh", "-c", `(trap '' TERM; sleep 0.3; echo late > late.txt) & exit 0`})
+		if code != 0 {
+			t.Fatalf("expected 0 got %d", code)
+		}
+		time.Sleep(500 * time.Millisecond)
+		if _, err := os.Stat(filepath.Join(repo, "late.txt")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected late.txt to stay absent, got err=%v", err)
 		}
 	})
 }

@@ -611,6 +611,29 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 	err := cmd.Wait()
 	signal.Stop(sigCh)
 	close(sigCh)
+	pgid := cmd.Process.Pid
+	// Prevent late background descendants from racing with export/write-back.
+	if killErr := syscall.Kill(-pgid, syscall.SIGTERM); killErr == nil || errors.Is(killErr, syscall.EPERM) {
+		deadline := time.Now().Add(200 * time.Millisecond)
+		for {
+			probeErr := syscall.Kill(-pgid, 0)
+			if probeErr != nil && !errors.Is(probeErr, syscall.EPERM) {
+				break
+			}
+			if time.Now().After(deadline) {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+				for i := 0; i < 20; i++ {
+					probeErr = syscall.Kill(-pgid, 0)
+					if probeErr != nil && !errors.Is(probeErr, syscall.EPERM) {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	if err == nil {
 		return 0
 	}
