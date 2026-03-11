@@ -5,16 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
+
+var mountFn = unix.Mount
 
 func UnshareMountNS() error {
 	return unix.Unshare(unix.CLONE_NEWNS)
 }
 
 func MakeMountsPrivate() error {
-	return unix.Mount("", "/", "", uintptr(unix.MS_REC|unix.MS_PRIVATE), "")
+	return mountFn("", "/", "", uintptr(unix.MS_REC|unix.MS_PRIVATE), "")
 }
 
 func BindMount(src, dst string) error {
@@ -42,14 +45,14 @@ func BindMount(src, dst string) error {
 			}
 		}
 	}
-	if err := unix.Mount(src, dst, "", unix.MS_BIND, ""); err != nil {
+	if err := mountFn(src, dst, "", unix.MS_BIND, ""); err != nil {
 		return fmt.Errorf("bind mount %s -> %s: %w", src, dst, err)
 	}
 	return nil
 }
 
 func RemountRO(target string) error {
-	if err := unix.Mount("", target, "", uintptr(unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY), ""); err != nil {
+	if err := mountFn("", target, "", uintptr(unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY), ""); err != nil {
 		return fmt.Errorf("remount ro %s: %w", target, err)
 	}
 	return nil
@@ -81,8 +84,14 @@ type OverlayOpts struct {
 }
 
 func MountOverlay(target string, opt OverlayOpts) error {
-	data := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", opt.LowerDir, opt.UpperDir, opt.WorkDir)
-	if err := unix.Mount("overlay", target, "overlay", 0, data); err != nil {
+	esc := strings.NewReplacer("\\", "\\\\", ":", "\\:", ",", "\\,")
+	data := fmt.Sprintf(
+		"lowerdir=%s,upperdir=%s,workdir=%s",
+		esc.Replace(opt.LowerDir),
+		esc.Replace(opt.UpperDir),
+		esc.Replace(opt.WorkDir),
+	)
+	if err := mountFn("overlay", target, "overlay", 0, data); err != nil {
 		return fmt.Errorf("mount overlay on %s: %w", target, err)
 	}
 	return nil
