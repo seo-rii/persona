@@ -223,6 +223,35 @@ func TestFilterExistingNewFilesQuotedSpaces(t *testing.T) {
 	}
 }
 
+func TestFilterExistingNewFilesQuotedTrailingQuote(t *testing.T) {
+	dir := t.TempDir()
+	existingPath := filepath.Join(dir, "quote\"")
+	if err := os.WriteFile(existingPath, []byte("quoted\n"), 0o644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	patch := strings.Join([]string{
+		"diff --git \"a/quote\\\"\" \"b/quote\\\"\"",
+		"new file mode 100644",
+		"index 0000000..c7dc1e6",
+		"--- /dev/null",
+		"+++ \"b/quote\\\"\"",
+		"@@ -0,0 +1 @@",
+		"+quoted",
+		"",
+	}, "\n")
+
+	filtered, skipped, err := FilterExistingNewFiles([]byte(patch), dir)
+	if err != nil {
+		t.Fatalf("filter existing new files: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0] != "quote\"" {
+		t.Fatalf("expected quoted trailing-quote path skipped, got %v", skipped)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("expected filtered patch empty, got %q", string(filtered))
+	}
+}
+
 func TestAtomicWriteFileAtPreservesMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.patch")

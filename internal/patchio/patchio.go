@@ -345,7 +345,6 @@ func parsePlusPath(line string) string {
 }
 
 func sanitizePatchPath(path string) string {
-	path = strings.Trim(path, "\"")
 	path = strings.TrimPrefix(path, "a/")
 	path = strings.TrimPrefix(path, "b/")
 	return path
