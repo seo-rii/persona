@@ -683,29 +683,28 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 	}
 	for _, path := range untracked {
 		absPath := filepath.Join(repoRoot, filepath.FromSlash(path))
-		if skipSpecial(absPath) {
+		info, err := os.Lstat(absPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, err
+		}
+		mode := info.Mode()
+		if mode&os.ModeNamedPipe != 0 || mode&os.ModeDevice != 0 || mode&os.ModeCharDevice != 0 || mode&os.ModeSocket != 0 {
 			fmt.Fprintln(os.Stderr, "skip special file", path)
 			continue
 		}
 		patch, err := g.DiffNewFileNoIndex(ctx, repoRoot, gitDir, path)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
+				continue
+			}
 			return nil, err
 		}
 		buf.Write(patch)
 	}
 	return buf.Bytes(), nil
-}
-
-func skipSpecial(path string) bool {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return false
-	}
-	mode := info.Mode()
-	if mode&os.ModeNamedPipe != 0 || mode&os.ModeDevice != 0 || mode&os.ModeCharDevice != 0 || mode&os.ModeSocket != 0 {
-		return true
-	}
-	return false
 }
 
 func isSubpath(root, path string) (bool, string) {

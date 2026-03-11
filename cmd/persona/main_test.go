@@ -75,6 +75,13 @@ type ignoredListGitOps struct {
 	err     error
 }
 
+type exportGitOps struct {
+	tracked    []byte
+	untracked  []string
+	diffByPath map[string][]byte
+	errByPath  map[string]error
+}
+
 func (g ignoredListGitOps) RepoRootPath() string { return "" }
 
 func (g ignoredListGitOps) GitDirPath() string { return "" }
@@ -109,6 +116,45 @@ func (g ignoredListGitOps) DiffNewFileNoIndex(context.Context, string, string, s
 
 func (g ignoredListGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
 	return g.ignored, g.err
+}
+
+func (g exportGitOps) RepoRootPath() string { return "" }
+
+func (g exportGitOps) GitDirPath() string { return "" }
+
+func (g exportGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
+	panic("unexpected call")
+}
+
+func (g exportGitOps) WorktreeAddDetach(context.Context, string, string) error {
+	panic("unexpected call")
+}
+
+func (g exportGitOps) WorktreeRemoveForce(context.Context, string) error {
+	panic("unexpected call")
+}
+
+func (g exportGitOps) ApplyPatch(context.Context, model.ApplyMode, string, string, []byte) error {
+	panic("unexpected call")
+}
+
+func (g exportGitOps) DiffHeadBinary(context.Context, string, string, []string) ([]byte, error) {
+	return g.tracked, nil
+}
+
+func (g exportGitOps) ListUntracked(context.Context, string, string) ([]string, error) {
+	return g.untracked, nil
+}
+
+func (g exportGitOps) DiffNewFileNoIndex(_ context.Context, _ string, _ string, relPath string) ([]byte, error) {
+	if err, ok := g.errByPath[relPath]; ok {
+		return nil, err
+	}
+	return g.diffByPath[relPath], nil
+}
+
+func (g exportGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
+	panic("unexpected call")
 }
 
 type recordingNSOps struct {
@@ -604,6 +650,31 @@ func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
 	}
 	if !bytes.Contains(patch, []byte("state.patch")) {
 		t.Fatalf("expected state.patch to be included when not excluded")
+	}
+}
+
+func TestExportPatchSkipsVanishedUntrackedFiles(t *testing.T) {
+	repo := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repo, "keep.txt"), "keep\n")
+	g := exportGitOps{
+		untracked: []string{"gone.txt", "keep.txt"},
+		diffByPath: map[string][]byte{
+			"keep.txt": []byte("diff --git a/keep.txt b/keep.txt\n+++ b/keep.txt\n"),
+		},
+		errByPath: map[string]error{
+			"gone.txt": os.ErrNotExist,
+		},
+	}
+
+	patch, err := exportPatch(context.Background(), g, repo, "", false, "")
+	if err != nil {
+		t.Fatalf("exportPatch error: %v", err)
+	}
+	if !bytes.Contains(patch, []byte("keep.txt")) {
+		t.Fatalf("expected surviving untracked file in patch: %s", string(patch))
+	}
+	if bytes.Contains(patch, []byte("gone.txt")) {
+		t.Fatalf("expected vanished untracked file to be skipped: %s", string(patch))
 	}
 }
 

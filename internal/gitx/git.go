@@ -28,7 +28,7 @@ func (g *Git) RepoRootPath() string { return g.RepoRoot }
 func (g *Git) GitDirPath() string { return g.GitDir }
 
 func DetectRepo(ctx context.Context, cwd string) (string, string, error) {
-	env := filterEnv(os.Environ(), "GIT_WORK_TREE", "GIT_DIR")
+	env := filterGitEnv(os.Environ())
 	repoRoot, err := gitOutput(ctx, cwd, env, "git", "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", "", err
@@ -246,7 +246,7 @@ func (g Git) env() []string {
 }
 
 func (g Git) envWith(workTree, gitDir string) []string {
-	base := filterEnv(os.Environ(), "GIT_WORK_TREE", "GIT_DIR")
+	base := filterGitEnv(os.Environ())
 	if workTree != "" {
 		base = append(base, "GIT_WORK_TREE="+workTree)
 	}
@@ -254,6 +254,17 @@ func (g Git) envWith(workTree, gitDir string) []string {
 		base = append(base, "GIT_DIR="+gitDir)
 	}
 	return base
+}
+
+func filterGitEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, item := range env {
+		if idx := strings.IndexByte(item, '='); idx > 0 && strings.HasPrefix(item[:idx], "GIT_") {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // maxErrOutput is the maximum number of bytes from command output included

@@ -217,6 +217,34 @@ func TestListUntracked(t *testing.T) {
 	}
 }
 
+func TestListUntrackedIgnoresGitIndexFileEnv(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "alt.index"))
+	paths, err := g.ListUntracked(context.Background(), repo, g.GitDir)
+	if err != nil {
+		t.Fatalf("ListUntracked error: %v", err)
+	}
+	if containsPath(paths, "tracked.txt") {
+		t.Fatalf("tracked file must not become untracked via GIT_INDEX_FILE: %v", paths)
+	}
+}
+
+func TestIsCleanExceptUntrackedIgnoresGitIndexFileEnv(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "alt.index"))
+	clean, err := g.IsCleanExceptUntracked(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("IsCleanExceptUntracked error: %v", err)
+	}
+	if !clean {
+		t.Fatalf("clean repo must stay clean despite GIT_INDEX_FILE")
+	}
+}
+
 func TestApplyPatchStrictSuccess(t *testing.T) {
 	repo := testutil.InitRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
