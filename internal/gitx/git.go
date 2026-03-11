@@ -152,7 +152,7 @@ func (g Git) DiffHeadBinary(ctx context.Context, workTree, gitDir string, exclud
 			if path == "" {
 				continue
 			}
-			args = append(args, ":(exclude)"+filepath.ToSlash(path))
+			args = append(args, ":(exclude,literal)"+filepath.ToSlash(path))
 		}
 	}
 	return g.gitDiffOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)

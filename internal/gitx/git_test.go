@@ -167,6 +167,29 @@ func TestDiffHeadBinaryExcludePaths(t *testing.T) {
 	}
 }
 
+func TestDiffHeadBinaryExcludePathsTreatsPatchPathLiterally(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	testutil.WriteFile(t, filepath.Join(repo, "state[1].patch"), "seed\n")
+	testutil.RunCmd(t, repo, "git", "add", "state[1].patch")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "track patch with metachar")
+	testutil.WriteFile(t, filepath.Join(repo, "state[1].patch"), "updated\n")
+	testutil.WriteFile(t, filepath.Join(repo, "state1.patch"), "other\n")
+	testutil.RunCmd(t, repo, "git", "add", "state1.patch")
+
+	patch, err := g.DiffHeadBinary(context.Background(), repo, g.GitDir, []string{"state[1].patch"})
+	if err != nil {
+		t.Fatalf("DiffHeadBinary error: %v", err)
+	}
+	if strings.Contains(string(patch), "state[1].patch") {
+		t.Fatalf("expected excluded patch path to be omitted: %s", string(patch))
+	}
+	if !strings.Contains(string(patch), "state1.patch") {
+		t.Fatalf("expected unrelated tracked diff to remain despite metacharacters: %s", string(patch))
+	}
+}
+
 func TestDiffHeadBinaryNoHead(t *testing.T) {
 	repo := testutil.InitEmptyRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
