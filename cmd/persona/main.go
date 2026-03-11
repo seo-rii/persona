@@ -381,9 +381,6 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 	if err == nil {
 		return nil
 	}
-	if !patchio.IsAlreadyExistsError(err) {
-		return err
-	}
 	filtered, skipped, ferr := patchio.FilterExistingNewFiles(patchData, repoRoot)
 	if ferr != nil || len(skipped) == 0 {
 		return err

@@ -171,6 +171,11 @@ type worktreeGitOps struct {
 	removeCalls []string
 }
 
+type applyRetryGitOps struct {
+	applyCalls int
+	applyErrs  []error
+}
+
 func (g *worktreeGitOps) RepoRootPath() string { return "/repo" }
 
 func (g *worktreeGitOps) GitDirPath() string { return "/repo/.git" }
@@ -206,6 +211,46 @@ func (g *worktreeGitOps) DiffNewFileNoIndex(context.Context, string, string, str
 }
 
 func (g *worktreeGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) RepoRootPath() string { return "" }
+
+func (g *applyRetryGitOps) GitDirPath() string { return "" }
+
+func (g *applyRetryGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) WorktreeAddDetach(context.Context, string, string) error {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) WorktreeRemoveForce(context.Context, string) error {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) ApplyPatch(context.Context, model.ApplyMode, string, string, []byte) error {
+	g.applyCalls++
+	if len(g.applyErrs) >= g.applyCalls {
+		return g.applyErrs[g.applyCalls-1]
+	}
+	return nil
+}
+
+func (g *applyRetryGitOps) DiffHeadBinary(context.Context, string, string, []string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) ListUntracked(context.Context, string, string) ([]string, error) {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) DiffNewFileNoIndex(context.Context, string, string, string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
 	panic("unexpected call")
 }
 
@@ -522,6 +567,33 @@ func TestPrepareBaseWorktreeCleanupRespectsKeepSession(t *testing.T) {
 			t.Fatalf("expected worktree removal, got %v", g.removeCalls)
 		}
 	})
+}
+
+func TestApplyPatchDataRetriesWithoutEnglishErrorString(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"",
+	}, "\n")
+	g := &applyRetryGitOps{
+		applyErrs: []error{errors.New("Datei existiert bereits")},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyStrict, []byte(patch), repoRoot, "", log)
+	if err != nil {
+		t.Fatalf("expected identical existing new file to be skipped despite localized error, got %v", err)
+	}
+	if g.applyCalls != 1 {
+		t.Fatalf("expected a single apply attempt when filtered patch is empty, got %d", g.applyCalls)
+	}
 }
 
 func TestMaskIgnoredFilesReadonlySkipsMissingTargets(t *testing.T) {
