@@ -15,6 +15,7 @@ import (
 
 	"persona/internal/gitx"
 	"persona/internal/model"
+	"persona/internal/session"
 	"persona/internal/testutil"
 )
 
@@ -163,6 +164,49 @@ type recordingNSOps struct {
 	remountCalls []string
 	bindErrs     map[string]error
 	remountErrs  map[string]error
+}
+
+type worktreeGitOps struct {
+	addCalls    []string
+	removeCalls []string
+}
+
+func (g *worktreeGitOps) RepoRootPath() string { return "/repo" }
+
+func (g *worktreeGitOps) GitDirPath() string { return "/repo/.git" }
+
+func (g *worktreeGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
+	panic("unexpected call")
+}
+
+func (g *worktreeGitOps) WorktreeAddDetach(_ context.Context, path, ref string) error {
+	g.addCalls = append(g.addCalls, path+"@"+ref)
+	return nil
+}
+
+func (g *worktreeGitOps) WorktreeRemoveForce(_ context.Context, path string) error {
+	g.removeCalls = append(g.removeCalls, path)
+	return nil
+}
+
+func (g *worktreeGitOps) ApplyPatch(context.Context, model.ApplyMode, string, string, []byte) error {
+	panic("unexpected call")
+}
+
+func (g *worktreeGitOps) DiffHeadBinary(context.Context, string, string, []string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g *worktreeGitOps) ListUntracked(context.Context, string, string) ([]string, error) {
+	panic("unexpected call")
+}
+
+func (g *worktreeGitOps) DiffNewFileNoIndex(context.Context, string, string, string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g *worktreeGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
+	panic("unexpected call")
 }
 
 func (m *recordingNSOps) UnshareMountNS() error { return nil }
@@ -436,6 +480,48 @@ func TestShouldForceMountFail(t *testing.T) {
 	if !shouldForceMountFail() {
 		t.Fatalf("expected true when env is 1")
 	}
+}
+
+func TestPrepareBaseWorktreeCleanupRespectsKeepSession(t *testing.T) {
+	t.Run("keep always keeps worktree", func(t *testing.T) {
+		g := &worktreeGitOps{}
+		sess := &session.Session{BaseWT: filepath.Join(t.TempDir(), "basewt")}
+		cleanup := &cleanupStack{}
+		opts := model.Options{BaseMode: model.BaseWorktree, BaseRef: "HEAD", KeepSession: model.KeepAlways}
+		var retErr error
+
+		basePath, err := prepareBase(context.Background(), g, opts, sess, false, "", cleanup, &retErr)
+		if err != nil {
+			t.Fatalf("prepareBase error: %v", err)
+		}
+		if basePath != sess.BaseWT {
+			t.Fatalf("expected basewt path, got %q", basePath)
+		}
+		if err := cleanup.Run(); err != nil {
+			t.Fatalf("cleanup error: %v", err)
+		}
+		if len(g.removeCalls) != 0 {
+			t.Fatalf("expected base worktree to be preserved, got removals %v", g.removeCalls)
+		}
+	})
+
+	t.Run("keep never removes worktree", func(t *testing.T) {
+		g := &worktreeGitOps{}
+		sess := &session.Session{BaseWT: filepath.Join(t.TempDir(), "basewt")}
+		cleanup := &cleanupStack{}
+		opts := model.Options{BaseMode: model.BaseWorktree, BaseRef: "HEAD", KeepSession: model.KeepNever}
+		var retErr error
+
+		if _, err := prepareBase(context.Background(), g, opts, sess, false, "", cleanup, &retErr); err != nil {
+			t.Fatalf("prepareBase error: %v", err)
+		}
+		if err := cleanup.Run(); err != nil {
+			t.Fatalf("cleanup error: %v", err)
+		}
+		if len(g.removeCalls) != 1 || g.removeCalls[0] != sess.BaseWT {
+			t.Fatalf("expected worktree removal, got %v", g.removeCalls)
+		}
+	})
 }
 
 func TestMaskIgnoredFilesReadonlySkipsMissingTargets(t *testing.T) {

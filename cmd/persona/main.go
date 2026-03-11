@@ -173,7 +173,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		return nil
 	})
 
-	basePath, err := prepareBase(ctx, g, opts, sess, patchInRepo, patchRel, cleanup)
+	basePath, err := prepareBase(ctx, g, opts, sess, patchInRepo, patchRel, cleanup, &retErr)
 	if err != nil {
 		return err, 0
 	}
@@ -273,7 +273,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 
 // prepareBase sets up the base layer: either the current repo (with an
 // optional dirty check) or a detached worktree at the requested ref.
-func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *session.Session, patchInRepo bool, patchRel string, cleanup *cleanupStack) (basePath string, err error) {
+func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *session.Session, patchInRepo bool, patchRel string, cleanup *cleanupStack, retErr *error) (basePath string, err error) {
 	switch opts.BaseMode {
 	case model.BaseRepo:
 		if !opts.AllowDirty {
@@ -295,6 +295,9 @@ func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *
 			return "", model.Wrap(model.ExitRepo, "git worktree add", err)
 		}
 		cleanup.Push(func() error {
+			if retErr != nil && !shouldRemoveSession(*retErr, opts) {
+				return nil
+			}
 			return g.WorktreeRemoveForce(context.Background(), sess.BaseWT)
 		})
 		return sess.BaseWT, nil
