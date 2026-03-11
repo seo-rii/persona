@@ -209,15 +209,15 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		return mount.Umount(repoRoot)
 	})
 
-	ignoredMasks, err := maskIgnoredFiles(ctx, g, repoRoot, menv.gitDirForOps, menv.emptyFile, menv.emptyDir, opts, mount, log)
+	if err := applyPatchData(ctx, g, opts.ApplyMode, patchData, repoRoot, menv.gitDirForOps, log); err != nil {
+		return model.Wrap(model.ExitApply, "apply patch", err), 0
+	}
+
+	ignoredMasks, initialIgnored, err := maskIgnoredFiles(ctx, g, repoRoot, menv.gitDirForOps, menv.emptyFile, menv.emptyDir, opts, mount, log)
 	if err != nil {
 		return model.Wrap(model.ExitEnv, "mask ignored files", err), 0
 	}
 	maskTargets = append(maskTargets, ignoredMasks...)
-
-	if err := applyPatchData(ctx, g, opts.ApplyMode, patchData, repoRoot, menv.gitDirForOps, log); err != nil {
-		return model.Wrap(model.ExitApply, "apply patch", err), 0
-	}
 
 	var patchMaskPath string
 	if patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git" {
@@ -255,7 +255,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		_ = mount.Umount(gitMaskPath)
 	}
 
-	patchOut, err := exportPatch(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel)
+	patchOut, err := exportPatch(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel, opts.IgnoredMode, initialIgnored)
 	if err != nil {
 		return model.Wrap(model.ExitExport, "export patch", err), 0
 	}
@@ -397,13 +397,13 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 
 // maskIgnoredFiles applies the configured ignored-file policy (readonly bind
 // mount or empty-file/dir mask) and returns the list of mount targets created.
-func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, mount model.NSOps, log *slog.Logger) ([]string, error) {
+func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, mount model.NSOps, log *slog.Logger) ([]string, []string, error) {
 	if opts.IgnoredMode == model.IgnoredTransparent {
-		return nil, nil
+		return nil, nil, nil
 	}
 	ignored, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDirForOps, opts.IgnoredMax)
 	if err != nil {
-		return nil, fmt.Errorf("list ignored: %w", err)
+		return nil, nil, fmt.Errorf("list ignored: %w", err)
 	}
 	log.Debug("ignored files", "count", len(ignored))
 	var targets []string
@@ -415,19 +415,19 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
-				return targets, fmt.Errorf("stat ignored readonly %s: %w", path, err)
+				return targets, ignored, fmt.Errorf("stat ignored readonly %s: %w", path, err)
 			}
 			if err := mount.BindMount(target, target); err != nil {
 				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
 					continue
 				}
-				return targets, fmt.Errorf("bind mount ignored readonly %s: %w", path, err)
+				return targets, ignored, fmt.Errorf("bind mount ignored readonly %s: %w", path, err)
 			}
 			if err := mount.RemountRO(target); err != nil {
 				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
 					continue
 				}
-				return targets, fmt.Errorf("remount ignored readonly %s: %w", path, err)
+				return targets, ignored, fmt.Errorf("remount ignored readonly %s: %w", path, err)
 			}
 			targets = append(targets, target)
 		case model.IgnoredMasked:
@@ -440,12 +440,12 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 				kind = model.MaskFile
 			}
 			if err := mount.MaskPath(target, kind, extEmptyFile, extEmptyDir); err != nil {
-				return targets, fmt.Errorf("mask ignored %s: %w", path, err)
+				return targets, ignored, fmt.Errorf("mask ignored %s: %w", path, err)
 			}
 			targets = append(targets, target)
 		}
 	}
-	return targets, nil
+	return targets, ignored, nil
 }
 
 func newRootCmd() *cobra.Command {
@@ -656,7 +656,28 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 	return 127
 }
 
-func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string) ([]byte, error) {
+func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, initialIgnored []string) ([]byte, error) {
+	if ignoredMode != model.IgnoredTransparent {
+		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, 0)
+		if err != nil {
+			return nil, err
+		}
+		ignoredSet := make(map[string]struct{}, len(initialIgnored))
+		for _, path := range initialIgnored {
+			ignoredSet[path] = struct{}{}
+		}
+		var newlyIgnored []string
+		for _, path := range ignoredNow {
+			if _, ok := ignoredSet[path]; ok {
+				continue
+			}
+			newlyIgnored = append(newlyIgnored, path)
+		}
+		if len(newlyIgnored) > 0 {
+			sort.Strings(newlyIgnored)
+			return nil, fmt.Errorf("new ignored paths appeared during run: %s", strings.Join(newlyIgnored, ", "))
+		}
+	}
 	trackedExclude := []string{}
 	if patchInRepo && patchRel != "" {
 		trackedExclude = append(trackedExclude, filepath.ToSlash(patchRel))

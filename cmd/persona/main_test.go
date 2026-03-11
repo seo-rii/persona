@@ -78,6 +78,7 @@ type ignoredListGitOps struct {
 type exportGitOps struct {
 	tracked    []byte
 	untracked  []string
+	ignored    []string
 	diffByPath map[string][]byte
 	errByPath  map[string]error
 }
@@ -154,7 +155,7 @@ func (g exportGitOps) DiffNewFileNoIndex(_ context.Context, _ string, _ string, 
 }
 
 func (g exportGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
-	panic("unexpected call")
+	return g.ignored, nil
 }
 
 type recordingNSOps struct {
@@ -448,9 +449,12 @@ func TestMaskIgnoredFilesReadonlySkipsMissingTargets(t *testing.T) {
 	opts := model.Options{IgnoredMode: model.IgnoredReadonly, IgnoredMax: 10}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	targets, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
+	targets, ignored, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
 	if err != nil {
 		t.Fatalf("maskIgnoredFiles error: %v", err)
+	}
+	if len(ignored) != 2 || ignored[0] != "missing.txt" || ignored[1] != "existing.txt" {
+		t.Fatalf("expected ignored list preserved, got %v", ignored)
 	}
 	if len(targets) != 1 || targets[0] != existing {
 		t.Fatalf("expected only existing target, got %v", targets)
@@ -482,9 +486,12 @@ func TestMaskIgnoredFilesReadonlySkipsBindMountENOENT(t *testing.T) {
 	opts := model.Options{IgnoredMode: model.IgnoredReadonly, IgnoredMax: 10}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	targets, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
+	targets, ignored, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
 	if err != nil {
 		t.Fatalf("maskIgnoredFiles error: %v", err)
+	}
+	if len(ignored) != 2 || ignored[0] != "raced.txt" || ignored[1] != "existing.txt" {
+		t.Fatalf("expected ignored list preserved, got %v", ignored)
 	}
 	if len(targets) != 1 || targets[0] != existing {
 		t.Fatalf("expected only existing target after bind ENOENT, got %v", targets)
@@ -611,7 +618,7 @@ func TestExportPatchSortAndExclude(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch1, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch")
+	patch1, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -630,7 +637,7 @@ func TestExportPatchSortAndExclude(t *testing.T) {
 		t.Fatalf("unexpected .git path in patch")
 	}
 
-	patch2, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch")
+	patch2, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, nil)
 	if err != nil {
 		t.Fatalf("exportPatch second call error: %v", err)
 	}
@@ -644,7 +651,7 @@ func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, false, "")
+	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, false, "", model.IgnoredTransparent, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -666,7 +673,7 @@ func TestExportPatchSkipsVanishedUntrackedFiles(t *testing.T) {
 		},
 	}
 
-	patch, err := exportPatch(context.Background(), g, repo, "", false, "")
+	patch, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -675,6 +682,20 @@ func TestExportPatchSkipsVanishedUntrackedFiles(t *testing.T) {
 	}
 	if bytes.Contains(patch, []byte("gone.txt")) {
 		t.Fatalf("expected vanished untracked file to be skipped: %s", string(patch))
+	}
+}
+
+func TestExportPatchFailsOnNewIgnoredCandidates(t *testing.T) {
+	g := exportGitOps{
+		ignored: []string{"late-ignored.txt"},
+	}
+
+	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, nil)
+	if err == nil {
+		t.Fatalf("expected error when new ignored candidates appear after child run")
+	}
+	if !strings.Contains(err.Error(), "late-ignored.txt") {
+		t.Fatalf("expected ignored path in error, got %v", err)
 	}
 }
 
@@ -687,7 +708,7 @@ func TestExportPatchExcludesTrackedPatchFile(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "other.txt"), "other\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch")
+	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
