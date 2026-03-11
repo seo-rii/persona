@@ -199,17 +199,19 @@ func (g Git) ListIgnoredCandidates(ctx context.Context, workTree, gitDir string,
 }
 
 func (g Git) hasHead(ctx context.Context, workTree, gitDir string) (bool, error) {
-	args := g.withDirArgs(workTree, gitDir, "rev-parse", "--verify", "HEAD")
+	args := g.withDirArgs(workTree, gitDir, "show-ref", "--head", "--quiet")
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = workTree
 	cmd.Env = g.envWith(workTree, gitDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			if exitErr.ExitCode() == 128 {
+			if exitErr.ExitCode() == 1 {
 				return false, nil
 			}
 		}
-		return false, err
+		return false, fmt.Errorf("%w: %s", err, truncateOutput(stderr.String()))
 	}
 	return true, nil
 }

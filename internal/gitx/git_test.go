@@ -203,6 +203,27 @@ func TestDiffHeadBinaryNoHead(t *testing.T) {
 	}
 }
 
+func TestDiffHeadBinaryCorruptedHeadReturnsError(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	headData, err := os.ReadFile(filepath.Join(repo, ".git", "HEAD"))
+	if err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	refLine := strings.TrimSpace(string(headData))
+	refPath := strings.TrimPrefix(refLine, "ref: ")
+	refPath = filepath.Join(repo, ".git", filepath.FromSlash(refPath))
+	if err := os.WriteFile(refPath, []byte("deadbeef\n"), 0o644); err != nil {
+		t.Fatalf("corrupt ref: %v", err)
+	}
+
+	_, err = g.DiffHeadBinary(context.Background(), repo, g.GitDir, nil)
+	if err == nil {
+		t.Fatalf("expected corruption to surface as error")
+	}
+}
+
 func TestDetectRepoIgnoresEnv(t *testing.T) {
 	repo := testutil.InitRepo(t)
 	t.Setenv("GIT_DIR", "/tmp/nogit")
