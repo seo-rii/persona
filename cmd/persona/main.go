@@ -653,6 +653,9 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 		return 0
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
+		if status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return 128 + int(status.Signal())
+		}
 		return exitErr.ExitCode()
 	}
 	fmt.Fprintln(os.Stderr, err)

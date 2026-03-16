@@ -737,6 +737,11 @@ func TestRunCommandExitCodes(t *testing.T) {
 			t.Fatalf("expected 7 got %d", code)
 		}
 	})
+	t.Run("signal exit normalized", func(t *testing.T) {
+		if code := runCommand(t.TempDir(), ".", []string{"sh", "-c", "kill -TERM $$"}); code != 143 {
+			t.Fatalf("expected 143 got %d", code)
+		}
+	})
 	t.Run("missing command returns 127", func(t *testing.T) {
 		if code := runCommand(t.TempDir(), ".", []string{"/definitely/missing/persona-test-command"}); code != 127 {
 			t.Fatalf("expected 127 got %d", code)
