@@ -68,3 +68,29 @@ func TestCreateUsesGitDir(t *testing.T) {
 		t.Fatalf("unexpected session root: %s", s.Root)
 	}
 }
+
+func TestCreateRejectsSymlinkedSessionParent(t *testing.T) {
+	gitDir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(gitDir, "persona")); err != nil {
+		t.Fatalf("symlink persona dir: %v", err)
+	}
+
+	s, err := Create(gitDir)
+	if err == nil {
+		if s != nil {
+			_ = s.RemoveAll()
+		}
+		t.Fatal("expected symlinked session parent to be rejected")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink error, got %v", err)
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatalf("read outside dir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no session data outside gitDir, got %d entries", len(entries))
+	}
+}

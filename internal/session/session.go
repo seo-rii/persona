@@ -24,6 +24,21 @@ func Create(gitDir string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, parent := range []string{
+		filepath.Join(gitDir, "persona"),
+		filepath.Join(gitDir, "persona", "sessions"),
+	} {
+		info, err := os.Lstat(parent)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("session parent is symlink: %s", parent)
+		}
+	}
 	root := filepath.Join(gitDir, "persona", "sessions", id)
 	upper := filepath.Join(root, "upper")
 	work := filepath.Join(root, "work")
