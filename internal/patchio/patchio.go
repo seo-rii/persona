@@ -63,7 +63,8 @@ func EnsurePatchPath(opts model.Options, gitDir string, now time.Time) (string, 
 	}
 
 	patchDir := opts.PatchDir
-	if strings.TrimSpace(patchDir) == "" {
+	defaultPatchDir := strings.TrimSpace(patchDir) == ""
+	if defaultPatchDir {
 		patchDir = filepath.Join(gitDir, "persona", "patches")
 	}
 	if !filepath.IsAbs(patchDir) {
@@ -72,6 +73,23 @@ func EnsurePatchPath(opts model.Options, gitDir string, now time.Time) (string, 
 			return "", err
 		}
 		patchDir = abs
+	}
+	if defaultPatchDir {
+		for _, parent := range []string{
+			filepath.Join(gitDir, "persona"),
+			filepath.Join(gitDir, "persona", "patches"),
+		} {
+			info, err := os.Lstat(parent)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return "", err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("auto patch dir parent is symlink: %s", parent)
+			}
+		}
 	}
 	if err := os.MkdirAll(patchDir, 0o755); err != nil {
 		return "", err

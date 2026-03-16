@@ -123,6 +123,29 @@ func TestEnsurePatchPathAuto(t *testing.T) {
 	}
 }
 
+func TestEnsurePatchPathAutoRejectsSymlinkedPersonaDir(t *testing.T) {
+	gitDir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(gitDir, "persona")); err != nil {
+		t.Fatalf("symlink persona dir: %v", err)
+	}
+
+	path, err := EnsurePatchPath(model.Options{}, gitDir, time.Now())
+	if err == nil {
+		t.Fatalf("expected symlinked auto patch dir to be rejected, got path %q", path)
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink error, got %v", err)
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatalf("read outside dir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no auto patch dir created outside gitDir, got %d entries", len(entries))
+	}
+}
+
 func TestValidatePatchPathsRenameCopy(t *testing.T) {
 	patch := strings.Join([]string{
 		"diff --git a/old.txt b/new.txt",
