@@ -662,6 +662,35 @@ func TestMaskIgnoredFilesReadonlySkipsBindMountENOENT(t *testing.T) {
 	}
 }
 
+func TestMaskIgnoredFilesMaskedFailsOnNonENOENTStat(t *testing.T) {
+	repoRoot := t.TempDir()
+	blocker := filepath.Join(repoRoot, "blocker")
+	if err := os.WriteFile(blocker, []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	g := ignoredListGitOps{ignored: []string{"blocker/child.txt"}}
+	mount := &recordingNSOps{}
+	opts := model.Options{IgnoredMode: model.IgnoredMasked, IgnoredMax: 10}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	targets, ignored, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
+	if err == nil {
+		t.Fatalf("expected stat error for masked ignored path")
+	}
+	if !strings.Contains(err.Error(), "stat ignored masked blocker/child.txt") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("expected no mask targets on stat error, got %v", targets)
+	}
+	if len(ignored) != 1 || ignored[0] != "blocker/child.txt" {
+		t.Fatalf("expected ignored list preserved on error, got %v", ignored)
+	}
+	if len(mount.bindCalls) != 0 {
+		t.Fatalf("expected no bind calls on stat error, got %v", mount.bindCalls)
+	}
+}
+
 func TestCleanupStackRunOrderAndErrors(t *testing.T) {
 	var c cleanupStack
 	var order []int

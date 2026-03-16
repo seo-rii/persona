@@ -433,7 +433,10 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 		case model.IgnoredMasked:
 			info, err := os.Lstat(target)
 			if err != nil {
-				continue
+				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
+					continue
+				}
+				return targets, ignored, fmt.Errorf("stat ignored masked %s: %w", path, err)
 			}
 			kind := model.MaskDir
 			if !info.IsDir() {
