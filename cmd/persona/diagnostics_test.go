@@ -110,3 +110,36 @@ func TestFindmntInfoParsesQuotedValuesWithSpaces(t *testing.T) {
 		t.Fatalf("TARGET parse mismatch: got %q want %q", got, want)
 	}
 }
+
+func TestFindSetcapPathUsesAbsoluteCandidatesOnly(t *testing.T) {
+	tmp := t.TempDir()
+	rogue := filepath.Join(tmp, "setcap")
+	if err := os.WriteFile(rogue, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write rogue setcap: %v", err)
+	}
+	trusted := filepath.Join(tmp, "trusted-setcap")
+	if err := os.WriteFile(trusted, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write trusted setcap: %v", err)
+	}
+	t.Setenv("PATH", tmp+":"+os.Getenv("PATH"))
+
+	got, err := findSetcapPath([]string{"setcap", trusted})
+	if err != nil {
+		t.Fatalf("findSetcapPath error: %v", err)
+	}
+	if got != trusted {
+		t.Fatalf("expected trusted absolute path %q, got %q", trusted, got)
+	}
+}
+
+func TestFindSetcapPathErrorsWhenNoTrustedCandidateExists(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()+":"+os.Getenv("PATH"))
+
+	_, err := findSetcapPath([]string{"setcap"})
+	if err == nil {
+		t.Fatal("expected error when only PATH-based candidate exists")
+	}
+	if !strings.Contains(err.Error(), "setcap not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

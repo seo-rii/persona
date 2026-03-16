@@ -21,6 +21,13 @@ const (
 	capSetFcap     = 31
 )
 
+var setcapCandidates = []string{
+	"/usr/sbin/setcap",
+	"/usr/bin/setcap",
+	"/sbin/setcap",
+	"/bin/setcap",
+}
+
 type diagInfo struct {
 	ExePath        string
 	ExeResolved    string
@@ -106,7 +113,7 @@ func newActivateCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "persona: hint: run this command with sudo or as root")
 				return err
 			}
-			setcapPath, err := exec.LookPath("setcap")
+			setcapPath, err := findSetcapPath(setcapCandidates)
 			if err != nil {
 				return fmt.Errorf("setcap not found; install libcap2-bin")
 			}
@@ -140,6 +147,26 @@ func leastPrivilegeCapabilityHint() string {
 		"run `sudo persona activate` or `sudo setcap %s /path/to/persona`; add `--allow-dac-override` only when patch writes must bypass DAC checks.",
 		activateCapabilitySpec(false),
 	)
+}
+
+func findSetcapPath(candidates []string) (string, error) {
+	for _, candidate := range candidates {
+		if !filepath.IsAbs(candidate) {
+			continue
+		}
+		info, err := os.Stat(candidate)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", err
+		}
+		if info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("setcap not found")
 }
 
 func resolveBinaryPath(target string) (string, error) {
@@ -202,7 +229,7 @@ func collectDiag() diagInfo {
 			info.MountTarget = mi["TARGET"]
 		}
 	}
-	if setcapPath, err := exec.LookPath("setcap"); err == nil {
+	if setcapPath, err := findSetcapPath(setcapCandidates); err == nil {
 		info.SetcapPath = setcapPath
 	}
 	return info
