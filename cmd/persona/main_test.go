@@ -155,8 +155,11 @@ func (g exportGitOps) DiffNewFileNoIndex(_ context.Context, _ string, _ string, 
 	return g.diffByPath[relPath], nil
 }
 
-func (g exportGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
-	return g.ignored, nil
+func (g exportGitOps) ListIgnoredCandidates(_ context.Context, _ string, _ string, maxN int) ([]string, error) {
+	if maxN > 0 && len(g.ignored) > maxN {
+		return append([]string(nil), g.ignored[:maxN]...), nil
+	}
+	return append([]string(nil), g.ignored...), nil
 }
 
 type recordingNSOps struct {
@@ -888,6 +891,17 @@ func TestExportPatchFailsOnNewIgnoredCandidates(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "late-ignored.txt") {
 		t.Fatalf("expected ignored path in error, got %v", err)
+	}
+}
+
+func TestExportPatchIgnoredDriftUsesBaselineCap(t *testing.T) {
+	g := exportGitOps{
+		ignored: []string{"a.tmp", "b.tmp", "c.tmp"},
+	}
+
+	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, []string{"a.tmp", "b.tmp"})
+	if err != nil {
+		t.Fatalf("expected capped ignored baseline not to fail, got %v", err)
 	}
 }
 

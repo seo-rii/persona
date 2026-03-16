@@ -664,7 +664,11 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 
 func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, initialIgnored []string) ([]byte, error) {
 	if ignoredMode != model.IgnoredTransparent {
-		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, 0)
+		ignoredCap := 0
+		if len(initialIgnored) > 0 {
+			ignoredCap = len(initialIgnored)
+		}
+		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, ignoredCap)
 		if err != nil {
 			return nil, err
 		}
