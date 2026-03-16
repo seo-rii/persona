@@ -621,6 +621,39 @@ func TestFilterExistingNewFilesBinaryNotSkipped(t *testing.T) {
 	}
 }
 
+func TestFilterExistingNewFilesSymlinkNotSkipped(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(target, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write target file: %v", err)
+	}
+	link := filepath.Join(dir, "foo.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	patch := strings.Join([]string{
+		"diff --git a/foo.txt b/foo.txt",
+		"new file mode 100644",
+		"index 0000000..e69de29",
+		"--- /dev/null",
+		"+++ b/foo.txt",
+		"@@ -0,0 +1 @@",
+		"+hello",
+		"",
+	}, "\n")
+
+	filtered, skipped, err := FilterExistingNewFiles([]byte(patch), dir)
+	if err != nil {
+		t.Fatalf("filter existing new files: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("expected symlink path not to be skipped, got %v", skipped)
+	}
+	if string(filtered) != patch {
+		t.Fatalf("expected patch to stay unchanged for symlink collision")
+	}
+}
+
 func TestValidatePatchPathsRejectEscapedDotDot(t *testing.T) {
 	patch := "diff --git a/\\056\\056/evil b/\\056\\056/evil\n+++ b/\\056\\056/evil\n"
 	if err := ValidatePatchPaths([]byte(patch)); err == nil {

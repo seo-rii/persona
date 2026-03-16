@@ -267,7 +267,7 @@ func shouldSkipNewFileBlock(block patchBlock, workTree string) bool {
 		return false
 	}
 	path := filepath.Join(workTree, filepath.FromSlash(block.path))
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil || info.IsDir() || !info.Mode().IsRegular() {
 		return false
 	}
