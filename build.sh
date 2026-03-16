@@ -14,9 +14,11 @@ if ! go build -o "$bin" ./cmd/persona; then
   go build -o "$bin" ./cmd/persona
 fi
 
+default_caps="cap_sys_admin+ep"
+
 if [ "$(id -u)" -eq 0 ]; then
   if command -v setcap >/dev/null 2>&1; then
-    if setcap cap_sys_admin,cap_dac_override+ep "$bin" 2>/dev/null; then
+    if setcap "$default_caps" "$bin" 2>/dev/null; then
       echo "capabilities set: $bin"
     else
       echo "warning: setcap failed (run with sudo or use ./bin/persona activate)" >&2
@@ -26,7 +28,7 @@ if [ "$(id -u)" -eq 0 ]; then
   fi
 else
   if [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
-    if sudo setcap cap_sys_admin,cap_dac_override+ep "$bin"; then
+    if sudo setcap "$default_caps" "$bin"; then
       echo "capabilities set: $bin"
     else
       echo "warning: sudo setcap failed (use ./bin/persona activate)" >&2
@@ -36,4 +38,5 @@ else
   fi
 fi
 
+echo "note: use ./bin/persona activate --allow-dac-override only when patch writes must bypass DAC checks" >&2
 echo "built: $bin"

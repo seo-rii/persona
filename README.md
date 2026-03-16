@@ -43,7 +43,7 @@ persona --patch /tmp/state.patch -- cat new.txt
 ## Commands
 
 - `persona doctor`: print capability/mount diagnostics and hints for permission issues.
-- `persona activate`: grant file capabilities (`cap_sys_admin,cap_dac_override`) to the persona binary.
+- `persona activate`: grant `cap_sys_admin` to the persona binary by default. Add `--allow-dac-override` only when patch writes must bypass DAC checks.
 
 Example:
 
