@@ -15,10 +15,17 @@ if ! go build -o "$bin" ./cmd/persona; then
 fi
 
 default_caps="cap_sys_admin+ep"
+setcap_bin=""
+for candidate in /usr/sbin/setcap /usr/bin/setcap /sbin/setcap /bin/setcap; do
+  if [ -x "$candidate" ] && [ ! -d "$candidate" ]; then
+    setcap_bin="$candidate"
+    break
+  fi
+done
 
 if [ "$(id -u)" -eq 0 ]; then
-  if command -v setcap >/dev/null 2>&1; then
-    if setcap "$default_caps" "$bin" 2>/dev/null; then
+  if [ -n "$setcap_bin" ]; then
+    if "$setcap_bin" "$default_caps" "$bin" 2>/dev/null; then
       echo "capabilities set: $bin"
     else
       echo "warning: setcap failed (run with sudo or use ./bin/persona activate)" >&2
@@ -28,7 +35,7 @@ if [ "$(id -u)" -eq 0 ]; then
   fi
 else
   if [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
-    if sudo setcap "$default_caps" "$bin"; then
+    if [ -n "$setcap_bin" ] && sudo "$setcap_bin" "$default_caps" "$bin"; then
       echo "capabilities set: $bin"
     else
       echo "warning: sudo setcap failed (use ./bin/persona activate)" >&2
