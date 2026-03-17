@@ -797,6 +797,41 @@ func TestResolvePath(t *testing.T) {
 			t.Fatalf("expected %q got %q", target, got)
 		}
 	})
+	t.Run("multi hop symlink resolves final target", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "final.patch")
+		if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write target: %v", err)
+		}
+		link2 := filepath.Join(dir, "link2.patch")
+		if err := os.Symlink(target, link2); err != nil {
+			t.Fatalf("symlink link2: %v", err)
+		}
+		link1 := filepath.Join(dir, "link1.patch")
+		if err := os.Symlink(link2, link1); err != nil {
+			t.Fatalf("symlink link1: %v", err)
+		}
+		got := resolvePath(link1)
+		if got != target {
+			t.Fatalf("expected %q got %q", target, got)
+		}
+	})
+	t.Run("dangling multi hop symlink resolves final alias target", func(t *testing.T) {
+		dir := t.TempDir()
+		link2 := filepath.Join(dir, "link2.patch")
+		if err := os.Symlink(filepath.Join("nested", "final.patch"), link2); err != nil {
+			t.Fatalf("symlink link2: %v", err)
+		}
+		link1 := filepath.Join(dir, "link1.patch")
+		if err := os.Symlink("link2.patch", link1); err != nil {
+			t.Fatalf("symlink link1: %v", err)
+		}
+		want := filepath.Join(dir, "nested", "final.patch")
+		got := resolvePath(link1)
+		if got != want {
+			t.Fatalf("expected %q got %q", want, got)
+		}
+	})
 	t.Run("missing path keeps input", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "missing.patch")
 		got := resolvePath(path)

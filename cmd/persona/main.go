@@ -759,14 +759,42 @@ func resolvePath(path string) string {
 	if err == nil {
 		return real
 	}
-	info, statErr := os.Lstat(path)
-	if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(path)
-		if err == nil {
-			if !filepath.IsAbs(target) {
-				target = filepath.Join(filepath.Dir(path), target)
+	path = filepath.Clean(path)
+	if path == "" || !filepath.IsAbs(path) {
+		return path
+	}
+	for depth := 0; depth < 255; depth++ {
+		current := string(filepath.Separator)
+		parts := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
+		changed := false
+		for i, part := range parts {
+			if part == "" {
+				continue
 			}
-			return filepath.Clean(target)
+			next := filepath.Join(current, part)
+			info, statErr := os.Lstat(next)
+			if statErr != nil {
+				if os.IsNotExist(statErr) {
+					return filepath.Clean(filepath.Join(append([]string{current}, parts[i:]...)...))
+				}
+				return path
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				target, readErr := os.Readlink(next)
+				if readErr != nil {
+					return path
+				}
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(filepath.Dir(next), target)
+				}
+				path = filepath.Clean(filepath.Join(append([]string{target}, parts[i+1:]...)...))
+				changed = true
+				break
+			}
+			current = next
+		}
+		if !changed {
+			return current
 		}
 	}
 	return path
