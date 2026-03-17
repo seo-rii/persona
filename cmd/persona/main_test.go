@@ -92,6 +92,10 @@ func (g ignoredListGitOps) IsCleanExceptUntracked(context.Context, []string) (bo
 	panic("unexpected call")
 }
 
+func (g ignoredListGitOps) IsCleanExceptPaths(context.Context, []string) (bool, error) {
+	panic("unexpected call")
+}
+
 func (g ignoredListGitOps) WorktreeAddDetach(context.Context, string, string) error {
 	panic("unexpected call")
 }
@@ -125,6 +129,10 @@ func (g exportGitOps) RepoRootPath() string { return "" }
 func (g exportGitOps) GitDirPath() string { return "" }
 
 func (g exportGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
+	panic("unexpected call")
+}
+
+func (g exportGitOps) IsCleanExceptPaths(context.Context, []string) (bool, error) {
 	panic("unexpected call")
 }
 
@@ -174,6 +182,10 @@ type worktreeGitOps struct {
 	removeCalls []string
 }
 
+type repoCleanGitOps struct {
+	excludeCalls [][]string
+}
+
 type applyRetryGitOps struct {
 	applyCalls int
 	applyErrs  []error
@@ -184,6 +196,10 @@ func (g *worktreeGitOps) RepoRootPath() string { return "/repo" }
 func (g *worktreeGitOps) GitDirPath() string { return "/repo/.git" }
 
 func (g *worktreeGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
+	panic("unexpected call")
+}
+
+func (g *worktreeGitOps) IsCleanExceptPaths(context.Context, []string) (bool, error) {
 	panic("unexpected call")
 }
 
@@ -217,11 +233,56 @@ func (g *worktreeGitOps) ListIgnoredCandidates(context.Context, string, string, 
 	panic("unexpected call")
 }
 
+func (g *repoCleanGitOps) RepoRootPath() string { return "/repo" }
+
+func (g *repoCleanGitOps) GitDirPath() string { return "/repo/.git" }
+
+func (g *repoCleanGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
+	panic("unexpected call")
+}
+
+func (g *repoCleanGitOps) IsCleanExceptPaths(_ context.Context, excludePaths []string) (bool, error) {
+	g.excludeCalls = append(g.excludeCalls, append([]string(nil), excludePaths...))
+	return true, nil
+}
+
+func (g *repoCleanGitOps) WorktreeAddDetach(context.Context, string, string) error {
+	panic("unexpected call")
+}
+
+func (g *repoCleanGitOps) WorktreeRemoveForce(context.Context, string) error {
+	panic("unexpected call")
+}
+
+func (g *repoCleanGitOps) ApplyPatch(context.Context, model.ApplyMode, string, string, []byte) error {
+	panic("unexpected call")
+}
+
+func (g *repoCleanGitOps) DiffHeadBinary(context.Context, string, string, []string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g *repoCleanGitOps) ListUntracked(context.Context, string, string) ([]string, error) {
+	panic("unexpected call")
+}
+
+func (g *repoCleanGitOps) DiffNewFileNoIndex(context.Context, string, string, string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g *repoCleanGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
+	panic("unexpected call")
+}
+
 func (g *applyRetryGitOps) RepoRootPath() string { return "" }
 
 func (g *applyRetryGitOps) GitDirPath() string { return "" }
 
 func (g *applyRetryGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) IsCleanExceptPaths(context.Context, []string) (bool, error) {
 	panic("unexpected call")
 }
 
@@ -570,6 +631,29 @@ func TestPrepareBaseWorktreeCleanupRespectsKeepSession(t *testing.T) {
 			t.Fatalf("expected worktree removal, got %v", g.removeCalls)
 		}
 	})
+}
+
+func TestPrepareBaseRepoExcludesPatchAndLockPaths(t *testing.T) {
+	g := &repoCleanGitOps{}
+	sess := &session.Session{}
+	cleanup := &cleanupStack{}
+	opts := model.Options{BaseMode: model.BaseRepo, KeepSession: model.KeepOnFail}
+	var retErr error
+
+	basePath, err := prepareBase(context.Background(), g, opts, sess, true, "state.patch", cleanup, &retErr)
+	if err != nil {
+		t.Fatalf("prepareBase error: %v", err)
+	}
+	if basePath != "/repo" {
+		t.Fatalf("expected repo base path, got %q", basePath)
+	}
+	if len(g.excludeCalls) != 1 {
+		t.Fatalf("expected a single clean-check call, got %d", len(g.excludeCalls))
+	}
+	want := []string{"state.patch", "state.patch.lock"}
+	if strings.Join(g.excludeCalls[0], ",") != strings.Join(want, ",") {
+		t.Fatalf("expected excluded paths %v, got %v", want, g.excludeCalls[0])
+	}
 }
 
 func TestApplyPatchDataRetriesWithoutEnglishErrorString(t *testing.T) {

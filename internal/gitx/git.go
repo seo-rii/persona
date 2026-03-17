@@ -71,6 +71,25 @@ func (g Git) IsCleanExceptUntracked(ctx context.Context, ignoreUntracked []strin
 	return true, nil
 }
 
+func (g Git) IsCleanExceptPaths(ctx context.Context, excludePaths []string) (bool, error) {
+	clean, err := g.diffQuietExcept(ctx, excludePaths)
+	if err != nil || !clean {
+		return clean, err
+	}
+	clean, err = g.diffCachedQuietExcept(ctx, excludePaths)
+	if err != nil || !clean {
+		return clean, err
+	}
+	hasUntracked, err := g.hasUntrackedExcept(ctx, excludePaths)
+	if err != nil {
+		return false, err
+	}
+	if hasUntracked {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (g Git) hasUntrackedExcept(ctx context.Context, ignoreUntracked []string) (bool, error) {
 	out, err := g.gitOutputBytes(ctx, g.RepoRoot, g.env(), "git", "ls-files", "-o", "--exclude-standard", "-z")
 	if err != nil {
@@ -105,6 +124,14 @@ func (g Git) diffCachedQuiet(ctx context.Context) (bool, error) {
 	return g.runQuiet(ctx, "git", "diff", "--cached", "--quiet")
 }
 
+func (g Git) diffQuietExcept(ctx context.Context, excludePaths []string) (bool, error) {
+	return g.runQuiet(ctx, "git", g.withExcludePathspecs([]string{"diff", "--quiet"}, excludePaths)...)
+}
+
+func (g Git) diffCachedQuietExcept(ctx context.Context, excludePaths []string) (bool, error) {
+	return g.runQuiet(ctx, "git", g.withExcludePathspecs([]string{"diff", "--cached", "--quiet"}, excludePaths)...)
+}
+
 func (g Git) runQuiet(ctx context.Context, name string, args ...string) (bool, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = g.RepoRoot
@@ -118,6 +145,22 @@ func (g Git) runQuiet(ctx context.Context, name string, args ...string) (bool, e
 		return false, err
 	}
 	return true, nil
+}
+
+func (g Git) withExcludePathspecs(args []string, excludePaths []string) []string {
+	if len(excludePaths) == 0 {
+		return args
+	}
+	out := append([]string{}, args...)
+	out = append(out, "--", ".")
+	for _, path := range excludePaths {
+		path = filepath.ToSlash(strings.TrimSpace(path))
+		if path == "" {
+			continue
+		}
+		out = append(out, ":(exclude,literal)"+path)
+	}
+	return out
 }
 
 func (g Git) WorktreeAddDetach(ctx context.Context, path, ref string) error {

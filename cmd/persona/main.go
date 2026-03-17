@@ -277,11 +277,11 @@ func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *
 	switch opts.BaseMode {
 	case model.BaseRepo:
 		if !opts.AllowDirty {
-			ignoreUntracked := []string{}
+			excludePaths := []string{}
 			if patchInRepo && patchRel != "" && patchRel != "." {
-				ignoreUntracked = append(ignoreUntracked, patchRel)
+				excludePaths = append(excludePaths, patchRel, patchRel+".lock")
 			}
-			clean, err := g.IsCleanExceptUntracked(ctx, ignoreUntracked)
+			clean, err := g.IsCleanExceptPaths(ctx, excludePaths)
 			if err != nil {
 				return "", model.Wrap(model.ExitRepo, "git clean check", err)
 			}

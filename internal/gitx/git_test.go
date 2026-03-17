@@ -68,6 +68,34 @@ func TestIsCleanExceptUntracked(t *testing.T) {
 	}
 }
 
+func TestIsCleanExceptPaths(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
+	testutil.RunCmd(t, repo, "git", "add", "state.patch")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "track patch")
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "updated\n")
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch.lock"), "lock\n")
+
+	clean, err := g.IsCleanExceptPaths(context.Background(), []string{"state.patch", "state.patch.lock"})
+	if err != nil {
+		t.Fatalf("IsCleanExceptPaths error: %v", err)
+	}
+	if !clean {
+		t.Fatalf("expected clean when only excluded patch state changed")
+	}
+
+	testutil.WriteFile(t, filepath.Join(repo, "tracked.txt"), "dirty\n")
+	clean, err = g.IsCleanExceptPaths(context.Background(), []string{"state.patch", "state.patch.lock"})
+	if err != nil {
+		t.Fatalf("IsCleanExceptPaths error with extra tracked change: %v", err)
+	}
+	if clean {
+		t.Fatalf("expected dirty when other tracked changes exist")
+	}
+}
+
 func TestListIgnoredCandidates(t *testing.T) {
 	repo := testutil.InitRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}

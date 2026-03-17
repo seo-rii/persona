@@ -12,6 +12,7 @@ type GitOps interface {
 
 	// Working-tree status
 	IsCleanExceptUntracked(ctx context.Context, ignoreUntracked []string) (bool, error)
+	IsCleanExceptPaths(ctx context.Context, excludePaths []string) (bool, error)
 
 	// Worktree management
 	WorktreeAddDetach(ctx context.Context, path, ref string) error
