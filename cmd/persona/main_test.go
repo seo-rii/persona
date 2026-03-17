@@ -172,9 +172,17 @@ func (g exportGitOps) ListIgnoredCandidates(_ context.Context, _ string, _ strin
 
 type recordingNSOps struct {
 	bindCalls    []string
+	maskCalls    []maskCall
 	remountCalls []string
 	bindErrs     map[string]error
 	remountErrs  map[string]error
+}
+
+type maskCall struct {
+	target    string
+	kind      model.MaskKind
+	emptyFile string
+	emptyDir  string
 }
 
 type worktreeGitOps struct {
@@ -342,7 +350,15 @@ func (m *recordingNSOps) Umount(string) error { return nil }
 
 func (m *recordingNSOps) MountOverlay(string, model.OverlayOpts) error { return nil }
 
-func (m *recordingNSOps) MaskPath(string, model.MaskKind, string, string) error { return nil }
+func (m *recordingNSOps) MaskPath(target string, kind model.MaskKind, emptyFile, emptyDir string) error {
+	m.maskCalls = append(m.maskCalls, maskCall{
+		target:    target,
+		kind:      kind,
+		emptyFile: emptyFile,
+		emptyDir:  emptyDir,
+	})
+	return nil
+}
 
 func defaultBuildOptionsInput() buildOptionsInput {
 	return buildOptionsInput{
@@ -775,6 +791,38 @@ func TestMaskIgnoredFilesMaskedFailsOnNonENOENTStat(t *testing.T) {
 	}
 	if len(mount.bindCalls) != 0 {
 		t.Fatalf("expected no bind calls on stat error, got %v", mount.bindCalls)
+	}
+}
+
+func TestMaskIgnoredFilesMaskedUsesDistinctBackingPerTarget(t *testing.T) {
+	repoRoot := t.TempDir()
+	for _, name := range []string{"one.txt", "two.txt"} {
+		if err := os.WriteFile(filepath.Join(repoRoot, name), []byte("seed\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	fileRoot := filepath.Join(t.TempDir(), "files")
+	dirRoot := filepath.Join(t.TempDir(), "dirs")
+	if err := os.MkdirAll(fileRoot, 0o755); err != nil {
+		t.Fatalf("mkdir file root: %v", err)
+	}
+	if err := os.MkdirAll(dirRoot, 0o755); err != nil {
+		t.Fatalf("mkdir dir root: %v", err)
+	}
+	g := ignoredListGitOps{ignored: []string{"one.txt", "two.txt"}}
+	mount := &recordingNSOps{}
+	opts := model.Options{IgnoredMode: model.IgnoredMasked, IgnoredMax: 10}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	targets, ignored, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", fileRoot, dirRoot, opts, mount, log)
+	if err != nil {
+		t.Fatalf("maskIgnoredFiles error: %v", err)
+	}
+	if len(targets) != 2 || len(ignored) != 2 || len(mount.maskCalls) != 2 {
+		t.Fatalf("expected two masked targets, got targets=%v ignored=%v maskCalls=%v", targets, ignored, mount.maskCalls)
+	}
+	if mount.maskCalls[0].emptyFile == mount.maskCalls[1].emptyFile {
+		t.Fatalf("expected distinct file backings, got %q", mount.maskCalls[0].emptyFile)
 	}
 }
 

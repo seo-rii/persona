@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -222,7 +224,11 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	var patchMaskPath string
 	if patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git" {
 		patchMaskPath = filepath.Join(repoRoot, patchRel)
-		if err := mount.MaskPath(patchMaskPath, model.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
+		maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(menv.emptyFile, menv.emptyDir, patchMaskPath)
+		if err != nil {
+			return model.Wrap(model.ExitEnv, "prepare patch mask backing", err), 0
+		}
+		if err := mount.MaskPath(patchMaskPath, model.MaskFile, maskEmptyFile, maskEmptyDir); err != nil {
 			return model.Wrap(model.ExitEnv, "mask patch file", err), 0
 		}
 		maskTargets = append(maskTargets, patchMaskPath)
@@ -235,7 +241,11 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		if !info.IsDir() {
 			kind = model.MaskFile
 		}
-		if err := mount.MaskPath(gitPath, kind, menv.emptyFile, menv.emptyDir); err != nil {
+		maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(menv.emptyFile, menv.emptyDir, gitPath)
+		if err != nil {
+			return model.Wrap(model.ExitEnv, "prepare .git mask backing", err), 0
+		}
+		if err := mount.MaskPath(gitPath, kind, maskEmptyFile, maskEmptyDir); err != nil {
 			return model.Wrap(model.ExitEnv, "mask .git", err), 0
 		}
 		gitMaskPath = gitPath
@@ -308,8 +318,8 @@ func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *
 
 // mountEnv holds paths created during namespace setup that later phases need.
 type mountEnv struct {
-	emptyDir     string // empty directory for mask-dir bind mounts
-	emptyFile    string // empty file for mask-file bind mounts
+	emptyDir     string // root directory containing per-mask empty dirs
+	emptyFile    string // root directory containing per-mask empty files
 	gitDirForOps string // bind-mounted .git dir accessible from overlay
 }
 
@@ -324,21 +334,16 @@ func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mou
 	cleanup.Push(func() error { return os.RemoveAll(extRoot) })
 
 	env := &mountEnv{
-		emptyDir:     filepath.Join(extRoot, "empty", "emptydir"),
-		emptyFile:    filepath.Join(extRoot, "empty", "emptyfile"),
+		emptyDir:     filepath.Join(extRoot, "empty", "dirs"),
+		emptyFile:    filepath.Join(extRoot, "empty", "files"),
 		gitDirForOps: filepath.Join(extRoot, "mnt", "gitdir"),
 	}
 	if err := os.MkdirAll(env.emptyDir, 0o755); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "create external empty dir", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(env.emptyFile), 0o755); err != nil {
+	if err := os.MkdirAll(env.emptyFile, 0o755); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "create external empty file dir", err)
 	}
-	f, err := os.OpenFile(env.emptyFile, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, model.Wrap(model.ExitEnv, "create external empty file", err)
-	}
-	f.Close()
 
 	if err := mount.BindMount(gitDir, env.gitDirForOps); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "bind mount external gitdir", err)
@@ -395,6 +400,29 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 	return nil
 }
 
+func prepareMaskBacking(emptyFileRoot, emptyDirRoot, target string) (string, string, error) {
+	sum := sha256.Sum256([]byte(target))
+	name := hex.EncodeToString(sum[:8])
+	emptyFile := filepath.Join(emptyFileRoot, name)
+	emptyDir := filepath.Join(emptyDirRoot, name)
+	if _, err := os.Stat(emptyFile); err != nil {
+		if !os.IsNotExist(err) {
+			return "", "", err
+		}
+		file, err := os.OpenFile(emptyFile, os.O_CREATE|os.O_RDWR, 0o644)
+		if err != nil {
+			return "", "", err
+		}
+		if err := file.Close(); err != nil {
+			return "", "", err
+		}
+	}
+	if err := os.MkdirAll(emptyDir, 0o755); err != nil {
+		return "", "", err
+	}
+	return emptyFile, emptyDir, nil
+}
+
 // maskIgnoredFiles applies the configured ignored-file policy (readonly bind
 // mount or empty-file/dir mask) and returns the list of mount targets created.
 func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, mount model.NSOps, log *slog.Logger) ([]string, []string, error) {
@@ -442,7 +470,11 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 			if !info.IsDir() {
 				kind = model.MaskFile
 			}
-			if err := mount.MaskPath(target, kind, extEmptyFile, extEmptyDir); err != nil {
+			maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(extEmptyFile, extEmptyDir, target)
+			if err != nil {
+				return targets, ignored, fmt.Errorf("prepare mask backing %s: %w", path, err)
+			}
+			if err := mount.MaskPath(target, kind, maskEmptyFile, maskEmptyDir); err != nil {
 				return targets, ignored, fmt.Errorf("mask ignored %s: %w", path, err)
 			}
 			targets = append(targets, target)
