@@ -1092,12 +1092,15 @@ func TestExportPatchIgnoredDriftUsesBaselineCap(t *testing.T) {
 	}
 }
 
-func TestExportPatchExcludesTrackedPatchFile(t *testing.T) {
+func TestExportPatchExcludesTrackedPatchState(t *testing.T) {
 	repo := testutil.InitRepo(t)
 	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch.lock"), "lock\n")
 	testutil.RunCmd(t, repo, "git", "add", "state.patch")
+	testutil.RunCmd(t, repo, "git", "add", "state.patch.lock")
 	testutil.RunCmd(t, repo, "git", "commit", "-m", "track patch")
 	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "updated\n")
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch.lock"), "updated lock\n")
 	testutil.WriteFile(t, filepath.Join(repo, "other.txt"), "other\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
@@ -1107,6 +1110,28 @@ func TestExportPatchExcludesTrackedPatchFile(t *testing.T) {
 	}
 	if bytes.Contains(patch, []byte("state.patch")) {
 		t.Fatalf("expected tracked patch file to be excluded from export: %s", string(patch))
+	}
+	if bytes.Contains(patch, []byte("state.patch.lock")) {
+		t.Fatalf("expected tracked patch lock file to be excluded from export: %s", string(patch))
+	}
+	if !bytes.Contains(patch, []byte("other.txt")) {
+		t.Fatalf("expected other changes to remain in export: %s", string(patch))
+	}
+}
+
+func TestExportPatchExcludesUntrackedPatchLockFile(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "")
+	testutil.WriteFile(t, filepath.Join(repo, "state.patch.lock"), "lock\n")
+	testutil.WriteFile(t, filepath.Join(repo, "other.txt"), "other\n")
+
+	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, nil)
+	if err != nil {
+		t.Fatalf("exportPatch error: %v", err)
+	}
+	if bytes.Contains(patch, []byte("state.patch.lock")) {
+		t.Fatalf("expected untracked patch lock file to be excluded from export: %s", string(patch))
 	}
 	if !bytes.Contains(patch, []byte("other.txt")) {
 		t.Fatalf("expected other changes to remain in export: %s", string(patch))

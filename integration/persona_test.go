@@ -628,6 +628,37 @@ func TestPersonaIntegrationSecurity(t *testing.T) {
 			t.Fatalf("expected masked patch file to appear empty")
 		}
 	})
+	t.Run("patch lock file masked and excluded", func(t *testing.T) {
+		repo := createRepo(t)
+		patchPath := filepath.Join(repo, "state.patch")
+		seed := strings.Join([]string{
+			"diff --git a/seed.txt b/seed.txt",
+			"new file mode 100644",
+			"index 0000000..6ed281c",
+			"--- /dev/null",
+			"+++ b/seed.txt",
+			"@@ -0,0 +1 @@",
+			"+seed",
+			"",
+		}, "\n")
+		writeFile(t, patchPath, []byte(seed))
+		writeFile(t, patchPath+".lock", []byte("seed-lock\n"))
+		cmd := "if [ -s state.patch.lock ]; then echo nonempty > lock-mask.txt; else echo empty > lock-mask.txt; fi"
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		data := readFile(t, patchPath)
+		if !bytes.Contains(data, []byte("lock-mask.txt")) {
+			t.Fatalf("patch missing lock-mask.txt")
+		}
+		if !bytes.Contains(data, []byte("\n+empty\n")) {
+			t.Fatalf("expected masked patch lock file to appear empty")
+		}
+		if bytes.Contains(data, []byte("state.patch.lock")) {
+			t.Fatalf("patch lock path should be excluded")
+		}
+	})
 
 	t.Run("patch symlink to repo masked and excluded", func(t *testing.T) {
 		repo := createRepo(t)

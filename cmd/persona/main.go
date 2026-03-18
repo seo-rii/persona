@@ -221,17 +221,20 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	}
 	maskTargets = append(maskTargets, ignoredMasks...)
 
-	var patchMaskPath string
+	var patchMaskPaths []string
 	if patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git" {
-		patchMaskPath = filepath.Join(repoRoot, patchRel)
-		maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(menv.emptyFile, menv.emptyDir, patchMaskPath)
-		if err != nil {
-			return model.Wrap(model.ExitEnv, "prepare patch mask backing", err), 0
+		patchMaskPaths = append(patchMaskPaths, filepath.Join(repoRoot, patchRel))
+		patchMaskPaths = append(patchMaskPaths, filepath.Join(repoRoot, patchRel+".lock"))
+		for _, patchMaskPath := range patchMaskPaths {
+			maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(menv.emptyFile, menv.emptyDir, patchMaskPath)
+			if err != nil {
+				return model.Wrap(model.ExitEnv, "prepare patch mask backing", err), 0
+			}
+			if err := mount.MaskPath(patchMaskPath, model.MaskFile, maskEmptyFile, maskEmptyDir); err != nil {
+				return model.Wrap(model.ExitEnv, "mask patch file", err), 0
+			}
+			maskTargets = append(maskTargets, patchMaskPath)
 		}
-		if err := mount.MaskPath(patchMaskPath, model.MaskFile, maskEmptyFile, maskEmptyDir); err != nil {
-			return model.Wrap(model.ExitEnv, "mask patch file", err), 0
-		}
-		maskTargets = append(maskTargets, patchMaskPath)
 	}
 
 	var gitMaskPath string
@@ -258,8 +261,8 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	// the signal was intended for the child, not for our cleanup path.
 	postCtx := context.Background()
 
-	if patchMaskPath != "" {
-		_ = mount.Umount(patchMaskPath)
+	for i := len(patchMaskPaths) - 1; i >= 0; i-- {
+		_ = mount.Umount(patchMaskPaths[i])
 	}
 	if gitMaskPath != "" {
 		_ = mount.Umount(gitMaskPath)
@@ -730,7 +733,7 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 	}
 	trackedExclude := []string{}
 	if patchInRepo && patchRel != "" {
-		trackedExclude = append(trackedExclude, filepath.ToSlash(patchRel))
+		trackedExclude = append(trackedExclude, filepath.ToSlash(patchRel), filepath.ToSlash(patchRel+".lock"))
 	}
 	tracked, err := g.DiffHeadBinary(ctx, repoRoot, gitDir, trackedExclude)
 	if err != nil {
@@ -743,7 +746,7 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 	excludePrefixes := []string{".git/"}
 	excludeExact := []string{}
 	if patchInRepo && patchRel != "" {
-		excludeExact = append(excludeExact, filepath.ToSlash(patchRel))
+		excludeExact = append(excludeExact, filepath.ToSlash(patchRel), filepath.ToSlash(patchRel+".lock"))
 	}
 	untracked = patchio.FilterUntrackedPaths(untracked, excludePrefixes, excludeExact)
 	sort.Strings(untracked)
