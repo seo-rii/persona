@@ -142,6 +142,30 @@ func TestListIgnoredCandidatesPreservesLeadingSpace(t *testing.T) {
 	}
 }
 
+func TestListIgnoredCandidatesTrimsDirectorySlash(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	testutil.WriteFile(t, filepath.Join(repo, ".gitignore"), "ignored-dir/\n")
+	testutil.RunCmd(t, repo, "git", "add", ".gitignore")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "ignore dir")
+	if err := os.MkdirAll(filepath.Join(repo, "ignored-dir"), 0o755); err != nil {
+		t.Fatalf("mkdir ignored dir: %v", err)
+	}
+	testutil.WriteFile(t, filepath.Join(repo, "ignored-dir", "file.txt"), "skip\n")
+
+	ignored, err := g.ListIgnoredCandidates(context.Background(), repo, g.GitDir, 10)
+	if err != nil {
+		t.Fatalf("ListIgnoredCandidates error: %v", err)
+	}
+	if !containsPath(ignored, "ignored-dir") {
+		t.Fatalf("expected trimmed ignored dir entry, got %q", ignored)
+	}
+	if containsPath(ignored, "ignored-dir/") {
+		t.Fatalf("directory slash must be trimmed, got %q", ignored)
+	}
+}
+
 func TestDiffNewFileNoIndex(t *testing.T) {
 	repo := testutil.InitRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
@@ -267,6 +291,58 @@ func TestDetectRepoIgnoresEnv(t *testing.T) {
 	expectedGitDir := filepath.Join(repo, ".git")
 	if gitDir != expectedGitDir {
 		t.Fatalf("expected git dir %s got %s", expectedGitDir, gitDir)
+	}
+}
+
+func TestDetectRepoOnLinkedWorktree(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	linked := filepath.Join(t.TempDir(), "linked-worktree")
+	testutil.RunCmd(t, repo, "git", "worktree", "add", "--detach", linked)
+
+	root, gitDir, err := DetectRepo(context.Background(), linked)
+	if err != nil {
+		t.Fatalf("DetectRepo error: %v", err)
+	}
+	if root != linked {
+		t.Fatalf("expected linked worktree root %q got %q", linked, root)
+	}
+	if !filepath.IsAbs(gitDir) {
+		t.Fatalf("expected absolute git dir, got %q", gitDir)
+	}
+	if gitDir == filepath.Join(linked, ".git") {
+		t.Fatalf("expected linked worktree gitdir outside .git file, got %q", gitDir)
+	}
+}
+
+func TestFilterGitEnvStripsAllGitVarsButKeepsOthers(t *testing.T) {
+	env := []string{
+		"GIT_DIR=/tmp/gitdir",
+		"GIT_WORK_TREE=/tmp/worktree",
+		"GIT_INDEX_FILE=/tmp/index",
+		"PATH=/usr/bin",
+		"HOME=/tmp/home",
+	}
+
+	filtered := filterGitEnv(env)
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 env vars left, got %v", filtered)
+	}
+	if filtered[0] != "PATH=/usr/bin" || filtered[1] != "HOME=/tmp/home" {
+		t.Fatalf("unexpected filtered env: %v", filtered)
+	}
+}
+
+func TestTruncateOutputAddsMarker(t *testing.T) {
+	msg := strings.Repeat("x", maxErrOutput+1)
+	got := truncateOutput(msg)
+	if !strings.HasSuffix(got, "... (truncated)") {
+		t.Fatalf("expected truncation marker, got %q", got)
+	}
+	if len(got) <= maxErrOutput {
+		t.Fatalf("expected marker to extend output length, got %d", len(got))
+	}
+	if !strings.HasPrefix(got, strings.Repeat("x", maxErrOutput)) {
+		t.Fatalf("expected prefix to preserve first %d bytes", maxErrOutput)
 	}
 }
 

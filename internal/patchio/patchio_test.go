@@ -262,6 +262,57 @@ func TestValidatePatchPathsQuotedSpaces(t *testing.T) {
 	}
 }
 
+func TestValidatePatchPathsQuotedTabEscape(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git \"a/dir\\tfile.txt\" \"b/dir\\tfile.txt\"",
+		"new file mode 100644",
+		"index 0000000..e69de29",
+		"--- /dev/null",
+		"+++ \"b/dir\\tfile.txt\"",
+		"@@ -0,0 +1 @@",
+		"+hi",
+		"",
+	}, "\n")
+	if err := ValidatePatchPaths([]byte(patch)); err != nil {
+		t.Fatalf("expected quoted tab escape to validate, got %v", err)
+	}
+}
+
+func TestValidatePatchPathsQuotedBackslashAndQuote(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git \"a/dir\\\\quote\\\".txt\" \"b/dir\\\\quote\\\".txt\"",
+		"new file mode 100644",
+		"index 0000000..e69de29",
+		"--- /dev/null",
+		"+++ \"b/dir\\\\quote\\\".txt\"",
+		"@@ -0,0 +1 @@",
+		"+hi",
+		"",
+	}, "\n")
+	if err := ValidatePatchPaths([]byte(patch)); err != nil {
+		t.Fatalf("expected quoted backslash/quote escape to validate, got %v", err)
+	}
+}
+
+func TestParsePathTokenUnterminatedQuoteFailsClosed(t *testing.T) {
+	if _, _, ok := parsePathToken("\"a/unterminated"); ok {
+		t.Fatal("expected unterminated quote to fail closed")
+	}
+}
+
+func TestValidatePatchPathsLargeLineNearScannerLimit(t *testing.T) {
+	maxToken := 4 * 1024 * 1024
+	nameLen := (maxToken - len("diff --git a/ b/\n")) / 2
+	name := strings.Repeat("a", nameLen)
+	patch := fmt.Sprintf("diff --git a/%s b/%s\n", name, name)
+	if len(patch) >= maxToken {
+		t.Fatalf("patch line must stay below scanner max, got %d", len(patch))
+	}
+	if err := ValidatePatchPaths([]byte(patch)); err != nil {
+		t.Fatalf("expected near-limit patch line to validate, got %v", err)
+	}
+}
+
 func TestFilterExistingNewFilesQuotedSpaces(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dir with space")
