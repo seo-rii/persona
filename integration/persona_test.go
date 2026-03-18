@@ -610,7 +610,7 @@ func TestPersonaIntegrationSecurity(t *testing.T) {
 		}
 
 		patchPath := filepath.Join(t.TempDir(), "state.patch")
-		cmd := "wc -c < .git > dotgit-size.txt; git rev-parse --show-toplevel > git.out 2> git.err; echo $? > git.code; echo linked > linked.txt"
+		cmd := "wc -c < .git > dotgit-size.txt; git rev-parse --show-toplevel > git.out 2> git.err; rc=$?; echo $rc > git.code; if [ $rc -ne 0 ]; then echo yes > git-failed.txt; else echo no > git-failed.txt; fi; echo linked > linked.txt"
 		code, _, _ := runPersona(t, persona, linked, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, nil)
 		if code != 0 {
 			t.Fatalf("expected exit 0 got %d", code)
@@ -630,8 +630,11 @@ func TestPersonaIntegrationSecurity(t *testing.T) {
 		if !bytes.Contains(data, []byte("git.err")) {
 			t.Fatalf("patch missing git.err")
 		}
-		if !bytes.Contains(data, []byte("not a git repository")) && !bytes.Contains(data, []byte("invalid gitfile format")) {
-			t.Fatalf("expected child git failure output in patch, got %s", string(data))
+		if !bytes.Contains(data, []byte("git-failed.txt")) {
+			t.Fatalf("patch missing git-failed.txt")
+		}
+		if !bytes.Contains(data, []byte("\n+yes\n")) {
+			t.Fatalf("expected child git to fail in linked worktree view, got %s", string(data))
 		}
 		if !bytes.Contains(data, []byte("linked.txt")) || !bytes.Contains(data, []byte("seen.txt")) {
 			t.Fatalf("expected linked worktree patch apply/export to succeed")
