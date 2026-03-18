@@ -597,6 +597,44 @@ func TestPersonaIntegrationSecurity(t *testing.T) {
 		}
 	})
 
+	t.Run("linked worktree git file masked and patch reapplies", func(t *testing.T) {
+		repo := createRepo(t)
+		linked := filepath.Join(t.TempDir(), "linked-worktree")
+		runCmd(t, repo, "git", "worktree", "add", "--detach", linked)
+		info, err := os.Stat(filepath.Join(linked, ".git"))
+		if err != nil {
+			t.Fatalf("stat linked .git: %v", err)
+		}
+		if info.IsDir() {
+			t.Fatal("expected linked worktree .git to be a file")
+		}
+
+		patchPath := filepath.Join(t.TempDir(), "state.patch")
+		cmd := "wc -c < .git > dotgit-size.txt; git rev-parse --show-toplevel > git.out 2> git.err; echo $? > git.code; echo linked > linked.txt"
+		code, _, _ := runPersona(t, persona, linked, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		code, _, _ = runPersona(t, persona, linked, []string{"--patch", patchPath}, []string{"sh", "-c", "cat linked.txt > seen.txt"}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 on reapply got %d", code)
+		}
+
+		data := readFile(t, patchPath)
+		if !bytes.Contains(data, []byte("dotgit-size.txt")) {
+			t.Fatalf("patch missing dotgit-size.txt")
+		}
+		if !bytes.Contains(data, []byte("\n+0\n")) {
+			t.Fatalf("expected masked linked-worktree .git file to appear empty")
+		}
+		if !bytes.Contains(data, []byte("git.err")) || !bytes.Contains(data, []byte("not a git repository")) {
+			t.Fatalf("expected child git failure output in patch")
+		}
+		if !bytes.Contains(data, []byte("linked.txt")) || !bytes.Contains(data, []byte("seen.txt")) {
+			t.Fatalf("expected linked worktree patch apply/export to succeed")
+		}
+	})
+
 	t.Run("patch file masked and excluded", func(t *testing.T) {
 		repo := createRepo(t)
 		patchPath := filepath.Join(repo, "state.patch")
