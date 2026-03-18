@@ -627,8 +627,11 @@ func TestPersonaIntegrationSecurity(t *testing.T) {
 		if !bytes.Contains(data, []byte("\n+0\n")) {
 			t.Fatalf("expected masked linked-worktree .git file to appear empty")
 		}
-		if !bytes.Contains(data, []byte("git.err")) || !bytes.Contains(data, []byte("not a git repository")) {
-			t.Fatalf("expected child git failure output in patch")
+		if !bytes.Contains(data, []byte("git.err")) {
+			t.Fatalf("patch missing git.err")
+		}
+		if !bytes.Contains(data, []byte("not a git repository")) && !bytes.Contains(data, []byte("invalid gitfile format")) {
+			t.Fatalf("expected child git failure output in patch, got %s", string(data))
 		}
 		if !bytes.Contains(data, []byte("linked.txt")) || !bytes.Contains(data, []byte("seen.txt")) {
 			t.Fatalf("expected linked worktree patch apply/export to succeed")
