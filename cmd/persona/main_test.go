@@ -55,14 +55,11 @@ func TestIsSubpathRootItself(t *testing.T) {
 	}
 }
 
-func TestNewRootCmdHidesIgnoredScopeFlag(t *testing.T) {
+func TestNewRootCmdDoesNotExposeIgnoredScopeFlag(t *testing.T) {
 	cmd := newRootCmd()
 	flag := cmd.Flags().Lookup("ignored-scope")
-	if flag == nil {
-		t.Fatal("expected ignored-scope flag to exist")
-	}
-	if !flag.Hidden {
-		t.Fatal("expected ignored-scope flag to be hidden")
+	if flag != nil {
+		t.Fatal("expected ignored-scope flag to be removed")
 	}
 }
 
@@ -75,7 +72,6 @@ type buildOptionsInput struct {
 	allowDirty     bool
 	ignoredMode    string
 	ignoredMax     int
-	ignoredScope   string
 	applyMode      string
 	keepSession    string
 	verbose        bool
@@ -381,7 +377,6 @@ func defaultBuildOptionsInput() buildOptionsInput {
 		allowDirty:     false,
 		ignoredMode:    string(model.IgnoredTransparent),
 		ignoredMax:     200,
-		ignoredScope:   "exact",
 		applyMode:      string(model.ApplyStrict),
 		keepSession:    string(model.KeepOnFail),
 		verbose:        false,
@@ -393,7 +388,7 @@ func runBuildOptionsInput(in buildOptionsInput) (model.Options, error) {
 	return buildOptions(
 		in.patchPath, in.patchDir, in.printPatchPath,
 		in.baseMode, in.baseRef, in.allowDirty,
-		in.ignoredMode, in.ignoredMax, in.ignoredScope,
+		in.ignoredMode, in.ignoredMax,
 		in.applyMode, in.keepSession, in.verbose,
 		in.args,
 	)
@@ -461,13 +456,6 @@ func TestBuildOptionsInvalidValues(t *testing.T) {
 		want   string
 		mutate func(*buildOptionsInput)
 	}{
-		{
-			name: "invalid ignored scope",
-			want: "ignored-scope",
-			mutate: func(in *buildOptionsInput) {
-				in.ignoredScope = "all"
-			},
-		},
 		{
 			name: "invalid base mode",
 			want: "invalid base-mode",

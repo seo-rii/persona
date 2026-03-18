@@ -283,7 +283,6 @@ func newRootCmd() *cobra.Command {
 
 		ignoredMode  string
 		ignoredMax   int
-		ignoredScope string
 
 		applyMode   string
 		keepSession string
@@ -305,7 +304,7 @@ func newRootCmd() *cobra.Command {
 			opts, err := buildOptions(
 				patchPath, patchDir, printPatchPath,
 				baseMode, baseRef, allowDirty,
-				ignoredMode, ignoredMax, ignoredScope,
+				ignoredMode, ignoredMax,
 				applyMode, keepSession, verbose,
 				args,
 			)
@@ -336,10 +335,6 @@ func newRootCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&ignoredMode, "ignored-mode", string(model.IgnoredTransparent), "ignored mode: transparent | readonly | masked")
 	cmd.Flags().IntVar(&ignoredMax, "ignored-max", 200, "max ignored entries to process")
-	cmd.Flags().StringVar(&ignoredScope, "ignored-scope", "exact", "ignored scope (v0.1: exact)")
-	if err := cmd.Flags().MarkHidden("ignored-scope"); err != nil {
-		panic(err)
-	}
 
 	cmd.Flags().StringVar(&applyMode, "apply-mode", string(model.ApplyStrict), "apply mode: strict | reject")
 	cmd.Flags().StringVar(&keepSession, "keep-session", string(model.KeepOnFail), "keep session: on-fail | always | never")
@@ -370,7 +365,6 @@ func buildOptions(
 	allowDirty bool,
 	ignoredMode string,
 	ignoredMax int,
-	ignoredScope string,
 	applyMode string,
 	keepSession string,
 	verbose bool,
@@ -399,9 +393,6 @@ func buildOptions(
 	ignored, err := parseEnum(ignoredMode, "ignored-mode", model.IgnoredTransparent, model.IgnoredReadonly, model.IgnoredMasked)
 	if err != nil {
 		return opts, err
-	}
-	if strings.TrimSpace(ignoredScope) != "exact" {
-		return opts, fmt.Errorf("ignored-scope only supports exact in v0.1")
 	}
 	if ignoredMax < 0 {
 		return opts, fmt.Errorf("ignored-max must be >= 0")
