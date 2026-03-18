@@ -11,6 +11,7 @@ import (
 )
 
 var mountFn = unix.Mount
+var unmountFn = unix.Unmount
 
 func UnshareMountNS() error {
 	return unix.Unshare(unix.CLONE_NEWNS)
@@ -59,12 +60,12 @@ func RemountRO(target string) error {
 }
 
 func Umount(target string) error {
-	if err := unix.Unmount(target, 0); err != nil {
+	if err := unmountFn(target, 0); err != nil {
 		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT) {
 			return nil
 		}
 		if errors.Is(err, unix.EBUSY) {
-			if err := unix.Unmount(target, unix.MNT_DETACH); err != nil {
+			if err := unmountFn(target, unix.MNT_DETACH); err != nil {
 				if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT) {
 					return nil
 				}
