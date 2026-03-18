@@ -92,7 +92,7 @@ Session/logging:
 - Internal git operations ignore any pre-set `GIT_DIR`/`GIT_WORK_TREE` environment variables and always use the detected repo.
 - Patch paths are resolved through symlinks. If the provided patch path is a symlink to a repo-internal file, the tool locks/writes the **target path**, and `--print-patch-path` prints the resolved path.
 - Internal git operations use a bind-mounted gitdir outside the repo root to avoid `.git` masking interfering with export/apply.
-- If a patch adds a new file that already exists with identical content and mode, persona skips that file during apply so re-running the same patch is idempotent.
+- If a text patch adds a new regular file that already exists with identical content and mode, persona skips that block during apply so re-running the same text new-file patch is idempotent. Binary new-file blocks are retried normally.
 
 ## Exit Codes
 
