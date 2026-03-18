@@ -11,6 +11,10 @@ const (
 	ExitApply  ExitCode = 12
 	ExitExport ExitCode = 13
 	ExitWrite  ExitCode = 14
+
+	// Child exits in the persona-reserved range are remapped to avoid
+	// colliding with persona's own failure codes.
+	ExitChildReservedBase ExitCode = 240
 )
 
 type PersonaError struct {

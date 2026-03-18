@@ -872,6 +872,11 @@ func TestRunCommandExitCodes(t *testing.T) {
 			t.Fatalf("expected 7 got %d", code)
 		}
 	})
+	t.Run("persona reserved child exit codes remapped", func(t *testing.T) {
+		if code := runCommand(t.TempDir(), ".", []string{"sh", "-c", "exit 12"}); code != 242 {
+			t.Fatalf("expected 242 got %d", code)
+		}
+	})
 	t.Run("signal exit normalized", func(t *testing.T) {
 		if code := runCommand(t.TempDir(), ".", []string{"sh", "-c", "kill -TERM $$"}); code != 143 {
 			t.Fatalf("expected 143 got %d", code)

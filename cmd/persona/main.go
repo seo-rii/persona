@@ -699,7 +699,11 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 		if status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 			return 128 + int(status.Signal())
 		}
-		return exitErr.ExitCode()
+		code := exitErr.ExitCode()
+		if code >= int(model.ExitEnv) && code <= int(model.ExitWrite) {
+			return int(model.ExitChildReservedBase) + (code - int(model.ExitEnv))
+		}
+		return code
 	}
 	fmt.Fprintln(os.Stderr, err)
 	return 127

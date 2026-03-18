@@ -102,6 +102,7 @@ Session/logging:
 - `12` patch apply failure
 - `13` export failure
 - `14` patch write failure
+- Child exit codes propagate unchanged, except child `10`~`14`, which are remapped to `240`~`244` to avoid colliding with persona's own failure codes.
 
 ## Integration Tests
 

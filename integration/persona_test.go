@@ -146,6 +146,18 @@ func TestPersonaIntegrationBasic(t *testing.T) {
 			t.Fatalf("patch missing child.txt despite child exit")
 		}
 	})
+	t.Run("reserved child exit code remapped", func(t *testing.T) {
+		repo := createRepo(t)
+		patchPath := filepath.Join(t.TempDir(), "state.patch")
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", "echo data > child.txt; exit 12"}, nil)
+		if code != 242 {
+			t.Fatalf("expected remapped child exit code 242 got %d", code)
+		}
+		data := readFile(t, patchPath)
+		if !bytes.Contains(data, []byte("child.txt")) {
+			t.Fatalf("patch missing child.txt despite child exit")
+		}
+	})
 	t.Run("child success propagates zero", func(t *testing.T) {
 		repo := createRepo(t)
 		patchPath := filepath.Join(t.TempDir(), "state.patch")
