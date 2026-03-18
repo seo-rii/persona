@@ -900,6 +900,26 @@ func TestRunCommandExitCodes(t *testing.T) {
 			t.Fatalf("expected cwd %q got %q", sub, strings.TrimSpace(string(data)))
 		}
 	})
+	t.Run("sanitizes child git environment", func(t *testing.T) {
+		repo := t.TempDir()
+		t.Setenv("GIT_DIR", "/tmp/nogit-dir")
+		t.Setenv("GIT_WORK_TREE", "/tmp/nogit-worktree")
+		t.Setenv("GIT_INDEX_FILE", "/tmp/nogit-index")
+		code := runCommand(repo, ".", []string{"sh", "-c", "env > child.env"})
+		if code != 0 {
+			t.Fatalf("expected 0 got %d", code)
+		}
+		data, err := os.ReadFile(filepath.Join(repo, "child.env"))
+		if err != nil {
+			t.Fatalf("read child.env: %v", err)
+		}
+		text := string(data)
+		for _, key := range []string{"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE="} {
+			if strings.Contains(text, key) {
+				t.Fatalf("expected %s to be removed from child env: %s", key, text)
+			}
+		}
+	})
 	t.Run("quiesces background descendants", func(t *testing.T) {
 		repo := t.TempDir()
 		code := runCommand(repo, ".", []string{"sh", "-c", `(trap '' TERM; sleep 0.3; echo late > late.txt) & exit 0`})

@@ -751,6 +751,30 @@ func TestPersonaIntegrationSecurity(t *testing.T) {
 			t.Fatalf("patch missing ok.txt")
 		}
 	})
+	t.Run("git env override scrubbed for child", func(t *testing.T) {
+		repo := createRepo(t)
+		patchPath := filepath.Join(t.TempDir(), "state.patch")
+		env := map[string]string{
+			"GIT_DIR":        "/tmp/nogit",
+			"GIT_WORK_TREE":  "/tmp/nogit",
+			"GIT_INDEX_FILE": "/tmp/nogit-index",
+		}
+		cmd := "git status > git-status.out 2> git-status.err; echo $? > git-status.code"
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, env)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		data := readFile(t, patchPath)
+		if !bytes.Contains(data, []byte("git-status.code")) {
+			t.Fatalf("patch missing git-status.code")
+		}
+		if !bytes.Contains(data, []byte("git-status.err")) {
+			t.Fatalf("patch missing git-status.err")
+		}
+		if !bytes.Contains(data, []byte("not a git repository")) {
+			t.Fatalf("expected child git failure output in patch, got %s", string(data))
+		}
+	})
 }
 
 func TestPersonaIntegrationEdge(t *testing.T) {

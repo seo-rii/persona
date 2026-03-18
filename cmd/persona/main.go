@@ -627,7 +627,15 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 		return 0
 	}
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	cmd.Env = os.Environ()
+	env := os.Environ()
+	filteredEnv := make([]string, 0, len(env))
+	for _, item := range env {
+		if idx := strings.IndexByte(item, '='); idx > 0 && strings.HasPrefix(item[:idx], "GIT_") {
+			continue
+		}
+		filteredEnv = append(filteredEnv, item)
+	}
+	cmd.Env = filteredEnv
 	if cwdRel == "." {
 		cmd.Dir = repoRoot
 	} else {
