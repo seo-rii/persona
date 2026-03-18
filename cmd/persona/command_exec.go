@@ -99,7 +99,7 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 }
 
 func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string) ([]byte, error) {
-	if ignoredMode != model.IgnoredTransparent {
+	if ignoredMode != model.IgnoredTransparent && ignoredMax != 0 {
 		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, ignoredMax)
 		if err != nil {
 			return nil, err

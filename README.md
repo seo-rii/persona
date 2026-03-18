@@ -67,7 +67,7 @@ Base options:
 
 Ignored handling:
 - `--ignored-mode {transparent,readonly,masked}` (default: `transparent`)
-- `--ignored-max N` (default: `200`)
+- `--ignored-max N` (default: `200`, `0` disables ignored processing)
 
 Patch apply:
 - `--apply-mode {strict,reject}` (default: `strict`)

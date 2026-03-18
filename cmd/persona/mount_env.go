@@ -126,7 +126,7 @@ func prepareMaskBacking(emptyFileRoot, emptyDirRoot, target string) (string, str
 }
 
 func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, mount model.NSOps, log *slog.Logger) ([]string, []string, error) {
-	if opts.IgnoredMode == model.IgnoredTransparent {
+	if opts.IgnoredMode == model.IgnoredTransparent || opts.IgnoredMax == 0 {
 		return nil, nil, nil
 	}
 	ignored, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDirForOps, opts.IgnoredMax)

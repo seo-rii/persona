@@ -87,6 +87,7 @@ type exportGitOps struct {
 	tracked    []byte
 	untracked  []string
 	ignored    []string
+	ignoredErr error
 	diffByPath map[string][]byte
 	errByPath  map[string]error
 }
@@ -171,6 +172,9 @@ func (g exportGitOps) DiffNewFileNoIndex(_ context.Context, _ string, _ string, 
 }
 
 func (g exportGitOps) ListIgnoredCandidates(_ context.Context, _ string, _ string, maxN int) ([]string, error) {
+	if g.ignoredErr != nil {
+		return nil, g.ignoredErr
+	}
 	if maxN > 0 && len(g.ignored) > maxN {
 		return append([]string(nil), g.ignored[:maxN]...), nil
 	}
@@ -821,6 +825,25 @@ func TestMaskIgnoredFilesReadonlySkipsMissingTargets(t *testing.T) {
 	}
 }
 
+func TestMaskIgnoredFilesDisabledWhenIgnoredMaxZero(t *testing.T) {
+	repoRoot := t.TempDir()
+	g := ignoredListGitOps{err: errors.New("should not list ignored candidates")}
+	mount := &recordingNSOps{}
+	opts := model.Options{IgnoredMode: model.IgnoredReadonly, IgnoredMax: 0}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	targets, ignored, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
+	if err != nil {
+		t.Fatalf("maskIgnoredFiles error: %v", err)
+	}
+	if len(targets) != 0 || len(ignored) != 0 {
+		t.Fatalf("expected ignored processing disabled, got targets=%v ignored=%v", targets, ignored)
+	}
+	if len(mount.bindCalls) != 0 || len(mount.remountCalls) != 0 {
+		t.Fatalf("expected no mount calls, got bind=%v remount=%v", mount.bindCalls, mount.remountCalls)
+	}
+}
+
 func TestMaskIgnoredFilesReadonlySkipsBindMountENOENT(t *testing.T) {
 	repoRoot := t.TempDir()
 	raced := filepath.Join(repoRoot, "raced.txt")
@@ -1170,7 +1193,7 @@ func TestExportPatchFailsOnNewIgnoredCandidates(t *testing.T) {
 		ignored: []string{"late-ignored.txt"},
 	}
 
-	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 0, nil)
+	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 1, nil)
 	if err == nil {
 		t.Fatalf("expected error when new ignored candidates appear after child run")
 	}
@@ -1201,6 +1224,20 @@ func TestExportPatchIgnoredDriftDetectsNewCandidatesWithinIgnoredMax(t *testing.
 	}
 	if !strings.Contains(err.Error(), "b.tmp") {
 		t.Fatalf("expected new ignored path in error, got %v", err)
+	}
+}
+
+func TestExportPatchIgnoredMaxZeroSkipsIgnoredDriftCheck(t *testing.T) {
+	g := exportGitOps{
+		ignoredErr: errors.New("should not list ignored candidates"),
+	}
+
+	patch, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 0, nil)
+	if err != nil {
+		t.Fatalf("exportPatch error: %v", err)
+	}
+	if len(patch) != 0 {
+		t.Fatalf("expected empty patch, got %q", string(patch))
 	}
 }
 
