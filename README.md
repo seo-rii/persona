@@ -68,7 +68,6 @@ Base options:
 Ignored handling:
 - `--ignored-mode {transparent,readonly,masked}` (default: `transparent`)
 - `--ignored-max N` (default: `200`)
-- `--ignored-scope exact` (v0.1 only)
 
 Patch apply:
 - `--apply-mode {strict,reject}` (default: `strict`)

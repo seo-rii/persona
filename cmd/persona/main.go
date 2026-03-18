@@ -553,6 +553,9 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ignoredMode, "ignored-mode", string(model.IgnoredTransparent), "ignored mode: transparent, readonly, masked")
 	cmd.Flags().IntVar(&ignoredMax, "ignored-max", 200, "max ignored entries to process")
 	cmd.Flags().StringVar(&ignoredScope, "ignored-scope", "exact", "ignored scope (v0.1: exact)")
+	if err := cmd.Flags().MarkHidden("ignored-scope"); err != nil {
+		panic(err)
+	}
 
 	cmd.Flags().StringVar(&applyMode, "apply-mode", string(model.ApplyStrict), "apply mode: strict or reject")
 	cmd.Flags().StringVar(&keepSession, "keep-session", string(model.KeepOnFail), "keep session: on-fail, always, never")

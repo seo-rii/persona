@@ -55,6 +55,17 @@ func TestIsSubpathRootItself(t *testing.T) {
 	}
 }
 
+func TestNewRootCmdHidesIgnoredScopeFlag(t *testing.T) {
+	cmd := newRootCmd()
+	flag := cmd.Flags().Lookup("ignored-scope")
+	if flag == nil {
+		t.Fatal("expected ignored-scope flag to exist")
+	}
+	if !flag.Hidden {
+		t.Fatal("expected ignored-scope flag to be hidden")
+	}
+}
+
 type buildOptionsInput struct {
 	patchPath      string
 	patchDir       string
