@@ -1,19 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -26,29 +21,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-type cleanupStack struct {
-	fns []func() error
-}
-
-const forceMountFailEnv = "PERSONA_FORCE_MOUNT_FAIL"
-
-func (c *cleanupStack) Push(fn func() error) {
-	if fn == nil {
-		return
-	}
-	c.fns = append(c.fns, fn)
-}
-
-func (c *cleanupStack) Run() error {
-	var errs []error
-	for i := len(c.fns) - 1; i >= 0; i-- {
-		if err := c.fns[i](); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
-}
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -68,14 +40,6 @@ func main() {
 		}
 		os.Exit(int(model.ExitEnv))
 	}
-}
-
-type exitError struct {
-	code model.ExitCode
-}
-
-func (e *exitError) Error() string {
-	return ""
 }
 
 func runWithOptions(ctx context.Context, opts model.Options) (retErr error, childCode int) {
@@ -257,8 +221,6 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 
 	childCode = runCommand(repoRoot, cwdRel, opts.Command)
 
-	// After the child exits, use a fresh context for export/write —
-	// the signal was intended for the child, not for our cleanup path.
 	postCtx := context.Background()
 
 	for i := len(patchMaskPaths) - 1; i >= 0; i-- {
@@ -284,100 +246,6 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	return nil, childCode
 }
 
-// prepareBase sets up the base layer: either the current repo (with an
-// optional dirty check) or a detached worktree at the requested ref.
-func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *session.Session, patchInRepo bool, patchRel string, cleanup *cleanupStack, retErr *error) (basePath string, err error) {
-	switch opts.BaseMode {
-	case model.BaseRepo:
-		if !opts.AllowDirty {
-			excludePaths := []string{}
-			if patchInRepo && patchRel != "" && patchRel != "." {
-				excludePaths = append(excludePaths, patchRel, patchRel+".lock")
-			}
-			clean, err := g.IsCleanExceptPaths(ctx, excludePaths)
-			if err != nil {
-				return "", model.Wrap(model.ExitRepo, "git clean check", err)
-			}
-			if !clean {
-				return "", model.Wrap(model.ExitRepo, "repository is dirty", fmt.Errorf("uncommitted changes exist"))
-			}
-		}
-		return g.RepoRootPath(), nil
-	case model.BaseWorktree:
-		if err := g.WorktreeAddDetach(ctx, sess.BaseWT, opts.BaseRef); err != nil {
-			return "", model.Wrap(model.ExitRepo, "git worktree add", err)
-		}
-		cleanup.Push(func() error {
-			if retErr != nil && !shouldRemoveSession(*retErr, opts) {
-				return nil
-			}
-			return g.WorktreeRemoveForce(context.Background(), sess.BaseWT)
-		})
-		return sess.BaseWT, nil
-	default:
-		return "", model.Wrap(model.ExitEnv, "invalid base mode", fmt.Errorf("%s", opts.BaseMode))
-	}
-}
-
-// mountEnv holds paths created during namespace setup that later phases need.
-type mountEnv struct {
-	emptyDir     string // root directory containing per-mask empty dirs
-	emptyFile    string // root directory containing per-mask empty files
-	gitDirForOps string // bind-mounted .git dir accessible from overlay
-}
-
-// setupMountEnv creates the external temp dirs, bind-mounts the git dir and
-// base layer, and mounts the overlay.  All mounts are registered on the
-// cleanup stack for teardown.
-func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mount model.NSOps, cleanup *cleanupStack, log *slog.Logger) (*mountEnv, error) {
-	extRoot, err := os.MkdirTemp("", "persona-session-")
-	if err != nil {
-		return nil, model.Wrap(model.ExitEnv, "create external session dir", err)
-	}
-	cleanup.Push(func() error { return os.RemoveAll(extRoot) })
-
-	env := &mountEnv{
-		emptyDir:     filepath.Join(extRoot, "empty", "dirs"),
-		emptyFile:    filepath.Join(extRoot, "empty", "files"),
-		gitDirForOps: filepath.Join(extRoot, "mnt", "gitdir"),
-	}
-	if err := os.MkdirAll(env.emptyDir, 0o755); err != nil {
-		return nil, model.Wrap(model.ExitEnv, "create external empty dir", err)
-	}
-	if err := os.MkdirAll(env.emptyFile, 0o755); err != nil {
-		return nil, model.Wrap(model.ExitEnv, "create external empty file dir", err)
-	}
-
-	if err := mount.BindMount(gitDir, env.gitDirForOps); err != nil {
-		return nil, model.Wrap(model.ExitEnv, "bind mount external gitdir", err)
-	}
-	cleanup.Push(func() error { return mount.Umount(env.gitDirForOps) })
-
-	if err := mount.BindMount(basePath, sess.MntBase); err != nil {
-		return nil, model.Wrap(model.ExitEnv, "bind mount base", err)
-	}
-	cleanup.Push(func() error { return mount.Umount(sess.MntBase) })
-	if err := mount.RemountRO(sess.MntBase); err != nil {
-		return nil, model.Wrap(model.ExitEnv, "remount base ro", err)
-	}
-
-	log.Debug("gitdir for overlay ops", "path", env.gitDirForOps)
-
-	if shouldForceMountFail() {
-		return nil, model.Wrap(model.ExitEnv, "mount overlay", errors.New("forced mount failure"))
-	}
-	if err := mount.MountOverlay(repoRoot, model.OverlayOpts{LowerDir: sess.MntBase, UpperDir: sess.Upper, WorkDir: sess.Work}); err != nil {
-		reportPermissionHint("mount overlay", err)
-		return nil, model.Wrap(model.ExitEnv, "mount overlay", err)
-	}
-	log.Debug("overlay mounted", "lower", sess.MntBase, "upper", sess.Upper, "work", sess.Work, "target", repoRoot)
-
-	return env, nil
-}
-
-// applyPatchData validates and applies patchData to the overlay.
-// If the initial apply fails due to already-existing new files, it retries
-// with those files filtered out.
 func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMode, patchData []byte, repoRoot, gitDirForOps string, log *slog.Logger) error {
 	if len(patchData) == 0 {
 		return nil
@@ -401,89 +269,6 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 		return err2
 	}
 	return nil
-}
-
-func prepareMaskBacking(emptyFileRoot, emptyDirRoot, target string) (string, string, error) {
-	sum := sha256.Sum256([]byte(target))
-	name := hex.EncodeToString(sum[:8])
-	emptyFile := filepath.Join(emptyFileRoot, name)
-	emptyDir := filepath.Join(emptyDirRoot, name)
-	if _, err := os.Stat(emptyFile); err != nil {
-		if !os.IsNotExist(err) {
-			return "", "", err
-		}
-		file, err := os.OpenFile(emptyFile, os.O_CREATE|os.O_RDWR, 0o644)
-		if err != nil {
-			return "", "", err
-		}
-		if err := file.Close(); err != nil {
-			return "", "", err
-		}
-	}
-	if err := os.MkdirAll(emptyDir, 0o755); err != nil {
-		return "", "", err
-	}
-	return emptyFile, emptyDir, nil
-}
-
-// maskIgnoredFiles applies the configured ignored-file policy (readonly bind
-// mount or empty-file/dir mask) and returns the list of mount targets created.
-func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, mount model.NSOps, log *slog.Logger) ([]string, []string, error) {
-	if opts.IgnoredMode == model.IgnoredTransparent {
-		return nil, nil, nil
-	}
-	ignored, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDirForOps, opts.IgnoredMax)
-	if err != nil {
-		return nil, nil, fmt.Errorf("list ignored: %w", err)
-	}
-	log.Debug("ignored files", "count", len(ignored))
-	var targets []string
-	for _, path := range ignored {
-		target := filepath.Join(repoRoot, filepath.FromSlash(path))
-		switch opts.IgnoredMode {
-		case model.IgnoredReadonly:
-			if _, err := os.Lstat(target); err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					continue
-				}
-				return targets, ignored, fmt.Errorf("stat ignored readonly %s: %w", path, err)
-			}
-			if err := mount.BindMount(target, target); err != nil {
-				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
-					continue
-				}
-				return targets, ignored, fmt.Errorf("bind mount ignored readonly %s: %w", path, err)
-			}
-			if err := mount.RemountRO(target); err != nil {
-				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
-					continue
-				}
-				return targets, ignored, fmt.Errorf("remount ignored readonly %s: %w", path, err)
-			}
-			targets = append(targets, target)
-		case model.IgnoredMasked:
-			info, err := os.Lstat(target)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
-					continue
-				}
-				return targets, ignored, fmt.Errorf("stat ignored masked %s: %w", path, err)
-			}
-			kind := model.MaskDir
-			if !info.IsDir() {
-				kind = model.MaskFile
-			}
-			maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(extEmptyFile, extEmptyDir, target)
-			if err != nil {
-				return targets, ignored, fmt.Errorf("prepare mask backing %s: %w", path, err)
-			}
-			if err := mount.MaskPath(target, kind, maskEmptyFile, maskEmptyDir); err != nil {
-				return targets, ignored, fmt.Errorf("mask ignored %s: %w", path, err)
-			}
-			targets = append(targets, target)
-		}
-	}
-	return targets, ignored, nil
 }
 
 func newRootCmd() *cobra.Command {
@@ -540,45 +325,48 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 	cmd.SetOut(os.Stderr)
-	cmd.SetErr(os.Stderr)
 
-	cmd.Flags().StringVar(&patchPath, "patch", "", "state patch file path")
-	cmd.Flags().StringVar(&patchDir, "patch-dir", "", "patch directory")
+	cmd.Flags().StringVar(&patchPath, "patch", "", "patch file path (default: auto-generate)")
+	cmd.Flags().StringVar(&patchDir, "patch-dir", "", "directory for auto-generated patch files (default: <gitdir>/persona/patches)")
 	cmd.Flags().BoolVar(&printPatchPath, "print-patch-path", false, "print patch path on exit")
 
-	cmd.Flags().StringVar(&baseMode, "base-mode", string(model.BaseRepo), "base mode: repo or worktree")
+	cmd.Flags().StringVar(&baseMode, "base-mode", string(model.BaseRepo), "base mode: repo | worktree")
 	cmd.Flags().StringVar(&baseRef, "base-ref", "HEAD", "base ref for worktree mode")
-	cmd.Flags().BoolVar(&allowDirty, "allow-dirty", false, "allow dirty repo for base-mode=repo")
+	cmd.Flags().BoolVar(&allowDirty, "allow-dirty", false, "allow dirty repo in repo base mode")
 
-	cmd.Flags().StringVar(&ignoredMode, "ignored-mode", string(model.IgnoredTransparent), "ignored mode: transparent, readonly, masked")
+	cmd.Flags().StringVar(&ignoredMode, "ignored-mode", string(model.IgnoredTransparent), "ignored mode: transparent | readonly | masked")
 	cmd.Flags().IntVar(&ignoredMax, "ignored-max", 200, "max ignored entries to process")
 	cmd.Flags().StringVar(&ignoredScope, "ignored-scope", "exact", "ignored scope (v0.1: exact)")
 	if err := cmd.Flags().MarkHidden("ignored-scope"); err != nil {
 		panic(err)
 	}
 
-	cmd.Flags().StringVar(&applyMode, "apply-mode", string(model.ApplyStrict), "apply mode: strict or reject")
-	cmd.Flags().StringVar(&keepSession, "keep-session", string(model.KeepOnFail), "keep session: on-fail, always, never")
-	cmd.Flags().BoolVar(&verbose, "verbose", false, "verbose logging")
+	cmd.Flags().StringVar(&applyMode, "apply-mode", string(model.ApplyStrict), "apply mode: strict | reject")
+	cmd.Flags().StringVar(&keepSession, "keep-session", string(model.KeepOnFail), "keep session: on-fail | always | never")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "enable verbose logging")
 
-	addDiagnosticCommands(cmd)
+	cmd.AddCommand(newDoctorCmd())
+	cmd.AddCommand(newActivateCmd())
 	return cmd
 }
 
 func parseEnum[T ~string](input, name string, valid ...T) (T, error) {
-	for _, v := range valid {
-		if input == string(v) {
-			return v, nil
+	var zero T
+	value := strings.TrimSpace(input)
+	for _, item := range valid {
+		if value == string(item) {
+			return item, nil
 		}
 	}
-	var zero T
 	return zero, fmt.Errorf("invalid %s: %s", name, input)
 }
 
 func buildOptions(
-	patchPath, patchDir string,
+	patchPath string,
+	patchDir string,
 	printPatchPath bool,
-	baseMode, baseRef string,
+	baseMode string,
+	baseRef string,
 	allowDirty bool,
 	ignoredMode string,
 	ignoredMax int,
@@ -589,276 +377,51 @@ func buildOptions(
 	args []string,
 ) (model.Options, error) {
 	var opts model.Options
-	if strings.TrimSpace(ignoredScope) != "exact" {
-		return opts, fmt.Errorf("ignored-scope only supports exact in v0.1")
-	}
 
 	opts.PatchPath = strings.TrimSpace(patchPath)
 	opts.PatchDir = strings.TrimSpace(patchDir)
 	opts.PrintPatchPath = printPatchPath
 
-	var err error
-	opts.BaseMode, err = parseEnum(baseMode, "base-mode", model.BaseRepo, model.BaseWorktree)
+	mode, err := parseEnum(baseMode, "base-mode", model.BaseRepo, model.BaseWorktree)
 	if err != nil {
 		return opts, err
 	}
-	opts.BaseRef = baseRef
+	opts.BaseMode = mode
+	opts.BaseRef = strings.TrimSpace(baseRef)
+	if opts.BaseRef == "" {
+		opts.BaseRef = "HEAD"
+	}
+	if opts.BaseMode == model.BaseRepo && opts.BaseRef != "HEAD" {
+		return opts, fmt.Errorf("base-ref is only valid with worktree base-mode")
+	}
 	opts.AllowDirty = allowDirty
 
-	opts.IgnoredMode, err = parseEnum(ignoredMode, "ignored-mode", model.IgnoredTransparent, model.IgnoredReadonly, model.IgnoredMasked)
+	ignored, err := parseEnum(ignoredMode, "ignored-mode", model.IgnoredTransparent, model.IgnoredReadonly, model.IgnoredMasked)
 	if err != nil {
 		return opts, err
+	}
+	if strings.TrimSpace(ignoredScope) != "exact" {
+		return opts, fmt.Errorf("ignored-scope only supports exact in v0.1")
 	}
 	if ignoredMax < 0 {
 		return opts, fmt.Errorf("ignored-max must be >= 0")
 	}
+	opts.IgnoredMode = ignored
 	opts.IgnoredMax = ignoredMax
 
-	opts.ApplyMode, err = parseEnum(applyMode, "apply-mode", model.ApplyStrict, model.ApplyReject)
+	apply, err := parseEnum(applyMode, "apply-mode", model.ApplyStrict, model.ApplyReject)
 	if err != nil {
 		return opts, err
 	}
+	opts.ApplyMode = apply
 
-	opts.KeepSession, err = parseEnum(keepSession, "keep-session", model.KeepOnFail, model.KeepAlways, model.KeepNever)
+	keep, err := parseEnum(keepSession, "keep-session", model.KeepOnFail, model.KeepAlways, model.KeepNever)
 	if err != nil {
 		return opts, err
 	}
+	opts.KeepSession = keep
+
 	opts.Verbose = verbose
 	opts.Command = args
 	return opts, nil
-}
-
-func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
-	if len(cmdArgs) == 0 {
-		return 0
-	}
-	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	env := os.Environ()
-	filteredEnv := make([]string, 0, len(env))
-	for _, item := range env {
-		if idx := strings.IndexByte(item, '='); idx > 0 && strings.HasPrefix(item[:idx], "GIT_") {
-			continue
-		}
-		filteredEnv = append(filteredEnv, item)
-	}
-	cmd.Env = filteredEnv
-	if cwdRel == "." {
-		cmd.Dir = repoRoot
-	} else {
-		cmd.Dir = filepath.Join(repoRoot, cwdRel)
-	}
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 127
-	}
-
-	// Set up signal forwarding only after the process has started,
-	// so cmd.Process is guaranteed to be non-nil and we avoid the
-	// race where a signal arrives before Start() completes.
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		for sig := range sigCh {
-			_ = syscall.Kill(-cmd.Process.Pid, sig.(syscall.Signal))
-		}
-	}()
-
-	err := cmd.Wait()
-	signal.Stop(sigCh)
-	close(sigCh)
-	pgid := cmd.Process.Pid
-	// Prevent late background descendants from racing with export/write-back.
-	if killErr := syscall.Kill(-pgid, syscall.SIGTERM); killErr == nil || errors.Is(killErr, syscall.EPERM) {
-		deadline := time.Now().Add(200 * time.Millisecond)
-		for {
-			probeErr := syscall.Kill(-pgid, 0)
-			if probeErr != nil && !errors.Is(probeErr, syscall.EPERM) {
-				break
-			}
-			if time.Now().After(deadline) {
-				_ = syscall.Kill(-pgid, syscall.SIGKILL)
-				for i := 0; i < 20; i++ {
-					probeErr = syscall.Kill(-pgid, 0)
-					if probeErr != nil && !errors.Is(probeErr, syscall.EPERM) {
-						break
-					}
-					time.Sleep(10 * time.Millisecond)
-				}
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	if err == nil {
-		return 0
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			return 128 + int(status.Signal())
-		}
-		code := exitErr.ExitCode()
-		if code >= int(model.ExitEnv) && code <= int(model.ExitWrite) {
-			return int(model.ExitChildReservedBase) + (code - int(model.ExitEnv))
-		}
-		return code
-	}
-	fmt.Fprintln(os.Stderr, err)
-	return 127
-}
-
-func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string) ([]byte, error) {
-	if ignoredMode != model.IgnoredTransparent {
-		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, ignoredMax)
-		if err != nil {
-			return nil, err
-		}
-		ignoredSet := make(map[string]struct{}, len(initialIgnored))
-		for _, path := range initialIgnored {
-			ignoredSet[path] = struct{}{}
-		}
-		var newlyIgnored []string
-		for _, path := range ignoredNow {
-			if _, ok := ignoredSet[path]; ok {
-				continue
-			}
-			newlyIgnored = append(newlyIgnored, path)
-		}
-		if len(newlyIgnored) > 0 {
-			sort.Strings(newlyIgnored)
-			return nil, fmt.Errorf("new ignored paths appeared during run: %s", strings.Join(newlyIgnored, ", "))
-		}
-	}
-	trackedExclude := []string{}
-	if patchInRepo && patchRel != "" {
-		trackedExclude = append(trackedExclude, filepath.ToSlash(patchRel), filepath.ToSlash(patchRel+".lock"))
-	}
-	tracked, err := g.DiffHeadBinary(ctx, repoRoot, gitDir, trackedExclude)
-	if err != nil {
-		return nil, err
-	}
-	untracked, err := g.ListUntracked(ctx, repoRoot, gitDir)
-	if err != nil {
-		return nil, err
-	}
-	excludePrefixes := []string{".git/"}
-	excludeExact := []string{}
-	if patchInRepo && patchRel != "" {
-		excludeExact = append(excludeExact, filepath.ToSlash(patchRel), filepath.ToSlash(patchRel+".lock"))
-	}
-	untracked = patchio.FilterUntrackedPaths(untracked, excludePrefixes, excludeExact)
-	sort.Strings(untracked)
-
-	buf := &bytes.Buffer{}
-	if len(tracked) > 0 {
-		buf.Write(tracked)
-	}
-	for _, path := range untracked {
-		absPath := filepath.Join(repoRoot, filepath.FromSlash(path))
-		info, err := os.Lstat(absPath)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return nil, err
-		}
-		mode := info.Mode()
-		if mode&os.ModeNamedPipe != 0 || mode&os.ModeDevice != 0 || mode&os.ModeCharDevice != 0 || mode&os.ModeSocket != 0 {
-			fmt.Fprintln(os.Stderr, "skip special file", path)
-			continue
-		}
-		patch, err := g.DiffNewFileNoIndex(ctx, repoRoot, gitDir, path)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
-				continue
-			}
-			return nil, err
-		}
-		buf.Write(patch)
-	}
-	return buf.Bytes(), nil
-}
-
-func isSubpath(root, path string) (bool, string) {
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return false, ""
-	}
-	rel = filepath.Clean(rel)
-	if rel == "." {
-		return true, rel
-	}
-	parentPrefix := ".." + string(filepath.Separator)
-	if rel == ".." || strings.HasPrefix(rel, parentPrefix) {
-		return false, ""
-	}
-	return true, rel
-}
-
-func resolvePath(path string) string {
-	real, err := filepath.EvalSymlinks(path)
-	if err == nil {
-		return real
-	}
-	path = filepath.Clean(path)
-	if path == "" || !filepath.IsAbs(path) {
-		return path
-	}
-	for depth := 0; depth < 255; depth++ {
-		current := string(filepath.Separator)
-		parts := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
-		changed := false
-		for i, part := range parts {
-			if part == "" {
-				continue
-			}
-			next := filepath.Join(current, part)
-			info, statErr := os.Lstat(next)
-			if statErr != nil {
-				if os.IsNotExist(statErr) {
-					return filepath.Clean(filepath.Join(append([]string{current}, parts[i:]...)...))
-				}
-				return path
-			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				target, readErr := os.Readlink(next)
-				if readErr != nil {
-					return path
-				}
-				if !filepath.IsAbs(target) {
-					target = filepath.Join(filepath.Dir(next), target)
-				}
-				path = filepath.Clean(filepath.Join(append([]string{target}, parts[i+1:]...)...))
-				changed = true
-				break
-			}
-			current = next
-		}
-		if !changed {
-			return current
-		}
-	}
-	return path
-}
-
-func shouldRemoveSession(err error, opts model.Options) bool {
-	switch opts.KeepSession {
-	case model.KeepAlways:
-		return false
-	case model.KeepNever:
-		return true
-	case model.KeepOnFail:
-		return err == nil
-	default:
-		return true
-	}
-}
-
-func shouldForceMountFail() bool {
-	return os.Getenv(forceMountFailEnv) == "1"
 }
