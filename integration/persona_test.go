@@ -1077,6 +1077,19 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 			t.Fatalf("expected at least one readonly failure")
 		}
 	})
+	t.Run("new ignored path within ignored max fails export", func(t *testing.T) {
+		repo := createRepo(t)
+		writeFile(t, filepath.Join(repo, ".gitignore"), []byte("ignored-a.txt\nignored-b.txt\n"))
+		runCmd(t, repo, "git", "add", ".gitignore")
+		runCmd(t, repo, "git", "commit", "-m", "add ignore")
+		writeFile(t, filepath.Join(repo, "ignored-a.txt"), []byte("seed\n"))
+		patchPath := filepath.Join(t.TempDir(), "state.patch")
+		cmd := "echo data > ignored-b.txt"
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath, "--ignored-mode", "readonly", "--ignored-max", "2"}, []string{"sh", "-c", cmd}, nil)
+		if code != 13 {
+			t.Fatalf("expected exit 13 got %d", code)
+		}
+	})
 	t.Run("apply reject returns failure", func(t *testing.T) {
 		repo := createRepo(t)
 		patchPath := filepath.Join(t.TempDir(), "bad.patch")

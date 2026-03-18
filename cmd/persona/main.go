@@ -268,7 +268,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		_ = mount.Umount(gitMaskPath)
 	}
 
-	patchOut, err := exportPatch(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel, opts.IgnoredMode, initialIgnored)
+	patchOut, err := exportPatch(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel, opts.IgnoredMode, opts.IgnoredMax, initialIgnored)
 	if err != nil {
 		return model.Wrap(model.ExitExport, "export patch", err), 0
 	}
@@ -705,13 +705,9 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 	return 127
 }
 
-func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, initialIgnored []string) ([]byte, error) {
+func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string) ([]byte, error) {
 	if ignoredMode != model.IgnoredTransparent {
-		ignoredCap := 0
-		if len(initialIgnored) > 0 {
-			ignoredCap = len(initialIgnored)
-		}
-		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, ignoredCap)
+		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, ignoredMax)
 		if err != nil {
 			return nil, err
 		}

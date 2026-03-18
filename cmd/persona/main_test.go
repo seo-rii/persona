@@ -1000,7 +1000,7 @@ func TestExportPatchSortAndExclude(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch1, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, nil)
+	patch1, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -1019,7 +1019,7 @@ func TestExportPatchSortAndExclude(t *testing.T) {
 		t.Fatalf("unexpected .git path in patch")
 	}
 
-	patch2, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, nil)
+	patch2, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch second call error: %v", err)
 	}
@@ -1033,7 +1033,7 @@ func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, false, "", model.IgnoredTransparent, nil)
+	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, false, "", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -1055,7 +1055,7 @@ func TestExportPatchSkipsVanishedUntrackedFiles(t *testing.T) {
 		},
 	}
 
-	patch, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, nil)
+	patch, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -1072,7 +1072,7 @@ func TestExportPatchFailsOnNewIgnoredCandidates(t *testing.T) {
 		ignored: []string{"late-ignored.txt"},
 	}
 
-	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, nil)
+	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 0, nil)
 	if err == nil {
 		t.Fatalf("expected error when new ignored candidates appear after child run")
 	}
@@ -1086,9 +1086,23 @@ func TestExportPatchIgnoredDriftUsesBaselineCap(t *testing.T) {
 		ignored: []string{"a.tmp", "b.tmp", "c.tmp"},
 	}
 
-	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, []string{"a.tmp", "b.tmp"})
+	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"a.tmp", "b.tmp"})
 	if err != nil {
 		t.Fatalf("expected capped ignored baseline not to fail, got %v", err)
+	}
+}
+
+func TestExportPatchIgnoredDriftDetectsNewCandidatesWithinIgnoredMax(t *testing.T) {
+	g := exportGitOps{
+		ignored: []string{"a.tmp", "b.tmp"},
+	}
+
+	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"a.tmp"})
+	if err == nil {
+		t.Fatalf("expected new ignored candidate within ignored-max to fail")
+	}
+	if !strings.Contains(err.Error(), "b.tmp") {
+		t.Fatalf("expected new ignored path in error, got %v", err)
 	}
 }
 
@@ -1104,7 +1118,7 @@ func TestExportPatchExcludesTrackedPatchState(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "other.txt"), "other\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, nil)
+	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -1126,7 +1140,7 @@ func TestExportPatchExcludesUntrackedPatchLockFile(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "other.txt"), "other\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, nil)
+	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
