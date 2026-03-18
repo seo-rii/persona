@@ -710,6 +710,100 @@ func TestApplyPatchDataRetriesWithoutEnglishErrorString(t *testing.T) {
 	}
 }
 
+func TestApplyPatchDataRejectsUnsafePathBeforeApply(t *testing.T) {
+	g := &applyRetryGitOps{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(
+		context.Background(),
+		g,
+		model.ApplyStrict,
+		[]byte("diff --git a/../evil b/../evil\n"),
+		t.TempDir(),
+		"",
+		log,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if g.applyCalls != 0 {
+		t.Fatalf("expected no apply attempts, got %d", g.applyCalls)
+	}
+}
+
+func TestApplyPatchDataReturnsOriginalErrorWhenNothingWasSkipped(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "tracked.txt"), "before\n")
+	patch := strings.Join([]string{
+		"diff --git a/tracked.txt b/tracked.txt",
+		"index df967b9..3b18e51 100644",
+		"--- a/tracked.txt",
+		"+++ b/tracked.txt",
+		"@@ -1 +1 @@",
+		"-before",
+		"+after",
+		"",
+	}, "\n")
+	wantErr := errors.New("apply failed")
+	g := &applyRetryGitOps{applyErrs: []error{wantErr}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyStrict, []byte(patch), repoRoot, "", log)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected original error %v, got %v", wantErr, err)
+	}
+	if g.applyCalls != 1 {
+		t.Fatalf("expected one apply attempt, got %d", g.applyCalls)
+	}
+}
+
+func TestApplyPatchDataReturnsRetryError(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"diff --git a/other.txt b/other.txt",
+		"new file mode 100644",
+		"index 0000000..3e75765",
+		"--- /dev/null",
+		"+++ b/other.txt",
+		"@@ -0,0 +1 @@",
+		"+other",
+		"",
+	}, "\n")
+	firstErr := errors.New("first apply failed")
+	retryErr := errors.New("retry failed")
+	g := &applyRetryGitOps{applyErrs: []error{firstErr, retryErr}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyStrict, []byte(patch), repoRoot, "", log)
+	if !errors.Is(err, retryErr) {
+		t.Fatalf("expected retry error %v, got %v", retryErr, err)
+	}
+	if g.applyCalls != 2 {
+		t.Fatalf("expected two apply attempts, got %d", g.applyCalls)
+	}
+}
+
+func TestApplyPatchDataEmptyPatchIsNoop(t *testing.T) {
+	g := &applyRetryGitOps{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyStrict, nil, t.TempDir(), "", log)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if g.applyCalls != 0 {
+		t.Fatalf("expected no apply attempts, got %d", g.applyCalls)
+	}
+}
+
 func TestMaskIgnoredFilesReadonlySkipsMissingTargets(t *testing.T) {
 	repoRoot := t.TempDir()
 	existing := filepath.Join(repoRoot, "existing.txt")
