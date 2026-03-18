@@ -80,6 +80,7 @@ Session/logging:
 
 - `.git` is always masked in the view.
 - If the patch file is inside the repo, it is masked in the view and excluded from export.
+- Patch locking uses a sibling `<patch>.lock` file. Persona unlocks and closes it after the run, but does not remove the lock file; if the patch lives inside the repo, the lock path is also masked in the view and excluded from export.
 - Export is always based on `HEAD`.
 - Ignored untracked files are excluded from export by default.
 - Special files (FIFO/device/socket) are skipped with a warning.
@@ -106,7 +107,7 @@ Session/logging:
 
 ## Integration Tests
 
-Integration tests require Linux + root for mount namespace/OverlayFS.
+Integration tests require Linux + root for mount namespace/OverlayFS. In non-privileged environments they may compile and skip without exercising the real mount lifecycle.
 
 ```
 cd /home/seorii/dev/hancomac/persona
@@ -114,6 +115,8 @@ sudo env "PATH=$PATH" PERSONA_INTEGRATION=1 $(command -v go) test ./integration 
 ```
 
 If `go` is not in the sudo PATH, keep the `env "PATH=$PATH"` prefix.
+
+After changes around mount/masking, linked worktree handling, or patch export/apply boundaries, re-run the privileged integration suite with `PERSONA_INTEGRATION=1` to confirm the real mount-namespace path still behaves as expected.
 
 ## Test Helpers
 
