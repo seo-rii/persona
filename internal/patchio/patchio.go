@@ -56,6 +56,9 @@ func EnsurePatchPath(opts model.Options, gitDir string, now time.Time) (string, 
 			}
 			path = abs
 		}
+		if err := rejectSymlinkPathParents(filepath.Dir(path), "patch path"); err != nil {
+			return "", err
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return "", err
 		}
@@ -74,22 +77,8 @@ func EnsurePatchPath(opts model.Options, gitDir string, now time.Time) (string, 
 		}
 		patchDir = abs
 	}
-	if defaultPatchDir {
-		for _, parent := range []string{
-			filepath.Join(gitDir, "persona"),
-			filepath.Join(gitDir, "persona", "patches"),
-		} {
-			info, err := os.Lstat(parent)
-			if err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				return "", err
-			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				return "", fmt.Errorf("auto patch dir parent is symlink: %s", parent)
-			}
-		}
+	if err := rejectSymlinkPathParents(patchDir, "patch dir"); err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(patchDir, 0o755); err != nil {
 		return "", err
@@ -102,6 +91,28 @@ func EnsurePatchPath(opts model.Options, gitDir string, now time.Time) (string, 
 	}
 	name := fmt.Sprintf("%s_%03d_%d_%s.patch", stamp, ms, os.Getpid(), rnd)
 	return filepath.Join(patchDir, name), nil
+}
+
+func rejectSymlinkPathParents(path, label string) error {
+	path = filepath.Clean(path)
+	if path == "." || path == "" {
+		return nil
+	}
+	for current := path; ; {
+		info, err := os.Lstat(current)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s parent is symlink: %s", label, current)
+		}
+		next := filepath.Dir(current)
+		if next == current {
+			return nil
+		}
+		current = next
+	}
 }
 
 func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {

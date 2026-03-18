@@ -146,6 +146,54 @@ func TestEnsurePatchPathAutoRejectsSymlinkedPersonaDir(t *testing.T) {
 	}
 }
 
+func TestEnsurePatchPathExplicitRejectsSymlinkedParentDir(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	linkDir := filepath.Join(root, "linkdir")
+	if err := os.Symlink(outside, linkDir); err != nil {
+		t.Fatalf("symlink linkdir: %v", err)
+	}
+
+	path, err := EnsurePatchPath(model.Options{PatchPath: filepath.Join(linkDir, "state.patch")}, filepath.Join(root, ".git"), time.Now())
+	if err == nil {
+		t.Fatalf("expected symlinked explicit patch parent to be rejected, got path %q", path)
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink error, got %v", err)
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatalf("read outside dir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no explicit patch path created outside target dir, got %d entries", len(entries))
+	}
+}
+
+func TestEnsurePatchDirRejectsSymlinkedParentDir(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	linkDir := filepath.Join(root, "linkdir")
+	if err := os.Symlink(outside, linkDir); err != nil {
+		t.Fatalf("symlink linkdir: %v", err)
+	}
+
+	path, err := EnsurePatchPath(model.Options{PatchDir: linkDir}, filepath.Join(root, ".git"), time.Now())
+	if err == nil {
+		t.Fatalf("expected symlinked patch dir to be rejected, got path %q", path)
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink error, got %v", err)
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatalf("read outside dir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no patch dir created outside target dir, got %d entries", len(entries))
+	}
+}
+
 func TestValidatePatchPathsRenameCopy(t *testing.T) {
 	patch := strings.Join([]string{
 		"diff --git a/old.txt b/new.txt",
