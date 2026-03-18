@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,19 @@ var setcapCandidates = []string{
 	"/sbin/setcap",
 	"/bin/setcap",
 }
+
+var (
+	stderrWriter              io.Writer = os.Stderr
+	executablePathFn                    = os.Executable
+	geteuidFn                           = os.Geteuid
+	getxattrFn                          = unix.Getxattr
+	lookPathFn                          = exec.LookPath
+	execCommandFn                       = exec.Command
+	requireSetcapCapabilityFn           = requireSetcapCapability
+	findSetcapPathFn                    = findSetcapPath
+	collectDiagFn                       = collectDiag
+	readCapEffFn                        = readCapEff
+)
 
 type diagInfo struct {
 	ExePath        string
@@ -54,7 +68,7 @@ func newDoctorCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "Check capabilities, mounts, and prerequisites",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			info := collectDiag()
+			info := collectDiagFn()
 			w := cmd.OutOrStdout()
 			fmt.Fprintln(w, "persona doctor")
 			if info.ExePath != "" {
@@ -109,16 +123,16 @@ func newActivateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := requireSetcapCapability(); err != nil {
-				fmt.Fprintln(os.Stderr, "persona: hint: run this command with sudo or as root")
+			if err := requireSetcapCapabilityFn(); err != nil {
+				fmt.Fprintln(stderrWriter, "persona: hint: run this command with sudo or as root")
 				return err
 			}
-			setcapPath, err := findSetcapPath(setcapCandidates)
+			setcapPath, err := findSetcapPathFn(setcapCandidates)
 			if err != nil {
 				return fmt.Errorf("setcap not found; install libcap2-bin")
 			}
 			perm := activateCapabilitySpec(allowDACOverride)
-			out, err := exec.Command(setcapPath, perm, path).CombinedOutput()
+			out, err := execCommandFn(setcapPath, perm, path).CombinedOutput()
 			if err != nil {
 				msg := strings.TrimSpace(string(out))
 				if msg == "" {
@@ -171,7 +185,7 @@ func findSetcapPath(candidates []string) (string, error) {
 
 func resolveBinaryPath(target string) (string, error) {
 	if strings.TrimSpace(target) == "" {
-		exe, err := os.Executable()
+		exe, err := executablePathFn()
 		if err != nil {
 			return "", fmt.Errorf("resolve executable: %w", err)
 		}
@@ -192,10 +206,10 @@ func resolveBinaryPath(target string) (string, error) {
 }
 
 func requireSetcapCapability() error {
-	if os.Geteuid() == 0 {
+	if geteuidFn() == 0 {
 		return nil
 	}
-	capEff, err := readCapEff()
+	capEff, err := readCapEffFn()
 	if err == nil && hasCap(capEff, capSetFcap) {
 		return nil
 	}
@@ -203,12 +217,12 @@ func requireSetcapCapability() error {
 }
 
 func collectDiag() diagInfo {
-	info := diagInfo{EUID: os.Geteuid()}
-	if exe, err := os.Executable(); err == nil {
+	info := diagInfo{EUID: geteuidFn()}
+	if exe, err := executablePathFn(); err == nil {
 		info.ExePath = exe
 		info.ExeResolved = resolvePath(exe)
 	}
-	if capEff, err := readCapEff(); err == nil {
+	if capEff, err := readCapEffFn(); err == nil {
 		info.CapEff = capEff
 		info.HasSysAdmin = hasCap(capEff, capSysAdmin)
 		info.HasSetFcap = hasCap(capEff, capSetFcap)
@@ -229,7 +243,7 @@ func collectDiag() diagInfo {
 			info.MountTarget = mi["TARGET"]
 		}
 	}
-	if setcapPath, err := findSetcapPath(setcapCandidates); err == nil {
+	if setcapPath, err := findSetcapPathFn(setcapCandidates); err == nil {
 		info.SetcapPath = setcapPath
 	}
 	return info
@@ -260,7 +274,7 @@ func hasCap(capEff uint64, capID uint) bool {
 }
 
 func fileCapabilityStatus(path string) (string, error) {
-	size, err := unix.Getxattr(path, "security.capability", nil)
+	size, err := getxattrFn(path, "security.capability", nil)
 	if err != nil {
 		switch {
 		case errors.Is(err, unix.ENODATA):
@@ -277,18 +291,18 @@ func fileCapabilityStatus(path string) (string, error) {
 		return "absent", nil
 	}
 	buf := make([]byte, size)
-	if _, err := unix.Getxattr(path, "security.capability", buf); err != nil {
+	if _, err := getxattrFn(path, "security.capability", buf); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("present (len=%d)", size), nil
 }
 
 func findmntInfo(path string) (map[string]string, error) {
-	findmnt, err := exec.LookPath("findmnt")
+	findmnt, err := lookPathFn("findmnt")
 	if err != nil {
 		return nil, err
 	}
-	out, err := exec.Command(findmnt, "-P", "-o", "OPTIONS,FSTYPE,SOURCE,TARGET", "-T", path).Output()
+	out, err := execCommandFn(findmnt, "-P", "-o", "OPTIONS,FSTYPE,SOURCE,TARGET", "-T", path).Output()
 	if err != nil {
 		return nil, err
 	}
@@ -368,14 +382,14 @@ func reportPermissionHint(op string, err error) {
 	if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
 		return
 	}
-	info := collectDiag()
+	info := collectDiagFn()
 	if info.ExeResolved != "" {
-		fmt.Fprintf(os.Stderr, "persona: hint: exe=%s\n", info.ExeResolved)
+		fmt.Fprintf(stderrWriter, "persona: hint: exe=%s\n", info.ExeResolved)
 	}
-	fmt.Fprintf(os.Stderr, "persona: hint: %s requires CAP_SYS_ADMIN (euid=%d cap_sys_admin=%t)\n", op, info.EUID, info.HasSysAdmin)
+	fmt.Fprintf(stderrWriter, "persona: hint: %s requires CAP_SYS_ADMIN (euid=%d cap_sys_admin=%t)\n", op, info.EUID, info.HasSysAdmin)
 	if info.MountOptions != "" {
-		fmt.Fprintf(os.Stderr, "persona: hint: mount_options=%s\n", info.MountOptions)
+		fmt.Fprintf(stderrWriter, "persona: hint: mount_options=%s\n", info.MountOptions)
 	}
-	fmt.Fprintf(os.Stderr, "persona: hint: %s\n", leastPrivilegeCapabilityHint())
-	fmt.Fprintln(os.Stderr, "persona: hint: if still denied, check nosuid mounts or LSM (AppArmor/SELinux) policies.")
+	fmt.Fprintf(stderrWriter, "persona: hint: %s\n", leastPrivilegeCapabilityHint())
+	fmt.Fprintln(stderrWriter, "persona: hint: if still denied, check nosuid mounts or LSM (AppArmor/SELinux) policies.")
 }
