@@ -9,9 +9,8 @@ mkdir -p "$out_dir"
 bin="$out_dir/persona"
 
 if ! go build -o "$bin" ./cmd/persona; then
-  echo "build failed; running go mod tidy to resolve dependencies..." >&2
-  go mod tidy
-  go build -o "$bin" ./cmd/persona
+  echo "build failed; run 'go mod tidy' manually if dependencies changed, then retry." >&2
+  exit 1
 fi
 
 default_caps="cap_sys_admin+ep"

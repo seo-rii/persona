@@ -65,6 +65,32 @@ func TestTestLogStderrReportsSkippedIntegrationWithoutSudo(t *testing.T) {
 	}
 }
 
+func TestBuildShDoesNotRunGoModTidyOnBuildFailure(t *testing.T) {
+	repoRoot := repoRoot(t)
+	binDir, argsFile := stubGoWithBody(t, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GO_ARGS_FILE\"\nif [ \"$1\" = \"build\" ]; then\n  exit 1\nfi\nif [ \"$1\" = \"mod\" ] && [ \"$2\" = \"tidy\" ]; then\n  exit 0\nfi\nexit 0\n", "dirname", "mkdir", "id")
+
+	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "build.sh"))
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir,
+		"GO_ARGS_FILE="+argsFile,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected build.sh to fail when go build fails\n%s", out)
+	}
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	if !strings.Contains(string(argsData), "build -o") {
+		t.Fatalf("expected go build invocation, got %q", string(argsData))
+	}
+	if strings.Contains(string(argsData), "mod tidy") {
+		t.Fatalf("build.sh must not run go mod tidy automatically, got %q", string(argsData))
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -75,11 +101,15 @@ func repoRoot(t *testing.T) string {
 }
 
 func stubGo(t *testing.T, extraCommands ...string) (string, string) {
+	return stubGoWithBody(t, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GO_ARGS_FILE\"\nexit 0\n", extraCommands...)
+}
+
+func stubGoWithBody(t *testing.T, body string, extraCommands ...string) (string, string) {
 	t.Helper()
 	binDir := t.TempDir()
 	argsFile := filepath.Join(t.TempDir(), "go-args.txt")
 	script := filepath.Join(binDir, "go")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GO_ARGS_FILE\"\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write go stub: %v", err)
 	}
 	for _, name := range extraCommands {
