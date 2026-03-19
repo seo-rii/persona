@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1514,6 +1516,81 @@ func TestExportPatchIgnoredMaxZeroSkipsIgnoredDriftCheck(t *testing.T) {
 	}
 	if len(patch) != 0 {
 		t.Fatalf("expected empty patch, got %q", string(patch))
+	}
+}
+
+func TestExportPatchWarnsAndSkipsSpecialFiles(t *testing.T) {
+	repo := t.TempDir()
+	fifoPath := filepath.Join(repo, "fifo.pipe")
+	if err := syscall.Mkfifo(fifoPath, 0o644); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	socketPath := filepath.Join(repo, "socket.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	defer listener.Close()
+
+	g := exportGitOps{untracked: []string{"fifo.pipe", "socket.sock"}}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderrW
+	patch, patchErr := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	_ = stderrW.Close()
+	os.Stderr = oldStderr
+	warn, readErr := io.ReadAll(stderrR)
+	_ = stderrR.Close()
+	if patchErr != nil {
+		t.Fatalf("exportPatch error: %v", patchErr)
+	}
+	if readErr != nil {
+		t.Fatalf("read stderr: %v", readErr)
+	}
+	if bytes.Contains(patch, []byte("fifo.pipe")) || bytes.Contains(patch, []byte("socket.sock")) {
+		t.Fatalf("expected special files to be skipped from patch: %s", string(patch))
+	}
+	text := string(warn)
+	if !strings.Contains(text, "skip special file fifo.pipe") {
+		t.Fatalf("expected fifo warning, got %q", text)
+	}
+	if !strings.Contains(text, "skip special file socket.sock") {
+		t.Fatalf("expected socket warning, got %q", text)
+	}
+}
+
+func TestBinaryNewFileRoundTrip(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	want := []byte{0x00, 0x01, 0x02, 0x03, 0x10, 0x20, 0x7f, 0xff}
+	if err := os.WriteFile(filepath.Join(repo, "binary.dat"), want, 0o644); err != nil {
+		t.Fatalf("write binary.dat: %v", err)
+	}
+	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, false, "", model.IgnoredTransparent, 0, nil)
+	if err != nil {
+		t.Fatalf("exportPatch error: %v", err)
+	}
+	if !bytes.Contains(patch, []byte("binary.dat")) {
+		t.Fatalf("expected binary.dat in patch")
+	}
+
+	applyRepo := testutil.InitRepo(t)
+	applyGit := &gitx.Git{RepoRoot: applyRepo, GitDir: filepath.Join(applyRepo, ".git")}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := applyPatchData(context.Background(), applyGit, model.ApplyStrict, patch, applyRepo, applyGit.GitDir, log); err != nil {
+		t.Fatalf("applyPatchData error: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(applyRepo, "binary.dat"))
+	if err != nil {
+		t.Fatalf("read applied binary.dat: %v", err)
+	}
+	if sha256.Sum256(got) != sha256.Sum256(want) {
+		t.Fatalf("binary roundtrip mismatch: got=%x want=%x", got, want)
 	}
 }
 
