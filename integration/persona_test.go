@@ -864,6 +864,33 @@ func TestPersonaIntegrationSecurity(t *testing.T) {
 			t.Fatalf("expected child git failure output in patch, got %s", string(data))
 		}
 	})
+	t.Run("child env dump omits ambient git vars", func(t *testing.T) {
+		repo := createRepo(t)
+		patchPath := filepath.Join(t.TempDir(), "state.patch")
+		env := map[string]string{
+			"GIT_DIR":         "/tmp/nogit",
+			"GIT_WORK_TREE":   "/tmp/nogit",
+			"GIT_INDEX_FILE":  "/tmp/nogit-index",
+			"GIT_SSH_COMMAND": "ssh -F /tmp/nogit-config",
+		}
+		cmd := "env | sort > env.txt; if grep -q '^GIT_' env.txt; then echo leaked > status.txt; else echo clean > status.txt; fi"
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, env)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		data := readFile(t, patchPath)
+		if !bytes.Contains(data, []byte("status.txt")) {
+			t.Fatalf("patch missing status.txt")
+		}
+		if !bytes.Contains(data, []byte("\n+clean\n")) {
+			t.Fatalf("expected child env dump to report clean")
+		}
+		for _, key := range []string{"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_SSH_COMMAND="} {
+			if bytes.Contains(data, []byte(key)) {
+				t.Fatalf("patch leaked %s in child env dump", key)
+			}
+		}
+	})
 }
 
 func TestPersonaIntegrationEdge(t *testing.T) {
@@ -1173,6 +1200,19 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 		entries, err := os.ReadDir(sessions)
 		if err == nil && len(entries) > 0 {
 			t.Fatalf("expected sessions to be removed")
+		}
+	})
+	t.Run("keep session on-fail removes successful session", func(t *testing.T) {
+		repo := createRepo(t)
+		patchPath := filepath.Join(t.TempDir(), "state.patch")
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath, "--keep-session", "on-fail"}, []string{"sh", "-c", "true"}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		sessions := filepath.Join(repo, ".git", "persona", "sessions")
+		entries, err := os.ReadDir(sessions)
+		if err == nil && len(entries) > 0 {
+			t.Fatalf("expected successful on-fail run to remove sessions")
 		}
 	})
 	t.Run("allow dirty toggles", func(t *testing.T) {
@@ -1536,6 +1576,36 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", "true"}, map[string]string{"PERSONA_FORCE_MOUNT_FAIL": "1"})
 		if code != 10 {
 			t.Fatalf("expected exit 10 got %d", code)
+		}
+	})
+	t.Run("custom patch dir auto create and reapply", func(t *testing.T) {
+		repo := createRepo(t)
+		customDir := filepath.Join(t.TempDir(), "custom-patches")
+		code, out, _ := runPersona(t, persona, repo, []string{"--patch-dir", customDir, "--print-patch-path"}, []string{"sh", "-c", "echo custom > custom.txt"}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		patchPath := strings.TrimSpace(out)
+		if patchPath == "" {
+			t.Fatalf("expected printed patch path")
+		}
+		rel, err := filepath.Rel(customDir, patchPath)
+		if err != nil {
+			t.Fatalf("rel patch path: %v", err)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			t.Fatalf("expected patch path under custom dir %s, got %s", customDir, patchPath)
+		}
+		data := readFile(t, patchPath)
+		if !bytes.Contains(data, []byte("custom.txt")) {
+			t.Fatalf("patch missing custom.txt")
+		}
+		code, out, _ = runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"cat", "custom.txt"}, nil)
+		if code != 0 {
+			t.Fatalf("expected exit 0 got %d", code)
+		}
+		if strings.TrimSpace(out) != "custom" {
+			t.Fatalf("expected custom patched view, got %q", out)
 		}
 	})
 }
