@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"persona/internal/model"
@@ -72,14 +73,20 @@ func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mou
 	if err := os.MkdirAll(env.emptyFile, 0o755); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "mkdir empty file dir", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(env.gitDirForOps), 0o755); err != nil {
+	gitMountRoot := env.gitDirForOps
+	gitMountSrc, gitDirForOps, err := planGitDirMount(gitDir, gitMountRoot)
+	if err != nil {
+		return nil, model.Wrap(model.ExitEnv, "plan git mount", err)
+	}
+	env.gitDirForOps = gitDirForOps
+	if err := os.MkdirAll(filepath.Dir(gitMountRoot), 0o755); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "mkdir git mount dir", err)
 	}
 
-	if err := mount.BindMount(gitDir, env.gitDirForOps); err != nil {
+	if err := mount.BindMount(gitMountSrc, gitMountRoot); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "bind mount gitdir", err)
 	}
-	cleanup.Push(func() error { return mount.Umount(env.gitDirForOps) })
+	cleanup.Push(func() error { return mount.Umount(gitMountRoot) })
 
 	if shouldForceMountFail() {
 		return nil, model.Wrap(model.ExitEnv, "forced mount failure", fmt.Errorf("forced"))
@@ -100,6 +107,44 @@ func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mou
 	log.Debug("overlay mounted", "repo", repoRoot, "base", basePath)
 
 	return env, nil
+}
+
+func planGitDirMount(gitDir, mountRoot string) (string, string, error) {
+	commonDir, err := resolveGitCommonDir(gitDir)
+	if err != nil {
+		return "", "", err
+	}
+	relGitDir, err := filepath.Rel(commonDir, gitDir)
+	if err != nil {
+		return "", "", err
+	}
+	if relGitDir == ".." || strings.HasPrefix(relGitDir, ".."+string(os.PathSeparator)) {
+		return "", "", fmt.Errorf("git dir %s escapes common dir %s", gitDir, commonDir)
+	}
+	gitDirForOps := mountRoot
+	if relGitDir != "." {
+		gitDirForOps = filepath.Join(mountRoot, relGitDir)
+	}
+	return commonDir, gitDirForOps, nil
+}
+
+func resolveGitCommonDir(gitDir string) (string, error) {
+	commonDirPath := filepath.Join(gitDir, "commondir")
+	data, err := os.ReadFile(commonDirPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return filepath.Clean(gitDir), nil
+		}
+		return "", err
+	}
+	commonDir := strings.TrimSpace(string(data))
+	if commonDir == "" {
+		return "", fmt.Errorf("empty commondir in %s", commonDirPath)
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(gitDir, filepath.FromSlash(commonDir))
+	}
+	return filepath.Clean(commonDir), nil
 }
 
 func prepareMaskBacking(emptyFileRoot, emptyDirRoot, target string) (string, string, error) {

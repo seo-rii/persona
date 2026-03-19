@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -672,6 +673,113 @@ func TestPrepareBaseRepoExcludesPatchAndLockPaths(t *testing.T) {
 	want := []string{"state.patch", "state.patch.lock"}
 	if strings.Join(g.excludeCalls[0], ",") != strings.Join(want, ",") {
 		t.Fatalf("expected excluded paths %v, got %v", want, g.excludeCalls[0])
+	}
+}
+
+func copyDirTree(t *testing.T, src, dst string) {
+	t.Helper()
+	if err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	}); err != nil {
+		t.Fatalf("copy dir tree: %v", err)
+	}
+}
+
+func runGitWithDir(t *testing.T, workTree, gitDir string, args ...string) string {
+	t.Helper()
+	cmdArgs := []string{"--git-dir", gitDir, "--work-tree", workTree}
+	cmdArgs = append(cmdArgs, args...)
+	cmd := exec.Command("git", cmdArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v: %s", args, err, string(out))
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestPlanGitDirMountRepoKeepsGitOpsWorkingAfterRelocation(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	_, gitDir, err := gitx.DetectRepo(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("DetectRepo error: %v", err)
+	}
+	mountRoot := filepath.Join(t.TempDir(), "mnt", "gitdir")
+	mountSrc, gitDirForOps, err := planGitDirMount(gitDir, mountRoot)
+	if err != nil {
+		t.Fatalf("planGitDirMount error: %v", err)
+	}
+	if mountSrc != gitDir {
+		t.Fatalf("expected regular repo to mount gitdir directly, got %q", mountSrc)
+	}
+	copyRoot := t.TempDir()
+	copyDirTree(t, mountSrc, copyRoot)
+	relGitDir, err := filepath.Rel(mountRoot, gitDirForOps)
+	if err != nil {
+		t.Fatalf("Rel error: %v", err)
+	}
+	gotTop := runGitWithDir(t, repo, filepath.Join(copyRoot, relGitDir), "rev-parse", "--show-toplevel")
+	if gotTop != repo {
+		t.Fatalf("expected repo root %q got %q", repo, gotTop)
+	}
+}
+
+func TestPlanGitDirMountLinkedWorktreeKeepsRelativeCommonDir(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	linked := filepath.Join(t.TempDir(), "linked-worktree")
+	testutil.RunCmd(t, repo, "git", "worktree", "add", "--detach", linked)
+
+	_, gitDir, err := gitx.DetectRepo(context.Background(), linked)
+	if err != nil {
+		t.Fatalf("DetectRepo error: %v", err)
+	}
+	commonDir, err := resolveGitCommonDir(gitDir)
+	if err != nil {
+		t.Fatalf("resolveGitCommonDir error: %v", err)
+	}
+	wantRel, err := filepath.Rel(commonDir, gitDir)
+	if err != nil {
+		t.Fatalf("Rel error: %v", err)
+	}
+	if wantRel == "." {
+		t.Fatalf("expected linked worktree gitdir under common dir, got %q", gitDir)
+	}
+
+	mountRoot := filepath.Join(t.TempDir(), "mnt", "gitdir")
+	mountSrc, gitDirForOps, err := planGitDirMount(gitDir, mountRoot)
+	if err != nil {
+		t.Fatalf("planGitDirMount error: %v", err)
+	}
+	if mountSrc != commonDir {
+		t.Fatalf("expected mount source %q got %q", commonDir, mountSrc)
+	}
+	gotRel, err := filepath.Rel(mountRoot, gitDirForOps)
+	if err != nil {
+		t.Fatalf("Rel error: %v", err)
+	}
+	if gotRel != wantRel {
+		t.Fatalf("expected relocated gitdir rel %q got %q", wantRel, gotRel)
+	}
+
+	copyRoot := t.TempDir()
+	copyDirTree(t, mountSrc, copyRoot)
+	gotTop := runGitWithDir(t, linked, filepath.Join(copyRoot, gotRel), "rev-parse", "--show-toplevel")
+	if gotTop != linked {
+		t.Fatalf("expected linked worktree root %q got %q", linked, gotTop)
 	}
 }
 
