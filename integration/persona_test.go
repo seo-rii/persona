@@ -5,11 +5,13 @@ package integration
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -1213,6 +1215,65 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 		data := readFile(t, patchPath)
 		if !bytes.Contains(data, []byte("sig.txt")) {
 			t.Fatalf("patch missing sig.txt")
+		}
+	})
+	t.Run("sigterm returns 143 and reaps ignored grandchild", func(t *testing.T) {
+		repo := createRepo(t)
+		patchPath := filepath.Join(t.TempDir(), "state.patch")
+		cmd := strings.Join([]string{
+			"(trap '' TERM; while :; do sleep 1; done) &",
+			"child=$!",
+			"echo $child > grandchild.pid",
+			"echo before > before.txt",
+			"wait",
+		}, "\n")
+		code, out, errOut := runPersonaWithSignal(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, nil, syscall.SIGTERM, 500*time.Millisecond)
+		if code != 143 {
+			t.Fatalf("expected exit 143 got %d stdout=%q stderr=%q", code, out, errOut)
+		}
+		data := readFile(t, patchPath)
+		if !bytes.Contains(data, []byte("before.txt")) {
+			t.Fatalf("patch missing before.txt")
+		}
+		if !bytes.Contains(data, []byte("grandchild.pid")) {
+			t.Fatalf("patch missing grandchild.pid")
+		}
+		pidData := ""
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if line != "+++ b/grandchild.pid" {
+				continue
+			}
+			for _, patchLine := range lines[i+1:] {
+				if strings.HasPrefix(patchLine, "diff --git ") {
+					break
+				}
+				if strings.HasPrefix(patchLine, "+") && !strings.HasPrefix(patchLine, "+++") {
+					pidData = strings.TrimSpace(strings.TrimPrefix(patchLine, "+"))
+					break
+				}
+			}
+			if pidData != "" {
+				break
+			}
+		}
+		if pidData == "" {
+			t.Fatalf("failed to extract grandchild pid from patch: %s", string(data))
+		}
+		pid, err := strconv.Atoi(pidData)
+		if err != nil {
+			t.Fatalf("parse grandchild pid %q: %v", pidData, err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			err = syscall.Kill(pid, 0)
+			if err != nil && !errors.Is(err, syscall.EPERM) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected grandchild pid %d to be gone, last err=%v", pid, err)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
 	})
 	t.Run("patch file permissions preserved", func(t *testing.T) {
