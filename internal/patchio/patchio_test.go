@@ -544,6 +544,73 @@ func TestLockPatchBlocksAcrossAtomicRename(t *testing.T) {
 	}
 }
 
+func TestPatchStoreStaysOnOpenedDirectoryAcrossPathMove(t *testing.T) {
+	root := t.TempDir()
+	originalDir := filepath.Join(root, "patches")
+	if err := os.MkdirAll(originalDir, 0o755); err != nil {
+		t.Fatalf("mkdir original dir: %v", err)
+	}
+	path := filepath.Join(originalDir, "state.patch")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write original patch: %v", err)
+	}
+
+	store, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	lock, err := store.Lock()
+	if err != nil {
+		t.Fatalf("lock patch store: %v", err)
+	}
+	defer lock.Unlock()
+
+	movedDir := filepath.Join(root, "patches-moved")
+	if err := os.Rename(originalDir, movedDir); err != nil {
+		t.Fatalf("rename original dir: %v", err)
+	}
+	if err := os.MkdirAll(originalDir, 0o755); err != nil {
+		t.Fatalf("recreate original dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(originalDir, "state.patch"), []byte("other"), 0o644); err != nil {
+		t.Fatalf("write replacement patch: %v", err)
+	}
+
+	data, err := store.ReadAll()
+	if err != nil {
+		t.Fatalf("store read: %v", err)
+	}
+	if string(data) != "old" {
+		t.Fatalf("expected store to read original content, got %q", string(data))
+	}
+
+	if err := store.WriteAll([]byte("new")); err != nil {
+		t.Fatalf("store write: %v", err)
+	}
+
+	movedData, err := os.ReadFile(filepath.Join(movedDir, "state.patch"))
+	if err != nil {
+		t.Fatalf("read moved patch: %v", err)
+	}
+	if string(movedData) != "new" {
+		t.Fatalf("expected moved patch to be updated, got %q", string(movedData))
+	}
+
+	replacementData, err := os.ReadFile(filepath.Join(originalDir, "state.patch"))
+	if err != nil {
+		t.Fatalf("read replacement patch: %v", err)
+	}
+	if string(replacementData) != "other" {
+		t.Fatalf("expected replacement patch untouched, got %q", string(replacementData))
+	}
+
+	if _, err := os.Stat(filepath.Join(movedDir, "state.patch.lock")); err != nil {
+		t.Fatalf("expected moved lock file to remain with original directory: %v", err)
+	}
+}
+
 func TestFilterExistingNewFiles(t *testing.T) {
 	dir := t.TempDir()
 	existingPath := filepath.Join(dir, "test.patch")

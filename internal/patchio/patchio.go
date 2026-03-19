@@ -23,16 +23,75 @@ type PatchLock struct {
 	file *os.File
 }
 
+type PatchStore struct {
+	dir  *os.File
+	name string
+}
+
+func OpenPatchStore(path string) (*PatchStore, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	return &PatchStore{dir: dir, name: filepath.Base(path)}, nil
+}
+
+func (s *PatchStore) Close() error {
+	if s == nil || s.dir == nil {
+		return nil
+	}
+	err := s.dir.Close()
+	s.dir = nil
+	return err
+}
+
+func (s *PatchStore) Lock() (*PatchLock, error) {
+	if s == nil || s.dir == nil {
+		return nil, errors.New("patch store is closed")
+	}
+	return lockPatchFileAt(s.dir, s.name+".lock")
+}
+
+func (s *PatchStore) ReadAll() ([]byte, error) {
+	if s == nil || s.dir == nil {
+		return nil, errors.New("patch store is closed")
+	}
+	return readAllAt(s.dir, s.name)
+}
+
+func (s *PatchStore) WriteAll(data []byte) error {
+	if s == nil || s.dir == nil {
+		return errors.New("patch store is closed")
+	}
+	return AtomicWriteFileAt(s.dir, s.name, data)
+}
+
 func LockPatch(path string) (*PatchLock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return nil, err
 	}
+	defer dir.Close()
+	return lockPatchFileAt(dir, filepath.Base(path)+".lock")
+}
+
+func lockPatchFileAt(dir *os.File, name string) (*PatchLock, error) {
+	if dir == nil {
+		return nil, errors.New("dir is nil")
+	}
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_CREAT|unix.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), name)
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, err
 	}
 	return &PatchLock{file: file}, nil
@@ -616,13 +675,26 @@ func checkPath(path string) error {
 }
 
 func ReadAll(path string) ([]byte, error) {
-	file, err := os.Open(path)
+	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
-		if os.IsNotExist(err) {
+		return nil, err
+	}
+	defer dir.Close()
+	return readAllAt(dir, filepath.Base(path))
+}
+
+func readAllAt(dir *os.File, name string) ([]byte, error) {
+	if dir == nil {
+		return nil, errors.New("dir is nil")
+	}
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
 			return nil, nil
 		}
 		return nil, err
 	}
+	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
 	return io.ReadAll(file)
 }

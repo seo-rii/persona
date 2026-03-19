@@ -94,17 +94,17 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		patchRel = filepath.ToSlash(patchRel)
 	}
 
-	patchDirFile, err := os.Open(filepath.Dir(patchPathEffective))
+	patchStore, err := patchio.OpenPatchStore(patchPathEffective)
 	if err != nil {
-		return model.Wrap(model.ExitWrite, "open patch directory", err), 0
+		return model.Wrap(model.ExitWrite, "open patch store", err), 0
 	}
-	defer patchDirFile.Close()
+	cleanup := &cleanupStack{}
+	cleanup.Push(func() error { return patchStore.Close() })
 
-	lock, err := patchio.LockPatch(patchPathEffective)
+	lock, err := patchStore.Lock()
 	if err != nil {
 		return model.Wrap(model.ExitWrite, "lock patch", err), 0
 	}
-	cleanup := &cleanupStack{}
 	cleanup.Push(func() error { return lock.Unlock() })
 	var sess *session.Session
 	defer func() {
@@ -117,7 +117,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		}
 	}()
 
-	patchData, err := patchio.ReadAll(patchPathEffective)
+	patchData, err := patchStore.ReadAll()
 	if err != nil {
 		return model.Wrap(model.ExitWrite, "read patch", err), 0
 	}
@@ -236,7 +236,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	}
 	log.Debug("export complete", "bytes", len(patchOut))
 
-	if err := patchio.AtomicWriteFileAt(patchDirFile, filepath.Base(patchPathEffective), patchOut); err != nil {
+	if err := patchStore.WriteAll(patchOut); err != nil {
 		return model.Wrap(model.ExitWrite, "write patch", err), 0
 	}
 
