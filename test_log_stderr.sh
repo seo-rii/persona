@@ -20,15 +20,19 @@ log_line() {
 }
 
 unit_status=0
-log_line "== Unit tests: ./internal/... =="
-if ! "$go_bin" test ./internal/... -v 2>&1 | tee -a "$log"; then
+log_line "== Unit tests: ./cmd/... ./internal/... =="
+if ! "$go_bin" test ./cmd/... ./internal/... -v 2>&1 | tee -a "$log"; then
   unit_status=${PIPESTATUS[0]}
 fi
 
 integration_status=0
+integration_skipped=0
 log_line "== Integration tests: ./integration (root required) =="
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  if [[ $use_script -eq 1 ]]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    log_line "SKIP: sudo not found; run as root or install sudo to execute ./integration"
+    integration_skipped=1
+  elif [[ $use_script -eq 1 ]]; then
     script -q -a "$log" -c "sudo -E env \"PATH=$PATH\" GOCACHE=\"$gocache_dir\" PERSONA_INTEGRATION=1 PERSONA_TEST_VERBOSE=1 \"$go_bin\" test ./integration -run TestPersonaIntegration -count=1 -v" || integration_status=$?
   else
     sudo -E env "PATH=$PATH" GOCACHE="$gocache_dir" PERSONA_INTEGRATION=1 PERSONA_TEST_VERBOSE=1 "$go_bin" test ./integration -run TestPersonaIntegration -count=1 -v 2>&1 | tee -a "$log" || integration_status=${PIPESTATUS[0]}
@@ -57,7 +61,9 @@ if [[ $unit_status -ne 0 ]]; then
   unit_label="FAIL"
 fi
 integration_label="PASS"
-if [[ $integration_status -ne 0 ]]; then
+if [[ $integration_skipped -ne 0 ]]; then
+  integration_label="SKIP"
+elif [[ $integration_status -ne 0 ]]; then
   integration_label="FAIL"
 fi
 overall_label="PASS"
