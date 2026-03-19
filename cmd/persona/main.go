@@ -340,8 +340,7 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&keepSession, "keep-session", string(model.KeepOnFail), "keep session: on-fail | always | never")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "enable verbose logging")
 
-	cmd.AddCommand(newDoctorCmd())
-	cmd.AddCommand(newActivateCmd())
+	addDiagnosticCommands(cmd)
 	return cmd
 }
 
