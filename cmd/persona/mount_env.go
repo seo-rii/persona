@@ -184,11 +184,15 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 		target := filepath.Join(repoRoot, filepath.FromSlash(path))
 		switch opts.IgnoredMode {
 		case model.IgnoredReadonly:
-			if _, err := os.Lstat(target); err != nil {
+			info, err := os.Lstat(target)
+			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
 				return targets, ignored, fmt.Errorf("stat ignored readonly %s: %w", path, err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return targets, ignored, fmt.Errorf("ignored readonly symlink %s is not supported", path)
 			}
 			if err := mount.BindMount(target, target); err != nil {
 				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
@@ -210,6 +214,9 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 					continue
 				}
 				return targets, ignored, fmt.Errorf("stat ignored masked %s: %w", path, err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return targets, ignored, fmt.Errorf("ignored masked symlink %s is not supported", path)
 			}
 			kind := model.MaskDir
 			if !info.IsDir() {

@@ -952,6 +952,38 @@ func TestMaskIgnoredFilesDisabledWhenIgnoredMaxZero(t *testing.T) {
 	}
 }
 
+func TestMaskIgnoredFilesReadonlyRejectsSymlink(t *testing.T) {
+	repoRoot := t.TempDir()
+	target := filepath.Join(repoRoot, "target.txt")
+	if err := os.WriteFile(target, []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink("target.txt", filepath.Join(repoRoot, "ignored-link.txt")); err != nil {
+		t.Fatalf("symlink ignored target: %v", err)
+	}
+	g := ignoredListGitOps{ignored: []string{"ignored-link.txt"}}
+	mount := &recordingNSOps{}
+	opts := model.Options{IgnoredMode: model.IgnoredReadonly, IgnoredMax: 10}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	targets, ignored, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
+	if err == nil {
+		t.Fatal("expected symlink readonly rejection")
+	}
+	if !strings.Contains(err.Error(), "ignored readonly symlink ignored-link.txt") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("expected no targets, got %v", targets)
+	}
+	if len(ignored) != 1 || ignored[0] != "ignored-link.txt" {
+		t.Fatalf("expected ignored list preserved, got %v", ignored)
+	}
+	if len(mount.bindCalls) != 0 || len(mount.remountCalls) != 0 {
+		t.Fatalf("expected no mount calls, got bind=%v remount=%v", mount.bindCalls, mount.remountCalls)
+	}
+}
+
 func TestMaskIgnoredFilesReadonlySkipsBindMountENOENT(t *testing.T) {
 	repoRoot := t.TempDir()
 	raced := filepath.Join(repoRoot, "raced.txt")
@@ -1015,6 +1047,38 @@ func TestMaskIgnoredFilesMaskedFailsOnNonENOENTStat(t *testing.T) {
 	}
 	if len(mount.bindCalls) != 0 {
 		t.Fatalf("expected no bind calls on stat error, got %v", mount.bindCalls)
+	}
+}
+
+func TestMaskIgnoredFilesMaskedRejectsSymlink(t *testing.T) {
+	repoRoot := t.TempDir()
+	targetDir := filepath.Join(repoRoot, "target-dir")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+	if err := os.Symlink("target-dir", filepath.Join(repoRoot, "ignored-link")); err != nil {
+		t.Fatalf("symlink ignored dir: %v", err)
+	}
+	g := ignoredListGitOps{ignored: []string{"ignored-link"}}
+	mount := &recordingNSOps{}
+	opts := model.Options{IgnoredMode: model.IgnoredMasked, IgnoredMax: 10}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	targets, ignored, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", t.TempDir(), t.TempDir(), opts, mount, log)
+	if err == nil {
+		t.Fatal("expected symlink masked rejection")
+	}
+	if !strings.Contains(err.Error(), "ignored masked symlink ignored-link") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("expected no targets, got %v", targets)
+	}
+	if len(ignored) != 1 || ignored[0] != "ignored-link" {
+		t.Fatalf("expected ignored list preserved, got %v", ignored)
+	}
+	if len(mount.maskCalls) != 0 {
+		t.Fatalf("expected no mask calls, got %v", mount.maskCalls)
 	}
 }
 

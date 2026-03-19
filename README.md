@@ -68,6 +68,7 @@ Base options:
 Ignored handling:
 - `--ignored-mode {transparent,readonly,masked}` (default: `transparent`)
 - `--ignored-max N` (default: `200`, `0` disables ignored processing)
+  `readonly` and `masked` reject ignored symlinks instead of following their referents.
 
 Patch apply:
 - `--apply-mode {strict,reject}` (default: `strict`)
