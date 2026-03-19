@@ -923,6 +923,70 @@ func TestApplyPatchDataEmptyPatchIsNoop(t *testing.T) {
 	}
 }
 
+func TestApplyPatchDataRejectModeLeavesRejectAndPartialApply(t *testing.T) {
+	const base = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n"
+	const changed = "LINE1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nLINE10\n"
+	const conflicted = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nconflict10\n"
+
+	makeRepo := func(t *testing.T, content string) string {
+		t.Helper()
+		repo := testutil.InitEmptyRepo(t)
+		testutil.WriteFile(t, filepath.Join(repo, "tracked.txt"), content)
+		testutil.RunCmd(t, repo, "git", "add", "tracked.txt")
+		testutil.RunCmd(t, repo, "git", "commit", "-m", "baseline")
+		return repo
+	}
+
+	patchRepo := makeRepo(t, base)
+	testutil.WriteFile(t, filepath.Join(patchRepo, "tracked.txt"), changed)
+	cmd := exec.Command("git", "diff", "--binary", "--full-index", "HEAD")
+	cmd.Dir = patchRepo
+	patch, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git diff: %v", err)
+	}
+
+	strictRepo := makeRepo(t, base)
+	testutil.WriteFile(t, filepath.Join(strictRepo, "tracked.txt"), conflicted)
+	strictGit := &gitx.Git{RepoRoot: strictRepo, GitDir: filepath.Join(strictRepo, ".git")}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := applyPatchData(context.Background(), strictGit, model.ApplyStrict, patch, strictRepo, strictGit.GitDir, log); err == nil {
+		t.Fatal("expected strict apply to fail on conflicted hunk")
+	}
+	strictText, err := os.ReadFile(filepath.Join(strictRepo, "tracked.txt"))
+	if err != nil {
+		t.Fatalf("read strict tracked.txt: %v", err)
+	}
+	if strings.Contains(string(strictText), "LINE1") {
+		t.Fatalf("strict apply must not partially apply hunks: %s", string(strictText))
+	}
+
+	rejectRepo := makeRepo(t, base)
+	testutil.WriteFile(t, filepath.Join(rejectRepo, "tracked.txt"), conflicted)
+	rejectGit := &gitx.Git{RepoRoot: rejectRepo, GitDir: filepath.Join(rejectRepo, ".git")}
+	err = applyPatchData(context.Background(), rejectGit, model.ApplyReject, patch, rejectRepo, rejectGit.GitDir, log)
+	if err == nil {
+		t.Fatal("expected reject apply to report reject output")
+	}
+	rejectText, err := os.ReadFile(filepath.Join(rejectRepo, "tracked.txt"))
+	if err != nil {
+		t.Fatalf("read reject tracked.txt: %v", err)
+	}
+	if !strings.Contains(string(rejectText), "LINE1") {
+		t.Fatalf("reject apply must keep applied hunk: %s", string(rejectText))
+	}
+	if !strings.Contains(string(rejectText), "conflict10") {
+		t.Fatalf("reject apply must keep conflicted line: %s", string(rejectText))
+	}
+	rej, err := os.ReadFile(filepath.Join(rejectRepo, "tracked.txt.rej"))
+	if err != nil {
+		t.Fatalf("read reject file: %v", err)
+	}
+	if !bytes.Contains(rej, []byte("LINE10")) {
+		t.Fatalf("expected rejected hunk in .rej, got %s", string(rej))
+	}
+}
+
 func TestMaskIgnoredFilesReadonlySkipsMissingTargets(t *testing.T) {
 	repoRoot := t.TempDir()
 	existing := filepath.Join(repoRoot, "existing.txt")
