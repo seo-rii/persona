@@ -25,6 +25,8 @@ type PatchLock struct {
 
 const MaxPatchBytes = 16 * 1024 * 1024
 
+var fchownFn = unix.Fchown
+
 type PatchStore struct {
 	dir  *os.File
 	name string
@@ -221,7 +223,9 @@ func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 		return err
 	}
 	if uid >= 0 || gid >= 0 {
-		_ = unix.Fchown(fd, uid, gid)
+		if err := fchownFn(fd, uid, gid); err != nil {
+			return fmt.Errorf("preserve owner for %s: %w", name, err)
+		}
 	}
 	if err := file.Close(); err != nil {
 		return err

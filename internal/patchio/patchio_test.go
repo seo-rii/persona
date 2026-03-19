@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"persona/internal/model"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestValidatePatchPathsOK(t *testing.T) {
@@ -487,6 +489,53 @@ func TestAtomicWriteFileAtReadOnlyDir(t *testing.T) {
 	defer dh.Close()
 	if err := AtomicWriteFileAt(dh, "state.patch", []byte("new")); err == nil {
 		t.Fatalf("expected error for read-only dir")
+	}
+}
+
+func TestAtomicWriteFileAtChownFailureIsSurfaced(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.patch")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	dh, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("open dir: %v", err)
+	}
+	defer dh.Close()
+
+	prevFchown := fchownFn
+	fchownFn = func(int, int, int) error {
+		return unix.EPERM
+	}
+	defer func() {
+		fchownFn = prevFchown
+	}()
+
+	err = AtomicWriteFileAt(dh, "state.patch", []byte("new"))
+	if err == nil {
+		t.Fatal("expected chown failure to be surfaced")
+	}
+	if !strings.Contains(err.Error(), "preserve owner") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read original file: %v", readErr)
+	}
+	if string(data) != "old" {
+		t.Fatalf("expected original content preserved, got %q", string(data))
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".persona-") {
+			t.Fatalf("temp file %q left behind after chown failure", entry.Name())
+		}
 	}
 }
 

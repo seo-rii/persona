@@ -89,6 +89,7 @@ Session/logging:
 - Special files (FIFO/device/socket) are skipped with a warning.
 - Patch write-back uses an atomic rename inside the patch directory.
 - Patch files and exported diffs are capped at 16 MiB; larger inputs fail explicitly instead of relying on scanner or memory pressure side effects.
+- If persona cannot preserve the existing patch file owner/group during atomic write-back, it fails instead of silently changing ownership.
 
 ## Implementation Notes (Spec Deltas)
 
