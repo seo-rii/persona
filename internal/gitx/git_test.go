@@ -166,6 +166,26 @@ func TestListIgnoredCandidatesTrimsDirectorySlash(t *testing.T) {
 	}
 }
 
+func TestListIgnoredCandidatesReturnsOverflowSentinel(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	testutil.WriteFile(t, filepath.Join(repo, ".gitignore"), "a.tmp\nb.tmp\nc.tmp\n")
+	testutil.RunCmd(t, repo, "git", "add", ".gitignore")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "ignore many")
+	for _, name := range []string{"a.tmp", "b.tmp", "c.tmp"} {
+		testutil.WriteFile(t, filepath.Join(repo, name), "skip\n")
+	}
+
+	ignored, err := g.ListIgnoredCandidates(context.Background(), repo, g.GitDir, 2)
+	if err != nil {
+		t.Fatalf("ListIgnoredCandidates error: %v", err)
+	}
+	if len(ignored) != 3 {
+		t.Fatalf("expected overflow sentinel entry, got %q", ignored)
+	}
+}
+
 func TestDiffNewFileNoIndex(t *testing.T) {
 	repo := testutil.InitRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}

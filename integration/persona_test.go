@@ -1112,7 +1112,7 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 			t.Fatalf("expected masked directory to be empty")
 		}
 	})
-	t.Run("ignored max limits scope", func(t *testing.T) {
+	t.Run("ignored max exceeded fails early", func(t *testing.T) {
 		repo := createRepo(t)
 		writeFile(t, filepath.Join(repo, ".gitignore"), []byte("ignored-a.txt\nignored-b.txt\n"))
 		runCmd(t, repo, "git", "add", ".gitignore")
@@ -1120,17 +1120,9 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 		writeFile(t, filepath.Join(repo, "ignored-a.txt"), []byte("seed\n"))
 		writeFile(t, filepath.Join(repo, "ignored-b.txt"), []byte("seed\n"))
 		patchPath := filepath.Join(t.TempDir(), "state.patch")
-		cmd := "echo data > ignored-a.txt; echo $? > code-a.txt; echo data > ignored-b.txt; echo $? > code-b.txt"
-		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath, "--ignored-mode", "readonly", "--ignored-max", "1"}, []string{"sh", "-c", cmd}, nil)
-		if code != 0 {
-			t.Fatalf("expected exit 0 got %d", code)
-		}
-		data := readFile(t, patchPath)
-		if !bytes.Contains(data, []byte("code-a.txt")) || !bytes.Contains(data, []byte("code-b.txt")) {
-			t.Fatalf("patch missing code outputs")
-		}
-		if !containsNonZeroLine(data) {
-			t.Fatalf("expected at least one readonly failure")
+		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath, "--ignored-mode", "readonly", "--ignored-max", "1"}, []string{"sh", "-c", "true"}, nil)
+		if code != 10 {
+			t.Fatalf("expected exit 10 got %d", code)
 		}
 	})
 	t.Run("new ignored path within ignored max fails export", func(t *testing.T) {

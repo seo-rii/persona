@@ -178,8 +178,11 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 	if err != nil {
 		return nil, nil, fmt.Errorf("list ignored: %w", err)
 	}
-	log.Debug("ignored files", "count", len(ignored))
 	var targets []string
+	if opts.IgnoredMax > 0 && len(ignored) > opts.IgnoredMax {
+		return targets, ignored, fmt.Errorf("ignored candidate count exceeds ignored-max %d", opts.IgnoredMax)
+	}
+	log.Debug("ignored files", "count", len(ignored))
 	for _, path := range ignored {
 		target := filepath.Join(repoRoot, filepath.FromSlash(path))
 		switch opts.IgnoredMode {

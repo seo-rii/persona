@@ -69,6 +69,7 @@ Ignored handling:
 - `--ignored-mode {transparent,readonly,masked}` (default: `transparent`)
 - `--ignored-max N` (default: `200`, `0` disables ignored processing)
   `readonly` and `masked` reject ignored symlinks instead of following their referents.
+  If ignored candidates exceed `N`, persona fails instead of silently truncating the set.
 
 Patch apply:
 - `--apply-mode {strict,reject}` (default: `strict`)
@@ -84,6 +85,7 @@ Session/logging:
 - Patch locking uses a sibling `<patch>.lock` file. Persona unlocks and closes it after the run, but does not remove the lock file; if the patch lives inside the repo, the lock path is also masked in the view and excluded from export.
 - Export is always based on `HEAD`.
 - Ignored untracked files are excluded from export by default.
+- If the ignored path set changes during the run in either direction, export fails.
 - Special files (FIFO/device/socket) are skipped with a warning.
 - Patch write-back uses an atomic rename inside the patch directory.
 

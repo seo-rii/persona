@@ -233,7 +233,7 @@ func (g Git) ListIgnoredCandidates(ctx context.Context, workTree, gitDir string,
 				path = strings.TrimSuffix(path, "/")
 			}
 			result = append(result, path)
-			if maxN > 0 && len(result) >= maxN {
+			if maxN > 0 && len(result) > maxN {
 				break
 			}
 		}

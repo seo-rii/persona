@@ -129,8 +129,18 @@ func (g ignoredListGitOps) DiffNewFileNoIndex(context.Context, string, string, s
 	panic("unexpected call")
 }
 
-func (g ignoredListGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
-	return g.ignored, g.err
+func (g ignoredListGitOps) ListIgnoredCandidates(_ context.Context, _ string, _ string, maxN int) ([]string, error) {
+	if g.err != nil {
+		return nil, g.err
+	}
+	if maxN > 0 && len(g.ignored) > maxN {
+		limit := maxN + 1
+		if limit > len(g.ignored) {
+			limit = len(g.ignored)
+		}
+		return append([]string(nil), g.ignored[:limit]...), nil
+	}
+	return append([]string(nil), g.ignored...), nil
 }
 
 func (g exportGitOps) RepoRootPath() string { return "" }
@@ -177,7 +187,11 @@ func (g exportGitOps) ListIgnoredCandidates(_ context.Context, _ string, _ strin
 		return nil, g.ignoredErr
 	}
 	if maxN > 0 && len(g.ignored) > maxN {
-		return append([]string(nil), g.ignored[:maxN]...), nil
+		limit := maxN + 1
+		if limit > len(g.ignored) {
+			limit = len(g.ignored)
+		}
+		return append([]string(nil), g.ignored[:limit]...), nil
 	}
 	return append([]string(nil), g.ignored...), nil
 }
@@ -952,6 +966,31 @@ func TestMaskIgnoredFilesDisabledWhenIgnoredMaxZero(t *testing.T) {
 	}
 }
 
+func TestMaskIgnoredFilesFailsWhenIgnoredCandidateCapExceeded(t *testing.T) {
+	repoRoot := t.TempDir()
+	g := ignoredListGitOps{ignored: []string{"a.tmp", "b.tmp", "c.tmp"}}
+	mount := &recordingNSOps{}
+	opts := model.Options{IgnoredMode: model.IgnoredReadonly, IgnoredMax: 2}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	targets, ignored, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
+	if err == nil {
+		t.Fatal("expected ignored-max overflow to fail")
+	}
+	if !strings.Contains(err.Error(), "ignored-max 2") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("expected no targets, got %v", targets)
+	}
+	if len(ignored) != 3 {
+		t.Fatalf("expected overflow sentinel list, got %v", ignored)
+	}
+	if len(mount.bindCalls) != 0 || len(mount.remountCalls) != 0 {
+		t.Fatalf("expected no mount calls, got bind=%v remount=%v", mount.bindCalls, mount.remountCalls)
+	}
+}
+
 func TestMaskIgnoredFilesReadonlyRejectsSymlink(t *testing.T) {
 	repoRoot := t.TempDir()
 	target := filepath.Join(repoRoot, "target.txt")
@@ -1374,14 +1413,17 @@ func TestExportPatchFailsOnNewIgnoredCandidates(t *testing.T) {
 	}
 }
 
-func TestExportPatchIgnoredDriftUsesBaselineCap(t *testing.T) {
+func TestExportPatchFailsWhenIgnoredCandidateCapExceeded(t *testing.T) {
 	g := exportGitOps{
 		ignored: []string{"a.tmp", "b.tmp", "c.tmp"},
 	}
 
 	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"a.tmp", "b.tmp"})
-	if err != nil {
-		t.Fatalf("expected capped ignored baseline not to fail, got %v", err)
+	if err == nil {
+		t.Fatal("expected ignored-max overflow to fail")
+	}
+	if !strings.Contains(err.Error(), "ignored-max 2") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1396,6 +1438,20 @@ func TestExportPatchIgnoredDriftDetectsNewCandidatesWithinIgnoredMax(t *testing.
 	}
 	if !strings.Contains(err.Error(), "b.tmp") {
 		t.Fatalf("expected new ignored path in error, got %v", err)
+	}
+}
+
+func TestExportPatchFailsOnIgnoredToUnignoredTransition(t *testing.T) {
+	g := exportGitOps{
+		ignored: []string{"keep.tmp"},
+	}
+
+	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"keep.tmp", "gone.tmp"})
+	if err == nil {
+		t.Fatal("expected ignored-to-unignored transition to fail")
+	}
+	if !strings.Contains(err.Error(), "gone.tmp") || !strings.Contains(err.Error(), "no longer ignored") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

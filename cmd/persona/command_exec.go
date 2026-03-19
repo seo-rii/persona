@@ -100,24 +100,47 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 
 func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string) ([]byte, error) {
 	if ignoredMode != model.IgnoredTransparent && ignoredMax != 0 {
+		if ignoredMax > 0 && len(initialIgnored) > ignoredMax {
+			return nil, fmt.Errorf("ignored candidate count exceeds ignored-max %d", ignoredMax)
+		}
 		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, ignoredMax)
 		if err != nil {
 			return nil, err
+		}
+		if ignoredMax > 0 && len(ignoredNow) > ignoredMax {
+			return nil, fmt.Errorf("ignored candidate count exceeds ignored-max %d", ignoredMax)
 		}
 		ignoredSet := make(map[string]struct{}, len(initialIgnored))
 		for _, path := range initialIgnored {
 			ignoredSet[path] = struct{}{}
 		}
+		ignoredNowSet := make(map[string]struct{}, len(ignoredNow))
 		var newlyIgnored []string
 		for _, path := range ignoredNow {
+			ignoredNowSet[path] = struct{}{}
 			if _, ok := ignoredSet[path]; ok {
 				continue
 			}
 			newlyIgnored = append(newlyIgnored, path)
 		}
-		if len(newlyIgnored) > 0 {
+		var noLongerIgnored []string
+		for _, path := range initialIgnored {
+			if _, ok := ignoredNowSet[path]; ok {
+				continue
+			}
+			noLongerIgnored = append(noLongerIgnored, path)
+		}
+		if len(newlyIgnored) > 0 || len(noLongerIgnored) > 0 {
 			sort.Strings(newlyIgnored)
-			return nil, fmt.Errorf("new ignored paths appeared during run: %s", strings.Join(newlyIgnored, ", "))
+			sort.Strings(noLongerIgnored)
+			var problems []string
+			if len(newlyIgnored) > 0 {
+				problems = append(problems, "newly ignored: "+strings.Join(newlyIgnored, ", "))
+			}
+			if len(noLongerIgnored) > 0 {
+				problems = append(problems, "no longer ignored: "+strings.Join(noLongerIgnored, ", "))
+			}
+			return nil, fmt.Errorf("ignored paths changed during run: %s", strings.Join(problems, "; "))
 		}
 	}
 	trackedExclude := []string{}
