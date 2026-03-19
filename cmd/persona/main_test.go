@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1208,6 +1210,51 @@ func TestRunCommandExitCodes(t *testing.T) {
 	t.Run("signal exit normalized", func(t *testing.T) {
 		if code := runCommand(t.TempDir(), ".", []string{"sh", "-c", "kill -TERM $$"}); code != 143 {
 			t.Fatalf("expected 143 got %d", code)
+		}
+	})
+	t.Run("forwards sigterm and reaps grandchild", func(t *testing.T) {
+		repo := t.TempDir()
+		pidPath := filepath.Join(repo, "grandchild.pid")
+		signalResult := make(chan error, 1)
+		go func() {
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				data, err := os.ReadFile(pidPath)
+				if err == nil && strings.TrimSpace(string(data)) != "" {
+					signalResult <- syscall.Kill(os.Getpid(), syscall.SIGTERM)
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			signalResult <- fmt.Errorf("pid file was not written")
+		}()
+
+		cmd := fmt.Sprintf(`(trap '' TERM; sleep 30) & echo $! > %q; wait`, pidPath)
+		if code := runCommand(repo, ".", []string{"sh", "-c", cmd}); code != 143 {
+			t.Fatalf("expected 143 got %d", code)
+		}
+		if err := <-signalResult; err != nil {
+			t.Fatalf("send sigterm: %v", err)
+		}
+
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			t.Fatalf("read pid file: %v", err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Fatalf("parse pid: %v", err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			err := syscall.Kill(pid, 0)
+			if errors.Is(err, syscall.ESRCH) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected grandchild pid %d to be gone, last err=%v", pid, err)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	})
 	t.Run("missing command returns 127", func(t *testing.T) {
