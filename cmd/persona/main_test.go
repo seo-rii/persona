@@ -16,6 +16,7 @@ import (
 
 	"persona/internal/gitx"
 	"persona/internal/model"
+	"persona/internal/patchio"
 	"persona/internal/session"
 	"persona/internal/testutil"
 )
@@ -1466,6 +1467,28 @@ func TestExportPatchIgnoredMaxZeroSkipsIgnoredDriftCheck(t *testing.T) {
 	}
 	if len(patch) != 0 {
 		t.Fatalf("expected empty patch, got %q", string(patch))
+	}
+}
+
+func TestExportPatchFailsWhenAccumulatedDiffExceedsSizeLimit(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "late.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write late.txt: %v", err)
+	}
+	g := exportGitOps{
+		tracked:   bytes.Repeat([]byte("t"), patchio.MaxPatchBytes-8),
+		untracked: []string{"late.txt"},
+		diffByPath: map[string][]byte{
+			"late.txt": bytes.Repeat([]byte("u"), 16),
+		},
+	}
+
+	_, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	if err == nil {
+		t.Fatal("expected accumulated patch size overflow to fail")
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

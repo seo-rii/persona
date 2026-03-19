@@ -1,6 +1,7 @@
 package patchio
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -301,7 +302,7 @@ func TestParsePathTokenUnterminatedQuoteFailsClosed(t *testing.T) {
 }
 
 func TestValidatePatchPathsLargeLineNearScannerLimit(t *testing.T) {
-	maxToken := 4 * 1024 * 1024
+	maxToken := MaxPatchBytes
 	nameLen := (maxToken - len("diff --git a/ b/\n")) / 2
 	name := strings.Repeat("a", nameLen)
 	patch := fmt.Sprintf("diff --git a/%s b/%s\n", name, name)
@@ -310,6 +311,18 @@ func TestValidatePatchPathsLargeLineNearScannerLimit(t *testing.T) {
 	}
 	if err := ValidatePatchPaths([]byte(patch)); err != nil {
 		t.Fatalf("expected near-limit patch line to validate, got %v", err)
+	}
+}
+
+func TestValidatePatchPathsRejectsPatchOverSizeLimit(t *testing.T) {
+	oversized := bytes.Repeat([]byte("a"), MaxPatchBytes+1)
+
+	err := ValidatePatchPaths(oversized)
+	if err == nil {
+		t.Fatal("expected oversize patch to be rejected")
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -895,6 +908,25 @@ func TestReadAllMissingReturnsNil(t *testing.T) {
 	}
 	if data != nil {
 		t.Fatalf("expected nil data for missing file, got %q", string(data))
+	}
+}
+
+func TestReadAllRejectsPatchOverSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.patch")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), MaxPatchBytes+1), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+
+	data, err := ReadAll(path)
+	if err == nil {
+		t.Fatal("expected oversize patch read to fail")
+	}
+	if data != nil {
+		t.Fatalf("expected nil data on oversize failure, got %d bytes", len(data))
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

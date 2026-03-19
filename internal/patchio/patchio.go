@@ -23,9 +23,18 @@ type PatchLock struct {
 	file *os.File
 }
 
+const MaxPatchBytes = 16 * 1024 * 1024
+
 type PatchStore struct {
 	dir  *os.File
 	name string
+}
+
+func CheckPatchSize(size int) error {
+	if size <= MaxPatchBytes {
+		return nil
+	}
+	return fmt.Errorf("patch exceeds size limit of %d bytes: %d", MaxPatchBytes, size)
 }
 
 func OpenPatchStore(path string) (*PatchStore, error) {
@@ -225,8 +234,11 @@ func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 }
 
 func ValidatePatchPaths(patch []byte) error {
-	scanner := bufio.NewScanner(strings.NewReader(string(patch)))
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	if err := CheckPatchSize(len(patch)); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(patch))
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxPatchBytes)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "diff --git ") {
@@ -696,5 +708,18 @@ func readAllAt(dir *os.File, name string) ([]byte, error) {
 	}
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
-	return io.ReadAll(file)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err == nil {
+		if err := CheckPatchSize(int(stat.Size)); err != nil {
+			return nil, err
+		}
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckPatchSize(len(data)); err != nil {
+		return nil, err
+	}
+	return data, nil
 }

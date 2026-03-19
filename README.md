@@ -88,6 +88,7 @@ Session/logging:
 - If the ignored path set changes during the run in either direction, export fails.
 - Special files (FIFO/device/socket) are skipped with a warning.
 - Patch write-back uses an atomic rename inside the patch directory.
+- Patch files and exported diffs are capped at 16 MiB; larger inputs fail explicitly instead of relying on scanner or memory pressure side effects.
 
 ## Implementation Notes (Spec Deltas)
 
