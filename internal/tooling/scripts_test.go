@@ -91,6 +91,32 @@ func TestBuildShDoesNotRunGoModTidyOnBuildFailure(t *testing.T) {
 	}
 }
 
+func TestReadmeDocumentsCurrentTestShCoverage(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	if !strings.Contains(string(data), "`test.sh` runs unit tests (`./cmd/... ./internal/...`) then integration tests.") {
+		t.Fatalf("README must document current test.sh unit coverage, got:\n%s", string(data))
+	}
+}
+
+func TestReadmeUsesRepoRelativeExamplesAndMentionsBuildCapabilities(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "/home/seorii/dev/hancomac/persona") {
+		t.Fatalf("README must not contain personal absolute workspace paths")
+	}
+	if !strings.Contains(text, "`build.sh` builds into `./bin` by default and may try to apply `setcap` (or `sudo setcap`) to the resulting binary.") {
+		t.Fatalf("README must describe build.sh capability behavior, got:\n%s", text)
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)

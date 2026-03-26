@@ -12,7 +12,7 @@
 ## Build
 
 ```
-cd /home/seorii/dev/hancomac/persona
+cd /path/to/persona
 go build ./cmd/persona
 ```
 
@@ -23,6 +23,7 @@ Helper script:
 ```
 
 Output directory can be customized via `PERSONA_BUILD_DIR` (default: `./bin`).
+`build.sh` builds into `./bin` by default and may try to apply `setcap` (or `sudo setcap`) to the resulting binary.
 
 ## Usage
 
@@ -115,7 +116,7 @@ Session/logging:
 Integration tests require Linux + root for mount namespace/OverlayFS. In non-privileged environments they may compile and skip without exercising the real mount lifecycle.
 
 ```
-cd /home/seorii/dev/hancomac/persona
+cd /path/to/persona
 sudo env "PATH=$PATH" PERSONA_INTEGRATION=1 $(command -v go) test ./integration -run TestPersonaIntegration
 ```
 
@@ -130,6 +131,6 @@ After changes around mount/masking, linked worktree handling, or patch export/ap
 ./test_log_stderr.sh [/tmp/persona-test.log]
 ```
 
-`test.sh` runs unit tests (`./internal/...`) then integration tests.
+`test.sh` runs unit tests (`./cmd/... ./internal/...`) then integration tests.
 
 `test_log_stderr.sh` runs unit + integration tests, appends a timestamp to the log filename, writes all output to a single log, and prints a summary at the end.
