@@ -80,18 +80,6 @@ func (s *PatchStore) WriteAll(data []byte) error {
 	return AtomicWriteFileAt(s.dir, s.name, data)
 }
 
-func LockPatch(path string) (*PatchLock, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return nil, err
-	}
-	defer dir.Close()
-	return lockPatchFileAt(dir, filepath.Base(path)+".lock")
-}
-
 func lockPatchFileAt(dir *os.File, name string) (*PatchLock, error) {
 	if dir == nil {
 		return nil, errors.New("dir is nil")
@@ -688,15 +676,6 @@ func checkPath(path string) error {
 		}
 	}
 	return nil
-}
-
-func ReadAll(path string) ([]byte, error) {
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return nil, err
-	}
-	defer dir.Close()
-	return readAllAt(dir, filepath.Base(path))
 }
 
 func readAllAt(dir *os.File, name string) ([]byte, error) {

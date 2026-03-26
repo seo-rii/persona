@@ -539,7 +539,7 @@ func TestAtomicWriteFileAtChownFailureIsSurfaced(t *testing.T) {
 	}
 }
 
-func TestLockPatchReadOnlyDir(t *testing.T) {
+func TestPatchStoreLockReadOnlyDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatalf("chmod dir: %v", err)
@@ -547,17 +547,27 @@ func TestLockPatchReadOnlyDir(t *testing.T) {
 	t.Cleanup(func() {
 		_ = os.Chmod(dir, 0o755)
 	})
-	_, err := LockPatch(filepath.Join(dir, "state.patch"))
+	store, err := OpenPatchStore(filepath.Join(dir, "state.patch"))
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+	_, err = store.Lock()
 	if err == nil {
 		t.Fatalf("expected error for read-only dir")
 	}
 }
 
-func TestLockPatchBlocksAcrossAtomicRename(t *testing.T) {
+func TestPatchStoreLockBlocksAcrossAtomicRename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.patch")
 
-	lock1, err := LockPatch(path)
+	store1, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatalf("open patch store 1: %v", err)
+	}
+	defer store1.Close()
+	lock1, err := store1.Lock()
 	if err != nil {
 		t.Fatalf("lock1: %v", err)
 	}
@@ -575,7 +585,13 @@ func TestLockPatchBlocksAcrossAtomicRename(t *testing.T) {
 	lockedCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		lock2, err := LockPatch(path)
+		store2, err := OpenPatchStore(path)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer store2.Close()
+		lock2, err := store2.Lock()
 		if err != nil {
 			errCh <- err
 			return
@@ -950,8 +966,13 @@ func TestValidatePatchPathsRejectEscapedCopyDotGit(t *testing.T) {
 	}
 }
 
-func TestReadAllMissingReturnsNil(t *testing.T) {
-	data, err := ReadAll(filepath.Join(t.TempDir(), "missing.patch"))
+func TestPatchStoreReadAllMissingReturnsNil(t *testing.T) {
+	store, err := OpenPatchStore(filepath.Join(t.TempDir(), "missing.patch"))
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+	data, err := store.ReadAll()
 	if err != nil {
 		t.Fatalf("ReadAll error: %v", err)
 	}
@@ -960,14 +981,19 @@ func TestReadAllMissingReturnsNil(t *testing.T) {
 	}
 }
 
-func TestReadAllRejectsPatchOverSizeLimit(t *testing.T) {
+func TestPatchStoreReadAllRejectsPatchOverSizeLimit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.patch")
 	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), MaxPatchBytes+1), 0o644); err != nil {
 		t.Fatalf("write patch: %v", err)
 	}
 
-	data, err := ReadAll(path)
+	store, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+	data, err := store.ReadAll()
 	if err == nil {
 		t.Fatal("expected oversize patch read to fail")
 	}

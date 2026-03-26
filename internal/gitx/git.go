@@ -344,26 +344,6 @@ func (g Git) gitRun(ctx context.Context, dir string, env []string, name string, 
 	return nil
 }
 
-func filterEnv(env []string, keys ...string) []string {
-	if len(keys) == 0 {
-		return env
-	}
-	exclude := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		exclude[key] = struct{}{}
-	}
-	out := make([]string, 0, len(env))
-	for _, item := range env {
-		if idx := strings.IndexByte(item, '='); idx > 0 {
-			if _, ok := exclude[item[:idx]]; ok {
-				continue
-			}
-		}
-		out = append(out, item)
-	}
-	return out
-}
-
 func (g Git) gitRunWithInput(ctx context.Context, dir string, env []string, input []byte, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
