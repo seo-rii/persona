@@ -108,6 +108,20 @@ func TestExportPatchFailsOnNewIgnoredCandidates(t *testing.T) {
 	}
 }
 
+func TestExportPatchFailsOnNewIgnoredCandidatesInTransparentMode(t *testing.T) {
+	g := exportGitOps{
+		ignored: []string{"late-ignored.txt"},
+	}
+
+	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredTransparent, 1, nil)
+	if err == nil {
+		t.Fatal("expected error when transparent mode ignored set changes after child run")
+	}
+	if !strings.Contains(err.Error(), "late-ignored.txt") {
+		t.Fatalf("expected ignored path in error, got %v", err)
+	}
+}
+
 func TestExportPatchFailsWhenIgnoredCandidateCapExceeded(t *testing.T) {
 	g := exportGitOps{
 		ignored: []string{"a.tmp", "b.tmp", "c.tmp"},

@@ -846,6 +846,28 @@ func TestMaskIgnoredFilesDisabledWhenIgnoredMaxZero(t *testing.T) {
 	}
 }
 
+func TestMaskIgnoredFilesTransparentReturnsIgnoredSnapshotWithoutMounting(t *testing.T) {
+	repoRoot := t.TempDir()
+	g := ignoredListGitOps{ignored: []string{"cache.tmp", "logs/out.txt"}}
+	mount := &recordingNSOps{}
+	opts := model.Options{IgnoredMode: model.IgnoredTransparent, IgnoredMax: 10}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	targets, ignored, err := maskIgnoredFiles(context.Background(), g, repoRoot, "", "", "", opts, mount, log)
+	if err != nil {
+		t.Fatalf("maskIgnoredFiles error: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("expected transparent mode to avoid mount targets, got %v", targets)
+	}
+	if len(ignored) != 2 || ignored[0] != "cache.tmp" || ignored[1] != "logs/out.txt" {
+		t.Fatalf("expected ignored snapshot, got %v", ignored)
+	}
+	if len(mount.bindCalls) != 0 || len(mount.maskCalls) != 0 || len(mount.remountCalls) != 0 {
+		t.Fatalf("expected no mount calls, got bind=%v mask=%v remount=%v", mount.bindCalls, mount.maskCalls, mount.remountCalls)
+	}
+}
+
 func TestMaskIgnoredFilesFailsWhenIgnoredCandidateCapExceeded(t *testing.T) {
 	repoRoot := t.TempDir()
 	g := ignoredListGitOps{ignored: []string{"a.tmp", "b.tmp", "c.tmp"}}

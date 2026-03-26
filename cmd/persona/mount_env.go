@@ -171,7 +171,7 @@ func prepareMaskBacking(emptyFileRoot, emptyDirRoot, target string) (string, str
 }
 
 func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, mount model.NSOps, log *slog.Logger) ([]string, []string, error) {
-	if opts.IgnoredMode == model.IgnoredTransparent || opts.IgnoredMax == 0 {
+	if opts.IgnoredMax == 0 {
 		return nil, nil, nil
 	}
 	ignored, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDirForOps, opts.IgnoredMax)
@@ -181,6 +181,9 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 	var targets []string
 	if opts.IgnoredMax > 0 && len(ignored) > opts.IgnoredMax {
 		return targets, ignored, fmt.Errorf("ignored candidate count exceeds ignored-max %d", opts.IgnoredMax)
+	}
+	if opts.IgnoredMode == model.IgnoredTransparent {
+		return nil, ignored, nil
 	}
 	log.Debug("ignored files", "count", len(ignored))
 	for _, path := range ignored {
