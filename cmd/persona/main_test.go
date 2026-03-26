@@ -829,6 +829,69 @@ func TestApplyPatchDataRetriesWithoutEnglishErrorString(t *testing.T) {
 	}
 }
 
+func TestApplyPatchDataDoesNotRetryForUnrelatedApplyError(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"diff --git a/other.txt b/other.txt",
+		"new file mode 100644",
+		"index 0000000..3e75765",
+		"--- /dev/null",
+		"+++ b/other.txt",
+		"@@ -0,0 +1 @@",
+		"+other",
+		"",
+	}, "\n")
+	wantErr := errors.New("patch does not apply")
+	g := &applyRetryGitOps{
+		applyErrs: []error{wantErr, nil},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyStrict, []byte(patch), repoRoot, "", log)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected original error %v, got %v", wantErr, err)
+	}
+	if g.applyCalls != 1 {
+		t.Fatalf("expected a single apply attempt, got %d", g.applyCalls)
+	}
+}
+
+func TestApplyPatchDataRejectModeDoesNotRetryExistingNewFileSkip(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"",
+	}, "\n")
+	wantErr := errors.New("same.txt: already exists in working directory")
+	g := &applyRetryGitOps{
+		applyErrs: []error{wantErr, nil},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyReject, []byte(patch), repoRoot, "", log)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected original error %v, got %v", wantErr, err)
+	}
+	if g.applyCalls != 1 {
+		t.Fatalf("expected a single apply attempt, got %d", g.applyCalls)
+	}
+}
+
 func TestApplyPatchDataRejectsUnsafePathBeforeApply(t *testing.T) {
 	g := &applyRetryGitOps{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -896,7 +959,7 @@ func TestApplyPatchDataReturnsRetryError(t *testing.T) {
 		"+other",
 		"",
 	}, "\n")
-	firstErr := errors.New("first apply failed")
+	firstErr := errors.New("other.txt: already exists in working directory")
 	retryErr := errors.New("retry failed")
 	g := &applyRetryGitOps{applyErrs: []error{firstErr, retryErr}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))

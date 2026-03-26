@@ -261,9 +261,15 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 	if ferr != nil || len(skipped) == 0 {
 		return err
 	}
+	if applyMode != model.ApplyStrict {
+		return err
+	}
 	log.Info("apply patch: skipping existing new files", "skipped", skipped)
 	if len(filtered) == 0 {
 		return nil
+	}
+	if !patchio.IsAlreadyExistsError(err) {
+		return err
 	}
 	if err2 := g.ApplyPatch(ctx, applyMode, repoRoot, gitDirForOps, filtered); err2 != nil {
 		return err2
