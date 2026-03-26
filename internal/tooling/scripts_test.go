@@ -141,6 +141,67 @@ func TestReadmeUsesRepoRelativeExamplesAndMentionsBuildCapabilities(t *testing.T
 	}
 }
 
+func TestReadmeDocumentsCorePersonaFlagsFromHelp(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	help := personaHelp(t, repoRoot)
+	for _, flag := range []string{
+		"--patch",
+		"--patch-dir",
+		"--print-patch-path",
+		"--base-mode",
+		"--base-ref",
+		"--allow-dirty",
+		"--ignored-mode",
+		"--ignored-max",
+		"--apply-mode",
+		"--keep-session",
+		"--verbose",
+	} {
+		if !strings.Contains(help, flag) {
+			t.Fatalf("persona --help missing core flag %s:\n%s", flag, help)
+		}
+		if !strings.Contains(readme, flag) {
+			t.Fatalf("README missing documented core flag %s:\n%s", flag, readme)
+		}
+	}
+}
+
+func TestReadmeDocumentsCorePersonaCommandsFromHelp(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	help := personaHelp(t, repoRoot)
+	for _, cmd := range []string{"activate", "doctor"} {
+		if !strings.Contains(help, cmd) {
+			t.Fatalf("persona --help missing core command %s:\n%s", cmd, help)
+		}
+		if !strings.Contains(readme, "persona "+cmd) {
+			t.Fatalf("README missing documented core command %s:\n%s", cmd, readme)
+		}
+	}
+}
+
+func TestReadmeDocumentsIgnoredDriftOptOut(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	text := string(data)
+	want := "If ignored processing is enabled and the ignored path set changes during the run in either direction, export fails."
+	if !strings.Contains(text, want) {
+		t.Fatalf("README must describe ignored-max opt-out alongside ignored drift failure, got:\n%s", text)
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -148,6 +209,17 @@ func repoRoot(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func personaHelp(t *testing.T, repoRoot string) string {
+	t.Helper()
+	cmd := exec.Command("go", "run", "./cmd/persona", "--help")
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("persona --help failed: %v\n%s", err, out)
+	}
+	return string(out)
 }
 
 func stubGo(t *testing.T, extraCommands ...string) (string, string) {

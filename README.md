@@ -86,7 +86,7 @@ Session/logging:
 - Patch locking uses a sibling `<patch>.lock` file. Persona unlocks and closes it after the run, but does not remove the lock file; if the patch lives inside the repo, the lock path is also masked in the view and excluded from export.
 - Export is always based on `HEAD`.
 - Ignored untracked files are excluded from export by default.
-- If the ignored path set changes during the run in either direction, export fails.
+- If ignored processing is enabled and the ignored path set changes during the run in either direction, export fails.
 - Special files (FIFO/device/socket) are skipped with a warning.
 - Patch write-back uses an atomic rename inside the patch directory.
 - Patch files and exported diffs are capped at 16 MiB; larger inputs fail explicitly instead of relying on scanner or memory pressure side effects.
