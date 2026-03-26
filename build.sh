@@ -27,7 +27,7 @@ if [ "$(id -u)" -eq 0 ]; then
     if "$setcap_bin" "$default_caps" "$bin" 2>/dev/null; then
       echo "capabilities set: $bin"
     else
-      echo "warning: setcap failed (run with sudo or use ./bin/persona activate)" >&2
+      echo "warning: setcap failed (run with sudo or use $bin activate)" >&2
     fi
   else
     echo "warning: setcap not found (install libcap2-bin) - skipping capabilities" >&2
@@ -37,12 +37,12 @@ else
     if [ -n "$setcap_bin" ] && sudo "$setcap_bin" "$default_caps" "$bin"; then
       echo "capabilities set: $bin"
     else
-      echo "warning: sudo setcap failed (use ./bin/persona activate)" >&2
+      echo "warning: sudo setcap failed (use $bin activate)" >&2
     fi
   else
-    echo "warning: setcap requires sudo; run in an interactive shell or use ./bin/persona activate" >&2
+    echo "warning: setcap requires sudo; run in an interactive shell or use $bin activate" >&2
   fi
 fi
 
-echo "note: use ./bin/persona activate --allow-dac-override only when patch writes must bypass DAC checks" >&2
+echo "note: use $bin activate --allow-dac-override only when patch writes must bypass DAC checks" >&2
 echo "built: $bin"

@@ -91,6 +91,30 @@ func TestBuildShDoesNotRunGoModTidyOnBuildFailure(t *testing.T) {
 	}
 }
 
+func TestBuildShMentionsCustomOutputDirInFollowUpGuidance(t *testing.T) {
+	repoRoot := repoRoot(t)
+	binDir, _ := stubGoWithBody(t, "#!/bin/sh\nexit 0\n", "dirname", "mkdir", "id")
+	outDir := filepath.Join(t.TempDir(), "out")
+
+	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "build.sh"))
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir,
+		"PERSONA_BUILD_DIR="+outDir,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build.sh failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, outDir+"/persona activate") {
+		t.Fatalf("expected build.sh guidance to mention custom output dir, got:\n%s", text)
+	}
+	if strings.Contains(text, "./bin/persona activate") {
+		t.Fatalf("expected build.sh guidance to avoid default path when PERSONA_BUILD_DIR is set, got:\n%s", text)
+	}
+}
+
 func TestReadmeDocumentsCurrentTestShCoverage(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
