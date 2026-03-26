@@ -77,6 +77,9 @@ func (s *PatchStore) WriteAll(data []byte) error {
 	if s == nil || s.dir == nil {
 		return errors.New("patch store is closed")
 	}
+	if err := CheckPatchSize(len(data)); err != nil {
+		return err
+	}
 	return AtomicWriteFileAt(s.dir, s.name, data)
 }
 
@@ -176,6 +179,9 @@ func rejectSymlinkPathParents(path, label string) error {
 func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 	if dir == nil {
 		return errors.New("dir is nil")
+	}
+	if err := CheckPatchSize(len(data)); err != nil {
+		return err
 	}
 	mode := uint32(0o644)
 	uid := -1
@@ -284,6 +290,9 @@ func IsAlreadyExistsError(err error) bool {
 func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, error) {
 	if len(patch) == 0 {
 		return patch, nil, nil
+	}
+	if err := CheckPatchSize(len(patch)); err != nil {
+		return nil, nil, err
 	}
 	lines := splitLinesKeepEOL(string(patch))
 	blocks := parsePatchBlocks(lines)

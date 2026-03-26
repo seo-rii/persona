@@ -2,6 +2,7 @@ package patchio
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -539,6 +540,26 @@ func TestAtomicWriteFileAtChownFailureIsSurfaced(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteFileAtRejectsPatchOverSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	dh, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("open dir: %v", err)
+	}
+	defer dh.Close()
+
+	err = AtomicWriteFileAt(dh, "state.patch", bytes.Repeat([]byte("a"), MaxPatchBytes+1))
+	if err == nil {
+		t.Fatal("expected oversize atomic write to fail")
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "state.patch")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected oversize atomic write to avoid creating patch file, got %v", statErr)
+	}
+}
+
 func TestPatchStoreLockReadOnlyDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o555); err != nil {
@@ -1005,6 +1026,26 @@ func TestPatchStoreReadAllRejectsPatchOverSizeLimit(t *testing.T) {
 	}
 }
 
+func TestPatchStoreWriteAllRejectsPatchOverSizeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.patch")
+	store, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	err = store.WriteAll(bytes.Repeat([]byte("a"), MaxPatchBytes+1))
+	if err == nil {
+		t.Fatal("expected oversize patch write to fail")
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected oversize write to avoid creating patch file, got %v", statErr)
+	}
+}
+
 func TestPatchLockUnlockNilSafe(t *testing.T) {
 	var nilLock *PatchLock
 	if err := nilLock.Unlock(); err != nil {
@@ -1052,6 +1093,24 @@ func TestFilterExistingNewFilesFallbackPlusPath(t *testing.T) {
 	}
 	if len(filtered) != 0 {
 		t.Fatalf("expected filtered patch to be empty")
+	}
+}
+
+func TestFilterExistingNewFilesRejectsPatchOverSizeLimit(t *testing.T) {
+	oversized := bytes.Repeat([]byte("a"), MaxPatchBytes+1)
+
+	filtered, skipped, err := FilterExistingNewFiles(oversized, t.TempDir())
+	if err == nil {
+		t.Fatal("expected oversize patch filter to fail")
+	}
+	if filtered != nil {
+		t.Fatalf("expected nil filtered patch on oversize failure, got %d bytes", len(filtered))
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped paths on oversize failure, got %v", skipped)
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
