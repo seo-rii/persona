@@ -333,7 +333,7 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 				firstDiffStart = start
 			}
 			blockStart = start
-			current = patchBlock{lines: [][]byte{line}}
+			current = beginPatchBlock(line)
 			start = end
 			continue
 		}
@@ -341,20 +341,7 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 			start = end
 			continue
 		}
-		current.lines = append(current.lines, line)
-		if bytes.HasPrefix(raw, []byte("new file mode ")) {
-			current.isNew = true
-			current.mode = string(bytes.TrimSpace(raw[len("new file mode "):]))
-		}
-		if bytes.HasPrefix(raw, []byte("--- /dev/null")) {
-			current.isNew = true
-		}
-		if bytes.HasPrefix(raw, []byte("GIT binary patch")) || bytes.HasPrefix(raw, []byte("Binary files ")) {
-			current.isBinary = true
-		}
-		if bytes.HasPrefix(raw, []byte("+++ ")) && current.path == "" {
-			current.path = parsePlusPath(string(raw))
-		}
+		appendPatchBlockLine(&current, line, raw)
 		start = end
 	}
 	if !seenDiff {
@@ -375,6 +362,27 @@ type patchBlock struct {
 	mode     string
 }
 
+func beginPatchBlock(line []byte) patchBlock {
+	return patchBlock{lines: [][]byte{line}}
+}
+
+func appendPatchBlockLine(block *patchBlock, line []byte, raw []byte) {
+	block.lines = append(block.lines, line)
+	if bytes.HasPrefix(raw, []byte("new file mode ")) {
+		block.isNew = true
+		block.mode = string(bytes.TrimSpace(raw[len("new file mode "):]))
+	}
+	if bytes.HasPrefix(raw, []byte("--- /dev/null")) {
+		block.isNew = true
+	}
+	if bytes.HasPrefix(raw, []byte("GIT binary patch")) || bytes.HasPrefix(raw, []byte("Binary files ")) {
+		block.isBinary = true
+	}
+	if bytes.HasPrefix(raw, []byte("+++ ")) && block.path == "" {
+		block.path = parsePlusPath(string(raw))
+	}
+}
+
 func parsePatchBlocks(lines [][]byte) []patchBlock {
 	var blocks []patchBlock
 	var current patchBlock
@@ -386,26 +394,13 @@ func parsePatchBlocks(lines [][]byte) []patchBlock {
 				blocks = append(blocks, current)
 			}
 			seenDiff = true
-			current = patchBlock{lines: [][]byte{line}}
+			current = beginPatchBlock(line)
 			continue
 		}
 		if !seenDiff {
 			continue
 		}
-		current.lines = append(current.lines, line)
-		if bytes.HasPrefix(raw, []byte("new file mode ")) {
-			current.isNew = true
-			current.mode = string(bytes.TrimSpace(raw[len("new file mode "):]))
-		}
-		if bytes.HasPrefix(raw, []byte("--- /dev/null")) {
-			current.isNew = true
-		}
-		if bytes.HasPrefix(raw, []byte("GIT binary patch")) || bytes.HasPrefix(raw, []byte("Binary files ")) {
-			current.isBinary = true
-		}
-		if bytes.HasPrefix(raw, []byte("+++ ")) && current.path == "" {
-			current.path = parsePlusPath(string(raw))
-		}
+		appendPatchBlockLine(&current, line, raw)
 	}
 	if len(current.lines) > 0 {
 		blocks = append(blocks, current)
