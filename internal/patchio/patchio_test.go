@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"persona/internal/model"
 
@@ -1189,6 +1190,65 @@ func TestFilterExistingNewFilesRejectsPatchOverSizeLimit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "patch exceeds size limit") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFilterExistingNewFilesAllowsPatchAtSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	prefix := strings.Join([]string{
+		"diff --git a/new.txt b/new.txt",
+		"new file mode 100644",
+		"index 0000000..1111111",
+		"--- /dev/null",
+		"+++ b/new.txt",
+		"@@ -0,0 +1 @@",
+	}, "\n") + "\n+"
+	suffix := "\n"
+	bodyLen := MaxPatchBytes - len(prefix) - len(suffix)
+	if bodyLen <= 0 {
+		t.Fatalf("unexpected prefix length %d", len(prefix))
+	}
+	patch := []byte(prefix + strings.Repeat("a", bodyLen) + suffix)
+
+	filtered, skipped, err := FilterExistingNewFiles(patch, dir)
+	if err != nil {
+		t.Fatalf("filter existing new files: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped paths, got %v", skipped)
+	}
+	if len(filtered) != len(patch) {
+		t.Fatalf("expected %d bytes, got %d", len(patch), len(filtered))
+	}
+	if !bytes.Equal(filtered, patch) {
+		t.Fatal("expected exact cap-sized patch to remain unchanged")
+	}
+}
+
+func TestFilterExistingNewFilesReturnsOriginalPatchWhenNothingSkipped(t *testing.T) {
+	patch := []byte(strings.Join([]string{
+		"diff --git a/new.txt b/new.txt",
+		"new file mode 100644",
+		"index 0000000..e69de29",
+		"--- /dev/null",
+		"+++ b/new.txt",
+		"@@ -0,0 +1 @@",
+		"+hello",
+		"",
+	}, "\n"))
+
+	filtered, skipped, err := FilterExistingNewFiles(patch, t.TempDir())
+	if err != nil {
+		t.Fatalf("filter existing new files: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("expected no skipped paths, got %v", skipped)
+	}
+	if !bytes.Equal(filtered, patch) {
+		t.Fatal("expected no-op filter to preserve patch content")
+	}
+	if unsafe.SliceData(filtered) != unsafe.SliceData(patch) {
+		t.Fatal("expected no-op filter to return original patch slice")
 	}
 }
 

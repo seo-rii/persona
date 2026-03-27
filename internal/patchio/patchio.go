@@ -306,18 +306,28 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 	if len(blocks) == 0 {
 		return patch, nil, nil
 	}
-	var out strings.Builder
+	skipBlock := make([]bool, len(blocks))
 	skipped := make([]string, 0)
-	for _, block := range blocks {
+	for i, block := range blocks {
 		if shouldSkipNewFileBlock(block, workTree) {
+			skipBlock[i] = true
 			skipped = append(skipped, block.path)
+		}
+	}
+	if len(skipped) == 0 {
+		return patch, nil, nil
+	}
+	var out bytes.Buffer
+	out.Grow(len(patch))
+	for i, block := range blocks {
+		if skipBlock[i] {
 			continue
 		}
 		for _, line := range block.lines {
 			out.WriteString(line)
 		}
 	}
-	return []byte(out.String()), skipped, nil
+	return out.Bytes(), skipped, nil
 }
 
 type patchBlock struct {
