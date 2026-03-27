@@ -76,8 +76,7 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 	if ferr != nil {
 		return ferr
 	}
-	defer os.Remove(filtered.Name())
-	defer filtered.Close()
+	defer closeAndRemoveTempFile(filtered)
 
 	file, ferr = store.OpenRead()
 	if ferr != nil || file == nil {

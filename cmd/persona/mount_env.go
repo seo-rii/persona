@@ -83,7 +83,7 @@ func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mou
 	if err := mount.BindMount(gitMountSrc, gitMountRoot); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "bind mount gitdir", err)
 	}
-	cleanup.Push(func() error { return mount.Umount(gitMountRoot) })
+	pushUmountCleanup(cleanup, mount, gitMountRoot)
 
 	if shouldForceMountFail() {
 		return nil, model.Wrap(model.ExitEnv, "forced mount failure", fmt.Errorf("forced"))
@@ -92,7 +92,7 @@ func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mou
 	if err := mount.BindMount(basePath, sess.MntBase); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "bind mount base", err)
 	}
-	cleanup.Push(func() error { return mount.Umount(sess.MntBase) })
+	pushUmountCleanup(cleanup, mount, sess.MntBase)
 
 	if err := mount.MountOverlay(repoRoot, model.OverlayOpts{
 		LowerDir: sess.MntBase,

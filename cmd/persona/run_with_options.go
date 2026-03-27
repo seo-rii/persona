@@ -135,11 +135,9 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		}
 		return errors.Join(errs...)
 	})
+	pushUmountCleanup(cleanup, mount, repoRoot)
 	cleanup.Push(func() error {
-		if err := os.Chdir("/"); err != nil {
-			return err
-		}
-		return mount.Umount(repoRoot)
+		return os.Chdir("/")
 	})
 
 	if err := applyPatchStore(ctx, g, opts.ApplyMode, patchStore, repoRoot, menv.gitDirForOps, sess.Root, log); err != nil {
@@ -194,11 +192,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	if err != nil {
 		return model.Wrap(model.ExitExport, "create export temp", err), 0
 	}
-	defer func() {
-		name := exportFile.Name()
-		_ = exportFile.Close()
-		_ = os.Remove(name)
-	}()
+	defer closeAndRemoveTempFile(exportFile)
 	written, err := exportPatchToWriter(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel, opts.IgnoredMode, opts.IgnoredMax, initialIgnored, exportFile)
 	if err != nil {
 		return model.Wrap(model.ExitExport, "export patch", err), 0

@@ -109,6 +109,15 @@ func patchStateRelPaths(patchRel string) []string {
 	return []string{patchRel, patchRel + ".lock"}
 }
 
+func closeAndRemoveTempFile(file *os.File) {
+	if file == nil {
+		return
+	}
+	name := file.Name()
+	_ = file.Close()
+	_ = os.Remove(name)
+}
+
 func pushKeepSessionCleanup(cleanup *cleanupStack, retErr *error, opts model.Options, fn func() error) {
 	if cleanup == nil || fn == nil {
 		return
@@ -118,6 +127,15 @@ func pushKeepSessionCleanup(cleanup *cleanupStack, retErr *error, opts model.Opt
 			return nil
 		}
 		return fn()
+	})
+}
+
+func pushUmountCleanup(cleanup *cleanupStack, mount model.NSOps, path string) {
+	if cleanup == nil || mount == nil || path == "" {
+		return
+	}
+	cleanup.Push(func() error {
+		return mount.Umount(path)
 	})
 }
 

@@ -264,6 +264,11 @@ type recordingNSOps struct {
 	remountErrs  map[string]error
 }
 
+type umountRecordingNSOps struct {
+	paths []string
+	errs  map[string]error
+}
+
 type maskCall struct {
 	target    string
 	kind      model.MaskKind
@@ -488,6 +493,26 @@ func (m *recordingNSOps) RemountRO(target string) error {
 }
 
 func (m *recordingNSOps) Umount(string) error { return nil }
+
+func (m *umountRecordingNSOps) UnshareMountNS() error { return nil }
+
+func (m *umountRecordingNSOps) MakeMountsPrivate() error { return nil }
+
+func (m *umountRecordingNSOps) BindMount(string, string) error { return nil }
+
+func (m *umountRecordingNSOps) RemountRO(string) error { return nil }
+
+func (m *umountRecordingNSOps) Umount(path string) error {
+	m.paths = append(m.paths, path)
+	if err, ok := m.errs[path]; ok {
+		return err
+	}
+	return nil
+}
+
+func (m *umountRecordingNSOps) MountOverlay(string, model.OverlayOpts) error { return nil }
+
+func (m *umountRecordingNSOps) MaskPath(string, model.MaskKind, string, string) error { return nil }
 
 func (m *recordingNSOps) MountOverlay(string, model.OverlayOpts) error { return nil }
 
@@ -1262,6 +1287,41 @@ func TestPushKeepSessionCleanupHonorsPolicy(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("expected cleanup to be skipped when session is kept, got %d calls", calls)
+	}
+}
+
+func TestPushUmountCleanupRunsViaCleanupStack(t *testing.T) {
+	var cleanup cleanupStack
+	mount := &umountRecordingNSOps{}
+
+	pushUmountCleanup(&cleanup, mount, "/tmp/masked")
+	if err := cleanup.Run(); err != nil {
+		t.Fatalf("cleanup run: %v", err)
+	}
+	if len(mount.paths) != 1 || mount.paths[0] != "/tmp/masked" {
+		t.Fatalf("unexpected umount paths: %v", mount.paths)
+	}
+
+	pushUmountCleanup(&cleanup, mount, "")
+	if len(cleanup.fns) != 1 {
+		t.Fatalf("expected empty path to be ignored, got %d cleanup funcs", len(cleanup.fns))
+	}
+}
+
+func TestCloseAndRemoveTempFileRemovesPath(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "persona-temp-*.patch")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	name := file.Name()
+	if _, err := file.WriteString("patch"); err != nil {
+		t.Fatalf("write temp: %v", err)
+	}
+
+	closeAndRemoveTempFile(file)
+
+	if _, err := os.Stat(name); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected temp file to be removed, got %v", err)
 	}
 }
 
