@@ -294,7 +294,14 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 	if err := CheckPatchSize(len(patch)); err != nil {
 		return nil, nil, err
 	}
-	lines := splitLinesKeepEOL(string(patch))
+	rawLines := bytes.SplitAfter(patch, []byte("\n"))
+	if len(rawLines) > 0 && len(rawLines[len(rawLines)-1]) == 0 {
+		rawLines = rawLines[:len(rawLines)-1]
+	}
+	lines := make([]string, 0, len(rawLines))
+	for _, raw := range rawLines {
+		lines = append(lines, string(raw))
+	}
 	blocks := parsePatchBlocks(lines)
 	if len(blocks) == 0 {
 		return patch, nil, nil
