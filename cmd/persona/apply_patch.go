@@ -32,12 +32,12 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 	if applyMode != model.ApplyStrict {
 		return err
 	}
+	if !shouldRetryExistingNewFileSkip(err, skipped) {
+		return err
+	}
 	log.Info("apply patch: skipping existing new files", "skipped", skipped)
 	if filtered.Len() == 0 {
 		return nil
-	}
-	if !shouldRetryExistingNewFileSkip(err, skipped) {
-		return err
 	}
 	if err2 := g.ApplyPatch(ctx, applyMode, repoRoot, gitDirForOps, filtered.Bytes()); err2 != nil {
 		return err2
@@ -94,6 +94,9 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 	if applyMode != model.ApplyStrict {
 		return err
 	}
+	if !shouldRetryExistingNewFileSkip(err, skipped) {
+		return err
+	}
 	log.Info("apply patch: skipping existing new files", "skipped", skipped)
 	if _, seekErr := filtered.Seek(0, io.SeekStart); seekErr != nil {
 		return seekErr
@@ -104,9 +107,6 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 	}
 	if info.Size() == 0 {
 		return nil
-	}
-	if !shouldRetryExistingNewFileSkip(err, skipped) {
-		return err
 	}
 	if err2 := g.ApplyPatchReader(ctx, applyMode, repoRoot, gitDirForOps, filtered); err2 != nil {
 		return err2

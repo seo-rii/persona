@@ -283,6 +283,32 @@ func TestApplyPatchDataReturnsOriginalErrorWhenNothingWasSkipped(t *testing.T) {
 	}
 }
 
+func TestApplyPatchDataDoesNotSwallowUnrelatedErrorWhenFilteredPatchBecomesEmpty(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"",
+	}, "\n")
+	wantErr := errors.New("patch does not apply")
+	g := &applyRetryGitOps{applyErrs: []error{wantErr}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyStrict, []byte(patch), repoRoot, "", log)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected original error %v, got %v", wantErr, err)
+	}
+	if g.applyCalls != 1 {
+		t.Fatalf("expected one apply attempt, got %d", g.applyCalls)
+	}
+}
+
 func TestApplyPatchDataReturnsRetryError(t *testing.T) {
 	repoRoot := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
@@ -497,6 +523,42 @@ func TestApplyPatchStoreRetriesTaggedAlreadyExistsErrorWithMixedPatch(t *testing
 	}
 	if g.applyReaderCalls != 2 {
 		t.Fatalf("expected two reader apply attempts, got %d", g.applyReaderCalls)
+	}
+}
+
+func TestApplyPatchStoreDoesNotSwallowUnrelatedErrorWhenFilteredPatchBecomesEmpty(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patchPath := filepath.Join(t.TempDir(), "state.patch")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"",
+	}, "\n")
+	if err := os.WriteFile(patchPath, []byte(patch), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+	store, err := patchio.OpenPatchStore(patchPath)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	wantErr := errors.New("patch does not apply")
+	g := &applyRetryGitOps{applyReaderErrs: []error{wantErr}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err = applyPatchStore(context.Background(), g, model.ApplyStrict, store, repoRoot, "", t.TempDir(), log)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected original error %v, got %v", wantErr, err)
+	}
+	if g.applyReaderCalls != 1 {
+		t.Fatalf("expected one reader apply attempt, got %d", g.applyReaderCalls)
 	}
 }
 
