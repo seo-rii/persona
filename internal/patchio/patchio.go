@@ -256,11 +256,10 @@ func ValidatePatchPaths(patch []byte) error {
 			continue
 		}
 		if bytes.HasPrefix(line, []byte("+++ ")) || bytes.HasPrefix(line, []byte("--- ")) {
-			path := trimLineBytes(line[4:])
-			if bytes.Equal(path, []byte("/dev/null")) {
+			parsed := parsePatchHeaderPath(line[4:])
+			if parsed == "" {
 				continue
 			}
-			parsed := parseMaybeQuotedPath(stripDiffPathMeta(string(path)))
 			if err := checkPath(parsed); err != nil {
 				return err
 			}
@@ -380,7 +379,7 @@ func appendPatchBlockLine(block *patchBlock, line []byte, raw []byte) {
 		block.isBinary = true
 	}
 	if bytes.HasPrefix(raw, []byte("+++ ")) && block.path == "" {
-		block.path = parsePlusPath(string(raw))
+		block.path = parsePatchHeaderPath(raw[4:])
 	}
 }
 
@@ -509,22 +508,15 @@ func shouldSkipNewFileBlock(block patchBlock, workTree string) bool {
 	return err == io.EOF && remaining == 0
 }
 
-func parseDiffGitPath(line string) string {
-	_, b, ok := parseDiffGitLine(line)
-	if !ok {
+func parsePatchHeaderPath(path []byte) string {
+	path = trimLineBytes(path)
+	if bytes.Equal(path, []byte("/dev/null")) {
 		return ""
 	}
-	return sanitizePatchPath(b)
-}
-
-func parsePlusPath(line string) string {
-	path := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
-	if path == "/dev/null" {
-		return ""
+	if idx := bytes.IndexByte(path, '\t'); idx != -1 {
+		path = path[:idx]
 	}
-	path = stripDiffPathMeta(path)
-	path = parseMaybeQuotedPath(path)
-	return sanitizePatchPath(path)
+	return sanitizePatchPath(parseMaybeQuotedPath(string(path)))
 }
 
 func sanitizePatchPath(path string) string {
@@ -599,13 +591,6 @@ func readQuotedToken(s string) (string, string, bool) {
 		}
 	}
 	return "", "", false
-}
-
-func stripDiffPathMeta(path string) string {
-	if idx := strings.IndexRune(path, '\t'); idx != -1 {
-		return path[:idx]
-	}
-	return path
 }
 
 func parseMaybeQuotedPath(path string) string {
@@ -706,11 +691,6 @@ func trimLineBytes(line []byte) []byte {
 		line = line[:n-1]
 	}
 	return line
-}
-
-func trimLine(line string) string {
-	line = strings.TrimSuffix(line, "\n")
-	return strings.TrimSuffix(line, "\r")
 }
 
 func FilterUntrackedPaths(paths []string, excludePrefixes []string, excludeExact []string) []string {
