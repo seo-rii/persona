@@ -93,12 +93,6 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		}
 	}()
 
-	patchData, err := patchStore.ReadAll()
-	if err != nil {
-		return model.Wrap(model.ExitWrite, "read patch", err), 0
-	}
-	log.Debug("read patch", "bytes", len(patchData))
-
 	sess, err = session.Create(gitDir)
 	if err != nil {
 		return model.Wrap(model.ExitEnv, "create session", err), 0
@@ -151,7 +145,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		return mount.Umount(repoRoot)
 	})
 
-	if err := applyPatchData(ctx, g, opts.ApplyMode, patchData, repoRoot, menv.gitDirForOps, log); err != nil {
+	if err := applyPatchStore(ctx, g, opts.ApplyMode, patchStore, repoRoot, menv.gitDirForOps, sess.Root, log); err != nil {
 		return model.Wrap(model.ExitApply, "apply patch", err), 0
 	}
 
@@ -206,13 +200,24 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		_ = mount.Umount(gitMaskPath)
 	}
 
-	patchOut, err := exportPatch(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel, opts.IgnoredMode, opts.IgnoredMax, initialIgnored)
+	exportFile, err := os.CreateTemp(sess.Root, "persona-export-*.patch")
+	if err != nil {
+		return model.Wrap(model.ExitExport, "create export temp", err), 0
+	}
+	defer func() {
+		name := exportFile.Name()
+		_ = exportFile.Close()
+		_ = os.Remove(name)
+	}()
+	written, err := exportPatchToWriter(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel, opts.IgnoredMode, opts.IgnoredMax, initialIgnored, exportFile)
 	if err != nil {
 		return model.Wrap(model.ExitExport, "export patch", err), 0
 	}
-	log.Debug("export complete", "bytes", len(patchOut))
-
-	if err := patchStore.WriteAll(patchOut); err != nil {
+	log.Debug("export complete", "bytes", written)
+	if _, err := exportFile.Seek(0, 0); err != nil {
+		return model.Wrap(model.ExitWrite, "rewind export patch", err), 0
+	}
+	if err := patchStore.WriteFromReader(exportFile); err != nil {
 		return model.Wrap(model.ExitWrite, "write patch", err), 0
 	}
 

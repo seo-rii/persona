@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -172,21 +173,33 @@ func (g Git) WorktreeRemoveForce(ctx context.Context, path string) error {
 }
 
 func (g Git) ApplyPatch(ctx context.Context, mode model.ApplyMode, workTree, gitDir string, patchData []byte) error {
+	return g.ApplyPatchReader(ctx, mode, workTree, gitDir, bytes.NewReader(patchData))
+}
+
+func (g Git) ApplyPatchReader(ctx context.Context, mode model.ApplyMode, workTree, gitDir string, patchReader io.Reader) error {
 	args := g.withDirArgs(workTree, gitDir, "apply", "--whitespace=nowarn")
 	if mode == model.ApplyReject {
 		args = append(args, "--reject")
 	}
 	args = append(args, "-")
-	return g.gitRunWithInput(ctx, workTree, g.envWith(workTree, gitDir), patchData, "git", args...)
+	return g.gitRunWithReader(ctx, workTree, g.envWith(workTree, gitDir), patchReader, "git", args...)
 }
 
 func (g Git) DiffHeadBinary(ctx context.Context, workTree, gitDir string, excludePaths []string) ([]byte, error) {
-	hasHead, err := g.hasHead(ctx, workTree, gitDir)
-	if err != nil {
+	var out bytes.Buffer
+	if err := g.DiffHeadBinaryTo(ctx, workTree, gitDir, excludePaths, &out); err != nil {
 		return nil, err
 	}
+	return out.Bytes(), nil
+}
+
+func (g Git) DiffHeadBinaryTo(ctx context.Context, workTree, gitDir string, excludePaths []string, out io.Writer) error {
+	hasHead, err := g.hasHead(ctx, workTree, gitDir)
+	if err != nil {
+		return err
+	}
 	if !hasHead {
-		return nil, nil
+		return nil
 	}
 	args := g.withDirArgs(workTree, gitDir, "-c", "core.quotepath=false", "diff", "--binary", "--full-index", "-M", "--no-ext-diff", "HEAD")
 	if len(excludePaths) > 0 {
@@ -198,7 +211,7 @@ func (g Git) DiffHeadBinary(ctx context.Context, workTree, gitDir string, exclud
 			args = append(args, ":(exclude,literal)"+filepath.ToSlash(path))
 		}
 	}
-	return g.gitDiffOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
+	return g.gitDiffToWriter(ctx, workTree, g.envWith(workTree, gitDir), out, "git", args...)
 }
 
 func (g Git) ListUntracked(ctx context.Context, workTree, gitDir string) ([]string, error) {
@@ -211,8 +224,16 @@ func (g Git) ListUntracked(ctx context.Context, workTree, gitDir string) ([]stri
 }
 
 func (g Git) DiffNewFileNoIndex(ctx context.Context, workTree, gitDir, relPath string) ([]byte, error) {
+	var out bytes.Buffer
+	if err := g.DiffNewFileNoIndexTo(ctx, workTree, gitDir, relPath, &out); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func (g Git) DiffNewFileNoIndexTo(ctx context.Context, workTree, gitDir, relPath string, out io.Writer) error {
 	args := g.withDirArgs(workTree, gitDir, "-c", "core.quotepath=false", "diff", "--no-index", "--binary", "--", "/dev/null", relPath)
-	return g.gitDiffOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
+	return g.gitDiffToWriter(ctx, workTree, g.envWith(workTree, gitDir), out, "git", args...)
 }
 
 func (g Git) ListIgnoredCandidates(ctx context.Context, workTree, gitDir string, maxN int) ([]string, error) {
@@ -344,11 +365,11 @@ func (g Git) gitRun(ctx context.Context, dir string, env []string, name string, 
 	return nil
 }
 
-func (g Git) gitRunWithInput(ctx context.Context, dir string, env []string, input []byte, name string, args ...string) error {
+func (g Git) gitRunWithReader(ctx context.Context, dir string, env []string, input io.Reader, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
-	cmd.Stdin = bytes.NewReader(input)
+	cmd.Stdin = input
 	if g.Verbose {
 		fmt.Fprintf(os.Stderr, "[git] %s %s\n", name, strings.Join(args, " "))
 	}
@@ -379,22 +400,31 @@ func (g Git) gitOutputBytes(ctx context.Context, dir string, env []string, name 
 }
 
 func (g Git) gitDiffOutputBytes(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error) {
+	var out bytes.Buffer
+	if err := g.gitDiffToWriter(ctx, dir, env, &out, name, args...); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func (g Git) gitDiffToWriter(ctx context.Context, dir string, env []string, out io.Writer, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
+	cmd.Stdout = out
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if g.Verbose {
 		fmt.Fprintf(os.Stderr, "[git] %s %s\n", name, strings.Join(args, " "))
 	}
-	out, err := cmd.Output()
+	err := cmd.Run()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			return out, nil
+			return nil
 		}
-		return nil, fmt.Errorf("%w: %s", err, truncateOutput(stderr.String()))
+		return fmt.Errorf("%w: %s", err, truncateOutput(stderr.String()))
 	}
-	return out, nil
+	return nil
 }
 
 func gitOutput(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {

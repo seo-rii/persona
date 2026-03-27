@@ -289,3 +289,41 @@ func TestApplyPatchDataRejectModeLeavesRejectAndPartialApply(t *testing.T) {
 		t.Fatalf("expected rejected hunk in .rej, got %s", string(rej))
 	}
 }
+
+func TestApplyPatchStoreUsesReaderApplyPath(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patchPath := filepath.Join(t.TempDir(), "state.patch")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"",
+	}, "\n")
+	if err := os.WriteFile(patchPath, []byte(patch), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+	store, err := patchio.OpenPatchStore(patchPath)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	g := &applyRetryGitOps{applyReaderErrs: []error{errors.New("Datei existiert bereits")}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err = applyPatchStore(context.Background(), g, model.ApplyStrict, store, repoRoot, "", t.TempDir(), log)
+	if err != nil {
+		t.Fatalf("expected identical existing new file to be skipped, got %v", err)
+	}
+	if g.applyCalls != 0 {
+		t.Fatalf("expected byte apply path to stay unused, got %d calls", g.applyCalls)
+	}
+	if g.applyReaderCalls != 1 {
+		t.Fatalf("expected one reader apply attempt, got %d", g.applyReaderCalls)
+	}
+}

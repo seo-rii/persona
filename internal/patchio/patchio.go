@@ -66,21 +66,31 @@ func (s *PatchStore) Lock() (*PatchLock, error) {
 	return lockPatchFileAt(s.dir, s.name+".lock")
 }
 
-func (s *PatchStore) ReadAll() ([]byte, error) {
+func (s *PatchStore) OpenRead() (*os.File, error) {
 	if s == nil || s.dir == nil {
 		return nil, errors.New("patch store is closed")
 	}
-	return readAllAt(s.dir, s.name)
+	return openReadAt(s.dir, s.name)
+}
+
+func (s *PatchStore) ReadAll() ([]byte, error) {
+	file, err := s.OpenRead()
+	if err != nil || file == nil {
+		return nil, err
+	}
+	defer file.Close()
+	return readAllFile(file)
 }
 
 func (s *PatchStore) WriteAll(data []byte) error {
+	return s.WriteFromReader(bytes.NewReader(data))
+}
+
+func (s *PatchStore) WriteFromReader(reader io.Reader) error {
 	if s == nil || s.dir == nil {
 		return errors.New("patch store is closed")
 	}
-	if err := CheckPatchSize(len(data)); err != nil {
-		return err
-	}
-	return AtomicWriteFileAt(s.dir, s.name, data)
+	return writeFileAt(s.dir, s.name, reader)
 }
 
 func lockPatchFileAt(dir *os.File, name string) (*PatchLock, error) {
@@ -183,26 +193,41 @@ func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 	if err := CheckPatchSize(len(data)); err != nil {
 		return err
 	}
-	mode := uint32(0o644)
-	uid := -1
-	gid := -1
+	return writeFileAt(dir, name, bytes.NewReader(data))
+}
+
+type atomicTargetInfo struct {
+	mode uint32
+	uid  int
+	gid  int
+}
+
+func statAtomicTargetAt(dir *os.File, name string) atomicTargetInfo {
+	info := atomicTargetInfo{mode: 0o644, uid: -1, gid: -1}
 	var stat unix.Stat_t
 	if err := unix.Fstatat(int(dir.Fd()), name, &stat, 0); err == nil {
-		mode = stat.Mode & 0o777
-		uid = int(stat.Uid)
-		gid = int(stat.Gid)
+		info.mode = stat.Mode & 0o777
+		info.uid = int(stat.Uid)
+		info.gid = int(stat.Gid)
 	}
+	return info
+}
+
+func createAtomicTempFileAt(dir *os.File, mode uint32) (*os.File, string, error) {
 	prefix := ".persona-"
 	rnd, err := randSuffix()
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	tmpName := fmt.Sprintf("%s%s", prefix, rnd)
 	fd, err := unix.Openat(int(dir.Fd()), tmpName, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR, mode)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
-	file := os.NewFile(uintptr(fd), tmpName)
+	return os.NewFile(uintptr(fd), tmpName), tmpName, nil
+}
+
+func commitAtomicTempFileAt(dir *os.File, name string, target atomicTargetInfo, file *os.File, tmpName string) error {
 	renamed := false
 	defer func() {
 		if !renamed {
@@ -210,14 +235,11 @@ func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 			_ = unix.Unlinkat(int(dir.Fd()), tmpName, 0)
 		}
 	}()
-	if _, err := file.Write(data); err != nil {
-		return err
-	}
 	if err := file.Sync(); err != nil {
 		return err
 	}
-	if uid >= 0 || gid >= 0 {
-		if err := fchownFn(fd, uid, gid); err != nil {
+	if target.uid >= 0 || target.gid >= 0 {
+		if err := fchownFn(int(file.Fd()), target.uid, target.gid); err != nil {
 			return fmt.Errorf("preserve owner for %s: %w", name, err)
 		}
 	}
@@ -231,46 +253,83 @@ func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 	return unix.Fsync(int(dir.Fd()))
 }
 
-func ValidatePatchPaths(patch []byte) error {
-	if err := CheckPatchSize(len(patch)); err != nil {
+func writeFileAt(dir *os.File, name string, reader io.Reader) error {
+	if dir == nil {
+		return errors.New("dir is nil")
+	}
+	target := statAtomicTargetAt(dir, name)
+	file, tmpName, err := createAtomicTempFileAt(dir, target.mode)
+	if err != nil {
 		return err
 	}
-	for start := 0; start < len(patch); {
-		end := len(patch)
-		if next := bytes.IndexByte(patch[start:], '\n'); next != -1 {
-			end = start + next + 1
+	written, err := io.Copy(file, io.LimitReader(reader, MaxPatchBytes+1))
+	if err != nil {
+		file.Close()
+		_ = unix.Unlinkat(int(dir.Fd()), tmpName, 0)
+		return err
+	}
+	if err := CheckPatchSize(int(written)); err != nil {
+		file.Close()
+		_ = unix.Unlinkat(int(dir.Fd()), tmpName, 0)
+		return err
+	}
+	return commitAtomicTempFileAt(dir, name, target, file, tmpName)
+}
+
+func walkPatchLines(reader io.Reader, fn func([]byte) error) error {
+	buf := bufio.NewReader(reader)
+	size := 0
+	for {
+		line, err := buf.ReadBytes('\n')
+		if len(line) > 0 {
+			size += len(line)
+			if err := CheckPatchSize(size); err != nil {
+				return err
+			}
+			if err := fn(trimLineBytes(line)); err != nil {
+				return err
+			}
 		}
-		line := trimLineBytes(patch[start:end])
-		start = end
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func validatePatchPathReader(reader io.Reader) error {
+	return walkPatchLines(reader, func(line []byte) error {
 		if bytes.HasPrefix(line, []byte("diff --git ")) {
 			rest := bytes.TrimLeft(line[len("diff --git "):], " ")
 			if len(rest) == 0 {
-				continue
+				return nil
 			}
 			var left []byte
 			if rest[0] == '"' {
 				token, next, ok := readQuotedTokenBytes(rest)
 				if !ok {
-					continue
+					return nil
 				}
 				left = token
 				rest = next
 			} else {
 				split := bytes.IndexByte(rest, ' ')
 				if split == -1 {
-					continue
+					return nil
 				}
 				left = rest[:split]
 				rest = bytes.TrimLeft(rest[split+1:], " ")
 			}
 			if len(rest) == 0 {
-				continue
+				return nil
 			}
 			var right []byte
 			if rest[0] == '"' {
 				token, _, ok := readQuotedTokenBytes(rest)
 				if !ok {
-					continue
+					return nil
 				}
 				right = token
 			} else {
@@ -284,20 +343,14 @@ func ValidatePatchPaths(patch []byte) error {
 			if err := checkPath(sanitizePatchPath(parseMaybeQuotedPathBytes(left))); err != nil {
 				return err
 			}
-			if err := checkPath(sanitizePatchPath(parseMaybeQuotedPathBytes(right))); err != nil {
-				return err
-			}
-			continue
+			return checkPath(sanitizePatchPath(parseMaybeQuotedPathBytes(right)))
 		}
 		if bytes.HasPrefix(line, []byte("+++ ")) || bytes.HasPrefix(line, []byte("--- ")) {
 			parsed := parsePatchHeaderPath(line[4:])
 			if parsed == "" {
-				continue
+				return nil
 			}
-			if err := checkPath(parsed); err != nil {
-				return err
-			}
-			continue
+			return checkPath(parsed)
 		}
 		if bytes.HasPrefix(line, []byte("rename from ")) || bytes.HasPrefix(line, []byte("rename to ")) || bytes.HasPrefix(line, []byte("copy from ")) || bytes.HasPrefix(line, []byte("copy to ")) {
 			for _, prefix := range [][]byte{[]byte("rename from "), []byte("rename to "), []byte("copy from "), []byte("copy to ")} {
@@ -309,10 +362,20 @@ func ValidatePatchPaths(patch []byte) error {
 					break
 				}
 			}
-			continue
 		}
+		return nil
+	})
+}
+
+func ValidatePatchPaths(patch []byte) error {
+	if err := CheckPatchSize(len(patch)); err != nil {
+		return err
 	}
-	return nil
+	return validatePatchPathReader(bytes.NewReader(patch))
+}
+
+func ValidatePatchReader(reader io.Reader) error {
+	return validatePatchPathReader(reader)
 }
 
 func IsAlreadyExistsError(err error) bool {
@@ -329,63 +392,76 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 	if err := CheckPatchSize(len(patch)); err != nil {
 		return nil, nil, err
 	}
-	seenDiff := false
-	firstDiffStart := -1
-	blockStart := -1
-	var current patchBlock
-	var out []byte
-	skipped := make([]string, 0)
-	flushCurrent := func(nextStart int) {
-		if !seenDiff || len(current.lines) == 0 {
-			return
-		}
-		if shouldSkipNewFileBlock(current, workTree) {
-			if len(skipped) == 0 {
-				out = make([]byte, 0, len(patch))
-				out = append(out, patch[firstDiffStart:blockStart]...)
-			}
-			skipped = append(skipped, current.path)
-			return
-		}
-		if len(skipped) == 0 {
-			return
-		}
-		out = append(out, patch[blockStart:nextStart]...)
+	var out bytes.Buffer
+	skipped, err := FilterExistingNewFilesReader(bytes.NewReader(patch), workTree, &out)
+	if err != nil {
+		return nil, nil, err
 	}
-	for start := 0; start < len(patch); {
-		end := len(patch)
-		if next := bytes.IndexByte(patch[start:], '\n'); next != -1 {
-			end = start + next + 1
-		}
-		line := patch[start:end]
-		raw := trimLineBytes(line)
-		if bytes.HasPrefix(raw, []byte("diff --git ")) || bytes.Equal(raw, []byte("diff --git")) {
-			if seenDiff {
-				flushCurrent(start)
-			} else {
-				seenDiff = true
-				firstDiffStart = start
-			}
-			blockStart = start
-			current = beginPatchBlock(line)
-			start = end
-			continue
-		}
-		if !seenDiff {
-			start = end
-			continue
-		}
-		appendPatchBlockLine(&current, line, raw)
-		start = end
-	}
-	if !seenDiff {
-		return patch, nil, nil
-	}
-	flushCurrent(len(patch))
 	if len(skipped) == 0 {
 		return patch, nil, nil
 	}
-	return out, skipped, nil
+	return out.Bytes(), skipped, nil
+}
+
+func FilterExistingNewFilesReader(reader io.Reader, workTree string, out io.Writer) ([]string, error) {
+	if out == nil {
+		out = io.Discard
+	}
+	buf := bufio.NewReader(reader)
+	seenDiff := false
+	var current patchBlock
+	skipped := make([]string, 0)
+	size := 0
+	flushCurrent := func() error {
+		if !seenDiff || len(current.lines) == 0 {
+			return nil
+		}
+		if shouldSkipNewFileBlock(current, workTree) {
+			skipped = append(skipped, current.path)
+			return nil
+		}
+		for _, line := range current.lines {
+			if _, err := out.Write(line); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for {
+		line, err := buf.ReadBytes('\n')
+		if len(line) > 0 {
+			size += len(line)
+			if err := CheckPatchSize(size); err != nil {
+				return nil, err
+			}
+			lineCopy := append([]byte(nil), line...)
+			raw := trimLineBytes(lineCopy)
+			if bytes.HasPrefix(raw, []byte("diff --git ")) || bytes.Equal(raw, []byte("diff --git")) {
+				if seenDiff {
+					if err := flushCurrent(); err != nil {
+						return nil, err
+					}
+				}
+				seenDiff = true
+				current = beginPatchBlock(lineCopy)
+			} else if seenDiff {
+				appendPatchBlockLine(&current, lineCopy, raw)
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !seenDiff {
+		return nil, nil
+	}
+	if err := flushCurrent(); err != nil {
+		return nil, err
+	}
+	return skipped, nil
 }
 
 type patchBlock struct {
@@ -722,7 +798,7 @@ func checkPath(path string) error {
 	return nil
 }
 
-func readAllAt(dir *os.File, name string) ([]byte, error) {
+func openReadAt(dir *os.File, name string) (*os.File, error) {
 	if dir == nil {
 		return nil, errors.New("dir is nil")
 	}
@@ -733,10 +809,15 @@ func readAllAt(dir *os.File, name string) ([]byte, error) {
 		}
 		return nil, err
 	}
-	file := os.NewFile(uintptr(fd), name)
-	defer file.Close()
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+func readAllFile(file *os.File) ([]byte, error) {
+	if file == nil {
+		return nil, nil
+	}
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err == nil {
+	if err := unix.Fstat(int(file.Fd()), &stat); err == nil {
 		if err := CheckPatchSize(int(stat.Size)); err != nil {
 			return nil, err
 		}

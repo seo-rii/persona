@@ -1,6 +1,7 @@
 package gitx
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -203,6 +204,20 @@ func TestDiffNewFileNoIndex(t *testing.T) {
 	}
 }
 
+func TestDiffNewFileNoIndexTo(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	testutil.WriteFile(t, filepath.Join(repo, "new.txt"), "hello\n")
+	var out bytes.Buffer
+	if err := g.DiffNewFileNoIndexTo(context.Background(), repo, g.GitDir, "new.txt", &out); err != nil {
+		t.Fatalf("DiffNewFileNoIndexTo error: %v", err)
+	}
+	if !strings.Contains(out.String(), "new file mode") || !strings.Contains(out.String(), "new.txt") {
+		t.Fatalf("expected streamed new file diff, got %q", out.String())
+	}
+}
+
 func TestDiffHeadBinary(t *testing.T) {
 	repo := testutil.InitRepo(t)
 	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
@@ -214,6 +229,20 @@ func TestDiffHeadBinary(t *testing.T) {
 	}
 	if !strings.Contains(string(patch), "tracked.txt") {
 		t.Fatalf("expected tracked file in diff")
+	}
+}
+
+func TestDiffHeadBinaryTo(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	testutil.WriteFile(t, filepath.Join(repo, "tracked.txt"), "changed\n")
+	var out bytes.Buffer
+	if err := g.DiffHeadBinaryTo(context.Background(), repo, g.GitDir, nil, &out); err != nil {
+		t.Fatalf("DiffHeadBinaryTo error: %v", err)
+	}
+	if !strings.Contains(out.String(), "tracked.txt") {
+		t.Fatalf("expected tracked file in streamed diff")
 	}
 }
 
@@ -457,6 +486,33 @@ func TestApplyPatchStrictFailure(t *testing.T) {
 
 	if err := g.ApplyPatch(context.Background(), model.ApplyStrict, repo, g.GitDir, []byte(patch)); err == nil {
 		t.Fatalf("expected strict apply failure")
+	}
+}
+
+func TestApplyPatchReaderStrict(t *testing.T) {
+	repo := testutil.InitRepo(t)
+	g := Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+
+	patch := strings.Join([]string{
+		"diff --git a/new.txt b/new.txt",
+		"new file mode 100644",
+		"index 0000000..e69de29",
+		"--- /dev/null",
+		"+++ b/new.txt",
+		"@@ -0,0 +1 @@",
+		"+hello",
+		"",
+	}, "\n")
+
+	if err := g.ApplyPatchReader(context.Background(), model.ApplyStrict, repo, g.GitDir, strings.NewReader(patch)); err != nil {
+		t.Fatalf("ApplyPatchReader strict error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "new.txt"))
+	if err != nil {
+		t.Fatalf("read new file: %v", err)
+	}
+	if string(data) != "hello\n" {
+		t.Fatalf("unexpected new.txt content %q", string(data))
 	}
 }
 

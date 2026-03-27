@@ -86,13 +86,17 @@ type ignoredListGitOps struct {
 }
 
 type exportGitOps struct {
-	tracked      []byte
-	untracked    []string
-	untrackedErr error
-	ignored      []string
-	ignoredErr   error
-	diffByPath   map[string][]byte
-	errByPath    map[string]error
+	tracked         []byte
+	untracked       []string
+	untrackedErr    error
+	ignored         []string
+	ignoredErr      error
+	diffByPath      map[string][]byte
+	errByPath       map[string]error
+	diffHeadCalls   int
+	diffHeadToCalls int
+	diffNewCalls    int
+	diffNewToCalls  int
 }
 
 func (g ignoredListGitOps) RepoRootPath() string { return "" }
@@ -131,6 +135,22 @@ func (g ignoredListGitOps) DiffNewFileNoIndex(context.Context, string, string, s
 	panic("unexpected call")
 }
 
+func (g ignoredListGitOps) DiffHeadBinaryTo(context.Context, string, string, []string, io.Writer) error {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) DiffNewFileNoIndexTo(context.Context, string, string, string, io.Writer) error {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) ApplyPatchReader(context.Context, model.ApplyMode, string, string, io.Reader) error {
+	panic("unexpected call")
+}
+
+func (g ignoredListGitOps) ApplyPatchFromReader(context.Context, model.ApplyMode, string, string, io.Reader) error {
+	panic("unexpected call")
+}
+
 func (g ignoredListGitOps) ListIgnoredCandidates(_ context.Context, _ string, _ string, maxN int) ([]string, error) {
 	if g.err != nil {
 		return nil, g.err
@@ -145,49 +165,74 @@ func (g ignoredListGitOps) ListIgnoredCandidates(_ context.Context, _ string, _ 
 	return append([]string(nil), g.ignored...), nil
 }
 
-func (g exportGitOps) RepoRootPath() string { return "" }
+func (g *exportGitOps) RepoRootPath() string { return "" }
 
-func (g exportGitOps) GitDirPath() string { return "" }
+func (g *exportGitOps) GitDirPath() string { return "" }
 
-func (g exportGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
+func (g *exportGitOps) IsCleanExceptUntracked(context.Context, []string) (bool, error) {
 	panic("unexpected call")
 }
 
-func (g exportGitOps) IsCleanExceptPaths(context.Context, []string) (bool, error) {
+func (g *exportGitOps) IsCleanExceptPaths(context.Context, []string) (bool, error) {
 	panic("unexpected call")
 }
 
-func (g exportGitOps) WorktreeAddDetach(context.Context, string, string) error {
+func (g *exportGitOps) WorktreeAddDetach(context.Context, string, string) error {
 	panic("unexpected call")
 }
 
-func (g exportGitOps) WorktreeRemoveForce(context.Context, string) error {
+func (g *exportGitOps) WorktreeRemoveForce(context.Context, string) error {
 	panic("unexpected call")
 }
 
-func (g exportGitOps) ApplyPatch(context.Context, model.ApplyMode, string, string, []byte) error {
+func (g *exportGitOps) ApplyPatch(context.Context, model.ApplyMode, string, string, []byte) error {
 	panic("unexpected call")
 }
 
-func (g exportGitOps) DiffHeadBinary(context.Context, string, string, []string) ([]byte, error) {
+func (g *exportGitOps) DiffHeadBinary(context.Context, string, string, []string) ([]byte, error) {
+	g.diffHeadCalls++
 	return g.tracked, nil
 }
 
-func (g exportGitOps) ListUntracked(context.Context, string, string) ([]string, error) {
+func (g *exportGitOps) DiffHeadBinaryTo(_ context.Context, _ string, _ string, _ []string, w io.Writer) error {
+	g.diffHeadToCalls++
+	_, err := w.Write(g.tracked)
+	return err
+}
+
+func (g *exportGitOps) ListUntracked(context.Context, string, string) ([]string, error) {
 	if g.untrackedErr != nil {
 		return nil, g.untrackedErr
 	}
 	return g.untracked, nil
 }
 
-func (g exportGitOps) DiffNewFileNoIndex(_ context.Context, _ string, _ string, relPath string) ([]byte, error) {
+func (g *exportGitOps) DiffNewFileNoIndex(_ context.Context, _ string, _ string, relPath string) ([]byte, error) {
+	g.diffNewCalls++
 	if err, ok := g.errByPath[relPath]; ok {
 		return nil, err
 	}
 	return g.diffByPath[relPath], nil
 }
 
-func (g exportGitOps) ListIgnoredCandidates(_ context.Context, _ string, _ string, maxN int) ([]string, error) {
+func (g *exportGitOps) DiffNewFileNoIndexTo(_ context.Context, _ string, _ string, relPath string, w io.Writer) error {
+	g.diffNewToCalls++
+	if err, ok := g.errByPath[relPath]; ok {
+		return err
+	}
+	_, err := w.Write(g.diffByPath[relPath])
+	return err
+}
+
+func (g *exportGitOps) ApplyPatchReader(context.Context, model.ApplyMode, string, string, io.Reader) error {
+	panic("unexpected call")
+}
+
+func (g *exportGitOps) ApplyPatchFromReader(context.Context, model.ApplyMode, string, string, io.Reader) error {
+	panic("unexpected call")
+}
+
+func (g *exportGitOps) ListIgnoredCandidates(_ context.Context, _ string, _ string, maxN int) ([]string, error) {
 	if g.ignoredErr != nil {
 		return nil, g.ignoredErr
 	}
@@ -226,8 +271,10 @@ type repoCleanGitOps struct {
 }
 
 type applyRetryGitOps struct {
-	applyCalls int
-	applyErrs  []error
+	applyCalls       int
+	applyErrs        []error
+	applyReaderCalls int
+	applyReaderErrs  []error
 }
 
 func (g *worktreeGitOps) RepoRootPath() string { return "/repo" }
@@ -265,6 +312,22 @@ func (g *worktreeGitOps) ListUntracked(context.Context, string, string) ([]strin
 }
 
 func (g *worktreeGitOps) DiffNewFileNoIndex(context.Context, string, string, string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g worktreeGitOps) DiffHeadBinaryTo(context.Context, string, string, []string, io.Writer) error {
+	panic("unexpected call")
+}
+
+func (g worktreeGitOps) DiffNewFileNoIndexTo(context.Context, string, string, string, io.Writer) error {
+	panic("unexpected call")
+}
+
+func (g worktreeGitOps) ApplyPatchReader(context.Context, model.ApplyMode, string, string, io.Reader) error {
+	panic("unexpected call")
+}
+
+func (g worktreeGitOps) ApplyPatchFromReader(context.Context, model.ApplyMode, string, string, io.Reader) error {
 	panic("unexpected call")
 }
 
@@ -309,6 +372,22 @@ func (g *repoCleanGitOps) DiffNewFileNoIndex(context.Context, string, string, st
 	panic("unexpected call")
 }
 
+func (g repoCleanGitOps) DiffHeadBinaryTo(context.Context, string, string, []string, io.Writer) error {
+	panic("unexpected call")
+}
+
+func (g repoCleanGitOps) DiffNewFileNoIndexTo(context.Context, string, string, string, io.Writer) error {
+	panic("unexpected call")
+}
+
+func (g repoCleanGitOps) ApplyPatchReader(context.Context, model.ApplyMode, string, string, io.Reader) error {
+	panic("unexpected call")
+}
+
+func (g repoCleanGitOps) ApplyPatchFromReader(context.Context, model.ApplyMode, string, string, io.Reader) error {
+	panic("unexpected call")
+}
+
 func (g *repoCleanGitOps) ListIgnoredCandidates(context.Context, string, string, int) ([]string, error) {
 	panic("unexpected call")
 }
@@ -341,6 +420,19 @@ func (g *applyRetryGitOps) ApplyPatch(context.Context, model.ApplyMode, string, 
 	return nil
 }
 
+func (g *applyRetryGitOps) ApplyPatchReader(ctx context.Context, mode model.ApplyMode, workTree, gitDir string, patchData io.Reader) error {
+	g.applyReaderCalls++
+	_, _ = io.Copy(io.Discard, patchData)
+	if len(g.applyReaderErrs) >= g.applyReaderCalls {
+		return g.applyReaderErrs[g.applyReaderCalls-1]
+	}
+	return nil
+}
+
+func (g *applyRetryGitOps) ApplyPatchFromReader(ctx context.Context, mode model.ApplyMode, workTree, gitDir string, patchData io.Reader) error {
+	return g.ApplyPatchReader(ctx, mode, workTree, gitDir, patchData)
+}
+
 func (g *applyRetryGitOps) DiffHeadBinary(context.Context, string, string, []string) ([]byte, error) {
 	panic("unexpected call")
 }
@@ -350,6 +442,14 @@ func (g *applyRetryGitOps) ListUntracked(context.Context, string, string) ([]str
 }
 
 func (g *applyRetryGitOps) DiffNewFileNoIndex(context.Context, string, string, string) ([]byte, error) {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) DiffHeadBinaryTo(context.Context, string, string, []string, io.Writer) error {
+	panic("unexpected call")
+}
+
+func (g *applyRetryGitOps) DiffNewFileNoIndexTo(context.Context, string, string, string, io.Writer) error {
 	panic("unexpected call")
 }
 

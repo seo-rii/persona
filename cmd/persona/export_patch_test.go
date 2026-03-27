@@ -72,7 +72,7 @@ func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
 func TestExportPatchSkipsVanishedUntrackedFiles(t *testing.T) {
 	repo := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(repo, "keep.txt"), "keep\n")
-	g := exportGitOps{
+	g := &exportGitOps{
 		untracked: []string{"gone.txt", "keep.txt"},
 		diffByPath: map[string][]byte{
 			"keep.txt": []byte("diff --git a/keep.txt b/keep.txt\n+++ b/keep.txt\n"),
@@ -95,7 +95,7 @@ func TestExportPatchSkipsVanishedUntrackedFiles(t *testing.T) {
 }
 
 func TestExportPatchFailsOnNewIgnoredCandidates(t *testing.T) {
-	g := exportGitOps{
+	g := &exportGitOps{
 		ignored: []string{"late-ignored.txt"},
 	}
 
@@ -109,7 +109,7 @@ func TestExportPatchFailsOnNewIgnoredCandidates(t *testing.T) {
 }
 
 func TestExportPatchFailsOnNewIgnoredCandidatesInTransparentMode(t *testing.T) {
-	g := exportGitOps{
+	g := &exportGitOps{
 		ignored: []string{"late-ignored.txt"},
 	}
 
@@ -123,7 +123,7 @@ func TestExportPatchFailsOnNewIgnoredCandidatesInTransparentMode(t *testing.T) {
 }
 
 func TestExportPatchFailsWhenIgnoredCandidateCapExceeded(t *testing.T) {
-	g := exportGitOps{
+	g := &exportGitOps{
 		ignored: []string{"a.tmp", "b.tmp", "c.tmp"},
 	}
 
@@ -137,7 +137,7 @@ func TestExportPatchFailsWhenIgnoredCandidateCapExceeded(t *testing.T) {
 }
 
 func TestExportPatchIgnoredDriftDetectsNewCandidatesWithinIgnoredMax(t *testing.T) {
-	g := exportGitOps{
+	g := &exportGitOps{
 		ignored: []string{"a.tmp", "b.tmp"},
 	}
 
@@ -151,7 +151,7 @@ func TestExportPatchIgnoredDriftDetectsNewCandidatesWithinIgnoredMax(t *testing.
 }
 
 func TestExportPatchFailsOnIgnoredToUnignoredTransition(t *testing.T) {
-	g := exportGitOps{
+	g := &exportGitOps{
 		ignored: []string{"keep.tmp"},
 	}
 
@@ -165,7 +165,7 @@ func TestExportPatchFailsOnIgnoredToUnignoredTransition(t *testing.T) {
 }
 
 func TestExportPatchIgnoredMaxZeroSkipsIgnoredDriftCheck(t *testing.T) {
-	g := exportGitOps{
+	g := &exportGitOps{
 		ignoredErr: errors.New("should not list ignored candidates"),
 	}
 
@@ -191,7 +191,7 @@ func TestExportPatchWarnsAndSkipsSpecialFiles(t *testing.T) {
 	}
 	defer listener.Close()
 
-	g := exportGitOps{untracked: []string{"fifo.pipe", "socket.sock"}}
+	g := &exportGitOps{untracked: []string{"fifo.pipe", "socket.sock"}}
 	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe stderr: %v", err)
@@ -258,7 +258,7 @@ func TestExportPatchFailsWhenAccumulatedDiffExceedsSizeLimit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "late.txt"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatalf("write late.txt: %v", err)
 	}
-	g := exportGitOps{
+	g := &exportGitOps{
 		tracked:   bytes.Repeat([]byte("t"), patchio.MaxPatchBytes-8),
 		untracked: []string{"late.txt"},
 		diffByPath: map[string][]byte{
@@ -276,7 +276,7 @@ func TestExportPatchFailsWhenAccumulatedDiffExceedsSizeLimit(t *testing.T) {
 }
 
 func TestExportPatchFailsOnOversizeTrackedDiffBeforeListingUntracked(t *testing.T) {
-	g := exportGitOps{
+	g := &exportGitOps{
 		tracked:      bytes.Repeat([]byte("t"), patchio.MaxPatchBytes+1),
 		untrackedErr: errors.New("ListUntracked should not be called after tracked overflow"),
 	}
@@ -292,7 +292,7 @@ func TestExportPatchFailsOnOversizeTrackedDiffBeforeListingUntracked(t *testing.
 
 func TestExportPatchAllowsExactSizeLimit(t *testing.T) {
 	repo := t.TempDir()
-	g := exportGitOps{
+	g := &exportGitOps{
 		tracked: bytes.Repeat([]byte("t"), patchio.MaxPatchBytes),
 	}
 
@@ -314,7 +314,7 @@ func TestExportPatchAllowsExactSizeLimitByAppend(t *testing.T) {
 		t.Fatalf("write late.txt: %v", err)
 	}
 	want := bytes.Repeat([]byte("u"), 8)
-	g := exportGitOps{
+	g := &exportGitOps{
 		tracked:   bytes.Repeat([]byte("t"), patchio.MaxPatchBytes-len(want)),
 		untracked: []string{"late.txt"},
 		diffByPath: map[string][]byte{
@@ -340,7 +340,7 @@ func TestExportPatchAllowsExactSizeLimitFromFirstUntracked(t *testing.T) {
 		t.Fatalf("write late.txt: %v", err)
 	}
 	want := bytes.Repeat([]byte("u"), patchio.MaxPatchBytes)
-	g := exportGitOps{
+	g := &exportGitOps{
 		untracked: []string{"late.txt"},
 		diffByPath: map[string][]byte{
 			"late.txt": want,
@@ -364,7 +364,7 @@ func TestExportPatchFailsWhenLateAppendCrossesSizeLimit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "late.txt"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatalf("write late.txt: %v", err)
 	}
-	g := exportGitOps{
+	g := &exportGitOps{
 		tracked:   bytes.Repeat([]byte("t"), patchio.MaxPatchBytes-1),
 		untracked: []string{"late.txt"},
 		diffByPath: map[string][]byte{
@@ -424,5 +424,34 @@ func TestExportPatchExcludesUntrackedPatchLockFile(t *testing.T) {
 	}
 	if !bytes.Contains(patch, []byte("other.txt")) {
 		t.Fatalf("expected other changes to remain in export: %s", string(patch))
+	}
+}
+
+func TestExportPatchToWriterUsesStreamingGitOps(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "late.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write late.txt: %v", err)
+	}
+	g := &exportGitOps{
+		tracked:   []byte("diff --git a/a.txt b/a.txt\n+++ b/a.txt\n"),
+		untracked: []string{"late.txt"},
+		diffByPath: map[string][]byte{
+			"late.txt": []byte("diff --git a/late.txt b/late.txt\n+++ b/late.txt\n"),
+		},
+	}
+
+	var out bytes.Buffer
+	_, err := exportPatchToWriter(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil, &out)
+	if err != nil {
+		t.Fatalf("exportPatchToWriter error: %v", err)
+	}
+	if g.diffHeadCalls != 0 || g.diffNewCalls != 0 {
+		t.Fatalf("expected byte diff helpers to stay unused, got tracked=%d untracked=%d", g.diffHeadCalls, g.diffNewCalls)
+	}
+	if g.diffHeadToCalls != 1 || g.diffNewToCalls != 1 {
+		t.Fatalf("expected streaming diff helpers, got tracked=%d untracked=%d", g.diffHeadToCalls, g.diffNewToCalls)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("a.txt")) || !bytes.Contains(out.Bytes(), []byte("late.txt")) {
+		t.Fatalf("expected streamed patch output, got %q", out.Bytes())
 	}
 }

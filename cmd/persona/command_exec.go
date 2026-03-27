@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +18,26 @@ import (
 	"persona/internal/model"
 	"persona/internal/patchio"
 )
+
+type patchLimitWriter struct {
+	w     io.Writer
+	bytes int
+}
+
+func (w *patchLimitWriter) Write(p []byte) (int, error) {
+	if err := patchio.CheckPatchSize(w.bytes + len(p)); err != nil {
+		return 0, err
+	}
+	n, err := w.w.Write(p)
+	w.bytes += n
+	if err != nil {
+		return n, err
+	}
+	if n != len(p) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
+}
 
 func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 	if len(cmdArgs) == 0 {
@@ -98,16 +120,24 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 }
 
 func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string) ([]byte, error) {
+	var out bytes.Buffer
+	if _, err := exportPatchToWriter(ctx, g, repoRoot, gitDir, patchInRepo, patchRel, ignoredMode, ignoredMax, initialIgnored, &out); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string, out io.Writer) (int, error) {
 	if ignoredMax != 0 {
 		if ignoredMax > 0 && len(initialIgnored) > ignoredMax {
-			return nil, fmt.Errorf("ignored candidate count exceeds ignored-max %d", ignoredMax)
+			return 0, fmt.Errorf("ignored candidate count exceeds ignored-max %d", ignoredMax)
 		}
 		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, ignoredMax)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 		if ignoredMax > 0 && len(ignoredNow) > ignoredMax {
-			return nil, fmt.Errorf("ignored candidate count exceeds ignored-max %d", ignoredMax)
+			return 0, fmt.Errorf("ignored candidate count exceeds ignored-max %d", ignoredMax)
 		}
 		ignoredSet := make(map[string]struct{}, len(initialIgnored))
 		for _, path := range initialIgnored {
@@ -139,23 +169,20 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 			if len(noLongerIgnored) > 0 {
 				problems = append(problems, "no longer ignored: "+strings.Join(noLongerIgnored, ", "))
 			}
-			return nil, fmt.Errorf("ignored paths changed during run: %s", strings.Join(problems, "; "))
+			return 0, fmt.Errorf("ignored paths changed during run: %s", strings.Join(problems, "; "))
 		}
 	}
 	trackedExclude := []string{}
 	if patchInRepo && patchRel != "" {
 		trackedExclude = append(trackedExclude, filepath.ToSlash(patchRel), filepath.ToSlash(patchRel+".lock"))
 	}
-	tracked, err := g.DiffHeadBinary(ctx, repoRoot, gitDir, trackedExclude)
-	if err != nil {
-		return nil, err
-	}
-	if err := patchio.CheckPatchSize(len(tracked)); err != nil {
-		return nil, err
+	limited := &patchLimitWriter{w: out}
+	if err := g.DiffHeadBinaryTo(ctx, repoRoot, gitDir, trackedExclude, limited); err != nil {
+		return 0, err
 	}
 	untracked, err := g.ListUntracked(ctx, repoRoot, gitDir)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	excludePrefixes := []string{".git/"}
 	excludeExact := []string{}
@@ -165,10 +192,6 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 	untracked = patchio.FilterUntrackedPaths(untracked, excludePrefixes, excludeExact)
 	sort.Strings(untracked)
 
-	var patchOut []byte
-	if len(tracked) > 0 {
-		patchOut = tracked[:len(tracked):len(tracked)]
-	}
 	for _, path := range untracked {
 		absPath := filepath.Join(repoRoot, filepath.FromSlash(path))
 		info, err := os.Lstat(absPath)
@@ -176,28 +199,19 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return nil, err
+			return 0, err
 		}
 		mode := info.Mode()
 		if mode&os.ModeNamedPipe != 0 || mode&os.ModeDevice != 0 || mode&os.ModeCharDevice != 0 || mode&os.ModeSocket != 0 {
 			fmt.Fprintln(os.Stderr, "skip special file", path)
 			continue
 		}
-		patch, err := g.DiffNewFileNoIndex(ctx, repoRoot, gitDir, path)
-		if err != nil {
+		if err := g.DiffNewFileNoIndexTo(ctx, repoRoot, gitDir, path, limited); err != nil {
 			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
 				continue
 			}
-			return nil, err
+			return 0, err
 		}
-		if err := patchio.CheckPatchSize(len(patchOut) + len(patch)); err != nil {
-			return nil, err
-		}
-		if len(patchOut) == 0 {
-			patchOut = patch[:len(patch):len(patch)]
-			continue
-		}
-		patchOut = append(patchOut, patch...)
 	}
-	return patchOut, nil
+	return limited.bytes, nil
 }

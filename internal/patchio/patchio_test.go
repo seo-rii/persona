@@ -1125,6 +1125,73 @@ func TestPatchStoreWriteAllRejectsPatchOverSizeLimit(t *testing.T) {
 	}
 }
 
+func TestPatchStoreWriteFromReaderRejectsPatchOverSizeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.patch")
+	store, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	err = store.WriteFromReader(bytes.NewReader(bytes.Repeat([]byte("a"), MaxPatchBytes+1)))
+	if err == nil {
+		t.Fatal("expected oversize streamed patch write to fail")
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected oversize streamed write to avoid creating patch file, got %v", statErr)
+	}
+}
+
+func TestValidatePatchReaderRejectEscapedDotGit(t *testing.T) {
+	patch := "diff --git a/\\056git/config b/\\056git/config\n+++ b/\\056git/config\n"
+	if err := ValidatePatchReader(strings.NewReader(patch)); err == nil {
+		t.Fatal("expected error for escaped .git path")
+	}
+}
+
+func TestFilterExistingNewFilesReaderSkipsMatchingBlock(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "existing.txt"), []byte("data\n"), 0o644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	patch := strings.Join([]string{
+		"note before diff",
+		"diff --git a/existing.txt b/existing.txt",
+		"new file mode 100644",
+		"index 0000000..1111111",
+		"--- /dev/null",
+		"+++ b/existing.txt",
+		"@@ -0,0 +1 @@",
+		"+data",
+		"diff --git a/keep.txt b/keep.txt",
+		"new file mode 100644",
+		"index 0000000..2222222",
+		"--- /dev/null",
+		"+++ b/keep.txt",
+		"@@ -0,0 +1 @@",
+		"+keep",
+		"",
+	}, "\n")
+
+	var out bytes.Buffer
+	skipped, err := FilterExistingNewFilesReader(strings.NewReader(patch), dir, &out)
+	if err != nil {
+		t.Fatalf("filter existing new files reader: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0] != "existing.txt" {
+		t.Fatalf("expected skipped existing.txt, got %v", skipped)
+	}
+	if strings.Contains(out.String(), "note before diff") || strings.Contains(out.String(), "existing.txt") {
+		t.Fatalf("expected pre-header and skipped block removed, got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "keep.txt") {
+		t.Fatalf("expected surviving block in output, got %q", out.String())
+	}
+}
+
 func TestPatchLockUnlockNilSafe(t *testing.T) {
 	var nilLock *PatchLock
 	if err := nilLock.Unlock(); err != nil {

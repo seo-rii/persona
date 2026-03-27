@@ -1,6 +1,9 @@
 package model
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // GitOps abstracts Git operations used by the overlay orchestration layer.
 // Implement this interface with a mock/stub to unit-test runWithOptions logic
@@ -20,11 +23,14 @@ type GitOps interface {
 
 	// Patch application
 	ApplyPatch(ctx context.Context, mode ApplyMode, workTree, gitDir string, patchData []byte) error
+	ApplyPatchReader(ctx context.Context, mode ApplyMode, workTree, gitDir string, patchReader io.Reader) error
 
 	// Diff / export
 	DiffHeadBinary(ctx context.Context, workTree, gitDir string, excludePaths []string) ([]byte, error)
+	DiffHeadBinaryTo(ctx context.Context, workTree, gitDir string, excludePaths []string, out io.Writer) error
 	ListUntracked(ctx context.Context, workTree, gitDir string) ([]string, error)
 	DiffNewFileNoIndex(ctx context.Context, workTree, gitDir, relPath string) ([]byte, error)
+	DiffNewFileNoIndexTo(ctx context.Context, workTree, gitDir, relPath string, out io.Writer) error
 
 	// Ignored files
 	ListIgnoredCandidates(ctx context.Context, workTree, gitDir string, maxN int) ([]string, error)
