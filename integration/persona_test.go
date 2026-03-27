@@ -92,6 +92,7 @@ func TestPersonaIntegrationBasic(t *testing.T) {
 		writeFile(t, filepath.Join(repo, ".gitignore"), []byte("ignored.txt\n"))
 		runCmd(t, repo, "git", "add", ".gitignore")
 		runCmd(t, repo, "git", "commit", "-m", "add ignore")
+		writeFile(t, filepath.Join(repo, "ignored.txt"), []byte("seed\n"))
 		patchPath := filepath.Join(t.TempDir(), "state.patch")
 		code, _, _ := runPersona(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", "echo ignored > ignored.txt"}, nil)
 		if code != 0 {

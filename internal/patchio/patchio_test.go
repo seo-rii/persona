@@ -176,6 +176,22 @@ func TestEnsurePatchPathExplicitRejectsSymlinkedParentDir(t *testing.T) {
 	}
 }
 
+func TestEnsurePatchPathRejectsExistingDirectory(t *testing.T) {
+	root := t.TempDir()
+	dirPath := filepath.Join(root, "existing-dir")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatalf("mkdir existing dir: %v", err)
+	}
+
+	path, err := EnsurePatchPath(model.Options{PatchPath: dirPath}, filepath.Join(root, ".git"), time.Now())
+	if err == nil {
+		t.Fatalf("expected existing directory patch path to be rejected, got %q", path)
+	}
+	if !strings.Contains(err.Error(), "directory") {
+		t.Fatalf("expected directory error, got %v", err)
+	}
+}
+
 func TestEnsurePatchDirRejectsSymlinkedParentDir(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

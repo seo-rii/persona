@@ -171,7 +171,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 
 	_ = umountPathsReverse(mount, append(commandMaskPaths, gitMaskPath))
 
-	exportFile, err := os.CreateTemp(sess.Root, "persona-export-*.patch")
+	exportFile, err := os.CreateTemp(menv.tempRoot, "persona-export-*.patch")
 	if err != nil {
 		return model.Wrap(model.ExitExport, "create export temp", err), 0
 	}

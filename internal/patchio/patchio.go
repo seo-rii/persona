@@ -130,6 +130,11 @@ func EnsurePatchPath(opts model.Options, gitDir string, now time.Time) (string, 
 		if err := rejectSymlinkPathParents(filepath.Dir(path), "patch path"); err != nil {
 			return "", err
 		}
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return "", fmt.Errorf("patch path is directory: %s", path)
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return "", err
 		}

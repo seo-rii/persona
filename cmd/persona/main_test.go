@@ -980,6 +980,54 @@ func TestPlanGitDirMountLinkedWorktreeKeepsRelativeCommonDir(t *testing.T) {
 	}
 }
 
+func TestSetupMountEnvUsesExternalTempRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitDir := filepath.Join(repoRoot, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatalf("mkdir gitdir: %v", err)
+	}
+	basePath := t.TempDir()
+	sessRoot := t.TempDir()
+	sess := &session.Session{
+		Root:    sessRoot,
+		Upper:   filepath.Join(sessRoot, "upper"),
+		Work:    filepath.Join(sessRoot, "work"),
+		MntBase: filepath.Join(sessRoot, "mnt", "base"),
+	}
+	for _, path := range []string{sess.Upper, sess.Work, sess.MntBase} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir session path %s: %v", path, err)
+		}
+	}
+	mount := &recordingNSOps{}
+	cleanup := &cleanupStack{}
+	t.Cleanup(func() {
+		_ = cleanup.Run()
+	})
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	env, err := setupMountEnv(repoRoot, gitDir, basePath, sess, mount, cleanup, log)
+	if err != nil {
+		t.Fatalf("setupMountEnv error: %v", err)
+	}
+	if env.tempRoot == "" {
+		t.Fatal("expected external temp root")
+	}
+	if ok, _ := isSubpath(repoRoot, env.tempRoot); ok {
+		t.Fatalf("expected temp root outside repo, got %q", env.tempRoot)
+	}
+	if ok, _ := isSubpath(sess.Root, env.tempRoot); ok {
+		t.Fatalf("expected temp root outside session root, got %q", env.tempRoot)
+	}
+	info, err := os.Stat(env.tempRoot)
+	if err != nil {
+		t.Fatalf("stat temp root: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected temp root to be directory, got %v", info.Mode())
+	}
+}
+
 func TestMaskIgnoredFilesReadonlySkipsMissingTargets(t *testing.T) {
 	repoRoot := t.TempDir()
 	existing := filepath.Join(repoRoot, "existing.txt")

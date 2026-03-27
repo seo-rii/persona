@@ -47,6 +47,7 @@ type mountEnv struct {
 	emptyDir     string
 	emptyFile    string
 	gitDirForOps string
+	tempRoot     string
 }
 
 func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mount model.NSOps, cleanup *cleanupStack, log *slog.Logger) (*mountEnv, error) {
@@ -60,12 +61,16 @@ func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mou
 		emptyDir:     filepath.Join(extRoot, "empty", "dirs"),
 		emptyFile:    filepath.Join(extRoot, "empty", "files"),
 		gitDirForOps: filepath.Join(extRoot, "mnt", "gitdir"),
+		tempRoot:     filepath.Join(extRoot, "tmp"),
 	}
 	if err := os.MkdirAll(env.emptyDir, 0o755); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "mkdir empty dir", err)
 	}
 	if err := os.MkdirAll(env.emptyFile, 0o755); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "mkdir empty file dir", err)
+	}
+	if err := os.MkdirAll(env.tempRoot, 0o755); err != nil {
+		return nil, model.Wrap(model.ExitEnv, "mkdir temp root", err)
 	}
 	gitMountRoot := env.gitDirForOps
 	gitMountSrc, gitDirForOps, err := planGitDirMount(gitDir, gitMountRoot)
