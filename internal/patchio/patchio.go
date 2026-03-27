@@ -708,15 +708,18 @@ func readAllAt(dir *os.File, name string) ([]byte, error) {
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
 	var stat unix.Stat_t
+	var initialCap int
 	if err := unix.Fstat(fd, &stat); err == nil {
 		if err := CheckPatchSize(int(stat.Size)); err != nil {
 			return nil, err
 		}
+		initialCap = int(stat.Size)
 	}
-	data, err := io.ReadAll(file)
-	if err != nil {
+	buf := bytes.NewBuffer(make([]byte, 0, initialCap))
+	if _, err := io.Copy(buf, file); err != nil {
 		return nil, err
 	}
+	data := buf.Bytes()
 	if err := CheckPatchSize(len(data)); err != nil {
 		return nil, err
 	}
