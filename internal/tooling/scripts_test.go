@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"persona/internal/model"
 )
 
 func TestTestShRunsCmdAndInternalPackagesAndSkipsWithoutSudo(t *testing.T) {
@@ -242,6 +244,31 @@ func TestReadmeDocumentsBehaviorContracts(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("README missing behavior contract %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestReadmeDocumentsExitCodeContract(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"- `0` success",
+		"- `10` environment/mount error",
+		"- `11` repo state error",
+		"- `12` patch apply failure",
+		"- `13` export failure",
+		"- `14` patch write failure",
+		"- Child exit codes propagate unchanged, except child `10`~`14`, which are remapped to `240`~`244`",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("README missing exit code contract %q:\n%s", want, text)
+		}
+	}
+	if int(model.ExitEnv) != 10 || int(model.ExitWrite) != 14 || int(model.ExitChildReservedBase) != 240 {
+		t.Fatalf("unexpected exit code constants changed: env=%d write=%d childBase=%d", model.ExitEnv, model.ExitWrite, model.ExitChildReservedBase)
 	}
 }
 
