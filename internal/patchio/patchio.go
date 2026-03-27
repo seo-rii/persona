@@ -764,8 +764,12 @@ func checkPath(path string) error {
 	if strings.HasPrefix(path, "/") {
 		return fmt.Errorf("absolute path in patch: %s", path)
 	}
-	parts := strings.Split(path, "/")
-	for _, part := range parts {
+	for start := 0; start <= len(path); {
+		end := start
+		for end < len(path) && path[end] != '/' {
+			end++
+		}
+		part := path[start:end]
 		if part == "." {
 			return fmt.Errorf("current path in patch: %s", path)
 		}
@@ -775,6 +779,10 @@ func checkPath(path string) error {
 		if strings.EqualFold(part, ".git") {
 			return fmt.Errorf(".git path in patch: %s", path)
 		}
+		if end == len(path) {
+			break
+		}
+		start = end + 1
 	}
 	return nil
 }
