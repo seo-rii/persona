@@ -327,6 +327,46 @@ func TestReadmeDocumentsPrivilegedIntegrationFlow(t *testing.T) {
 	}
 }
 
+func TestCIWorkflowUsesDocumentedTestEntrypoints(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci workflow: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"name: ci",
+		"fast:",
+		"test:",
+		"go test -race ./cmd/... ./internal/...",
+		"bash ./test.sh",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("CI workflow missing expected contract %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestReadmeGoVersionMatchesCI(t *testing.T) {
+	repoRoot := repoRoot(t)
+	readmeData, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	ciData, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci workflow: %v", err)
+	}
+	readme := string(readmeData)
+	ci := string(ciData)
+	if !strings.Contains(readme, "Go 1.25+ to build") {
+		t.Fatalf("README missing current Go version floor:\n%s", readme)
+	}
+	if !strings.Contains(ci, "go-version: '1.25.x'") {
+		t.Fatalf("CI missing expected Go toolchain line:\n%s", ci)
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
