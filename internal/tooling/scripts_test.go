@@ -117,6 +117,60 @@ func TestBuildShMentionsCustomOutputDirInFollowUpGuidance(t *testing.T) {
 	}
 }
 
+func TestBuildShWarnsWhenSetcapIsMissing(t *testing.T) {
+	repoRoot := repoRoot(t)
+	binDir, _ := stubGoWithBody(t, "#!/bin/sh\nexit 0\n", "dirname", "mkdir", "id", "sudo")
+
+	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "build.sh"))
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"PERSONA_SETCAP_BIN=/nonexistent/setcap",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build.sh failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "warning: setcap not found") {
+		t.Fatalf("expected explicit setcap-missing warning, got:\n%s", text)
+	}
+	if strings.Contains(text, "warning: sudo setcap failed") {
+		t.Fatalf("did not expect sudo failure warning when setcap is missing, got:\n%s", text)
+	}
+}
+
+func TestBuildShWarnsWhenSudoSetcapFails(t *testing.T) {
+	repoRoot := repoRoot(t)
+	binDir, _ := stubGoWithBody(t, "#!/bin/sh\nexit 0\n", "dirname", "mkdir", "id")
+	sudoPath := filepath.Join(binDir, "sudo")
+	if err := os.WriteFile(sudoPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write sudo stub: %v", err)
+	}
+	setcapPath := filepath.Join(t.TempDir(), "setcap")
+	if err := os.WriteFile(setcapPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write setcap stub: %v", err)
+	}
+
+	cmd := exec.Command("script", "-qec", filepath.Join(repoRoot, "build.sh"), "/dev/null")
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"PERSONA_SETCAP_BIN="+setcapPath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("interactive build.sh failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "warning: sudo setcap failed") {
+		t.Fatalf("expected explicit sudo setcap failure warning, got:\n%s", text)
+	}
+	if strings.Contains(text, "warning: setcap not found") {
+		t.Fatalf("did not expect setcap-missing warning when override points to a tool, got:\n%s", text)
+	}
+}
+
 func TestReadmeDocumentsCurrentTestShCoverage(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))

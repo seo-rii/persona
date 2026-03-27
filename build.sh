@@ -15,12 +15,18 @@ fi
 
 default_caps="cap_sys_admin+ep"
 setcap_bin=""
-for candidate in /usr/sbin/setcap /usr/bin/setcap /sbin/setcap /bin/setcap; do
-  if [ -x "$candidate" ] && [ ! -d "$candidate" ]; then
-    setcap_bin="$candidate"
-    break
+if [ -n "${PERSONA_SETCAP_BIN:-}" ]; then
+  if [ -x "$PERSONA_SETCAP_BIN" ] && [ ! -d "$PERSONA_SETCAP_BIN" ]; then
+    setcap_bin="$PERSONA_SETCAP_BIN"
   fi
-done
+else
+  for candidate in /usr/sbin/setcap /usr/bin/setcap /sbin/setcap /bin/setcap; do
+    if [ -x "$candidate" ] && [ ! -d "$candidate" ]; then
+      setcap_bin="$candidate"
+      break
+    fi
+  done
+fi
 
 if [ "$(id -u)" -eq 0 ]; then
   if [ -n "$setcap_bin" ]; then
@@ -33,8 +39,10 @@ if [ "$(id -u)" -eq 0 ]; then
     echo "warning: setcap not found (install libcap2-bin) - skipping capabilities" >&2
   fi
 else
-  if [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
-    if [ -n "$setcap_bin" ] && sudo "$setcap_bin" "$default_caps" "$bin"; then
+  if [ -z "$setcap_bin" ]; then
+    echo "warning: setcap not found (install libcap2-bin) - use $bin activate" >&2
+  elif [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+    if sudo "$setcap_bin" "$default_caps" "$bin"; then
       echo "capabilities set: $bin"
     else
       echo "warning: sudo setcap failed (use $bin activate)" >&2
