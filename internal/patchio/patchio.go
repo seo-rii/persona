@@ -238,9 +238,10 @@ func ValidatePatchPaths(patch []byte) error {
 	scanner := bufio.NewScanner(bytes.NewReader(patch))
 	scanner.Buffer(make([]byte, 0, 64*1024), MaxPatchBytes)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "diff --git ") {
-			a, b, ok := parseDiffGitLine(line)
+		line := scanner.Bytes()
+		if bytes.HasPrefix(line, []byte("diff --git ")) {
+			text := string(line)
+			a, b, ok := parseDiffGitLine(text)
 			if ok {
 				if err := checkPath(a); err != nil {
 					return err
@@ -251,27 +252,36 @@ func ValidatePatchPaths(patch []byte) error {
 			}
 			continue
 		}
-		if strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- ") {
-			path := trimLine(line[4:])
-			if path == "/dev/null" {
+		if bytes.HasPrefix(line, []byte("+++ ")) || bytes.HasPrefix(line, []byte("--- ")) {
+			path := line[4:]
+			if n := len(path); n > 0 && path[n-1] == '\n' {
+				path = path[:n-1]
+			}
+			if n := len(path); n > 0 && path[n-1] == '\r' {
+				path = path[:n-1]
+			}
+			if bytes.Equal(path, []byte("/dev/null")) {
 				continue
 			}
-			path = stripDiffPathMeta(path)
-			path = parseMaybeQuotedPath(path)
-			if err := checkPath(path); err != nil {
+			parsed := parseMaybeQuotedPath(stripDiffPathMeta(string(path)))
+			if err := checkPath(parsed); err != nil {
 				return err
 			}
 			continue
 		}
-		for _, prefix := range []string{"rename from ", "rename to ", "copy from ", "copy to "} {
-			if strings.HasPrefix(line, prefix) {
-				path := trimLine(strings.TrimPrefix(line, prefix))
-				path = parseMaybeQuotedPath(path)
-				if err := checkPath(path); err != nil {
-					return err
+		if bytes.HasPrefix(line, []byte("rename from ")) || bytes.HasPrefix(line, []byte("rename to ")) || bytes.HasPrefix(line, []byte("copy from ")) || bytes.HasPrefix(line, []byte("copy to ")) {
+			text := string(line)
+			for _, prefix := range []string{"rename from ", "rename to ", "copy from ", "copy to "} {
+				if strings.HasPrefix(text, prefix) {
+					path := trimLine(strings.TrimPrefix(text, prefix))
+					path = parseMaybeQuotedPath(path)
+					if err := checkPath(path); err != nil {
+						return err
+					}
+					break
 				}
-				break
 			}
+			continue
 		}
 	}
 	if err := scanner.Err(); err != nil {
