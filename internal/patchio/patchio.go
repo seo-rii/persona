@@ -243,15 +243,49 @@ func ValidatePatchPaths(patch []byte) error {
 		line := trimLineBytes(patch[start:end])
 		start = end
 		if bytes.HasPrefix(line, []byte("diff --git ")) {
-			text := string(line)
-			a, b, ok := parseDiffGitLine(text)
-			if ok {
-				if err := checkPath(a); err != nil {
-					return err
+			rest := bytes.TrimLeft(line[len("diff --git "):], " ")
+			if len(rest) == 0 {
+				continue
+			}
+			var left []byte
+			if rest[0] == '"' {
+				token, next, ok := readQuotedTokenBytes(rest)
+				if !ok {
+					continue
 				}
-				if err := checkPath(b); err != nil {
-					return err
+				left = token
+				rest = next
+			} else {
+				split := bytes.IndexByte(rest, ' ')
+				if split == -1 {
+					continue
 				}
+				left = rest[:split]
+				rest = bytes.TrimLeft(rest[split+1:], " ")
+			}
+			if len(rest) == 0 {
+				continue
+			}
+			var right []byte
+			if rest[0] == '"' {
+				token, _, ok := readQuotedTokenBytes(rest)
+				if !ok {
+					continue
+				}
+				right = token
+			} else {
+				split := bytes.IndexByte(rest, ' ')
+				if split == -1 {
+					right = rest
+				} else {
+					right = rest[:split]
+				}
+			}
+			if err := checkPath(sanitizePatchPath(parseMaybeQuotedPathBytes(left))); err != nil {
+				return err
+			}
+			if err := checkPath(sanitizePatchPath(parseMaybeQuotedPathBytes(right))); err != nil {
+				return err
 			}
 			continue
 		}
@@ -268,7 +302,7 @@ func ValidatePatchPaths(patch []byte) error {
 		if bytes.HasPrefix(line, []byte("rename from ")) || bytes.HasPrefix(line, []byte("rename to ")) || bytes.HasPrefix(line, []byte("copy from ")) || bytes.HasPrefix(line, []byte("copy to ")) {
 			for _, prefix := range [][]byte{[]byte("rename from "), []byte("rename to "), []byte("copy from "), []byte("copy to ")} {
 				if bytes.HasPrefix(line, prefix) {
-					path := parseMaybeQuotedPath(string(trimLineBytes(line[len(prefix):])))
+					path := parseMaybeQuotedPathBytes(trimLineBytes(line[len(prefix):]))
 					if err := checkPath(path); err != nil {
 						return err
 					}
@@ -299,7 +333,7 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 	firstDiffStart := -1
 	blockStart := -1
 	var current patchBlock
-	var out bytes.Buffer
+	var out []byte
 	skipped := make([]string, 0)
 	flushCurrent := func(nextStart int) {
 		if !seenDiff || len(current.lines) == 0 {
@@ -307,8 +341,8 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 		}
 		if shouldSkipNewFileBlock(current, workTree) {
 			if len(skipped) == 0 {
-				out.Grow(len(patch))
-				out.Write(patch[firstDiffStart:blockStart])
+				out = make([]byte, 0, len(patch))
+				out = append(out, patch[firstDiffStart:blockStart]...)
 			}
 			skipped = append(skipped, current.path)
 			return
@@ -316,7 +350,7 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 		if len(skipped) == 0 {
 			return
 		}
-		out.Write(patch[blockStart:nextStart])
+		out = append(out, patch[blockStart:nextStart]...)
 	}
 	for start := 0; start < len(patch); {
 		end := len(patch)
@@ -351,7 +385,7 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 	if len(skipped) == 0 {
 		return patch, nil, nil
 	}
-	return out.Bytes(), skipped, nil
+	return out, skipped, nil
 }
 
 type patchBlock struct {
@@ -516,30 +550,13 @@ func parsePatchHeaderPath(path []byte) string {
 	if idx := bytes.IndexByte(path, '\t'); idx != -1 {
 		path = path[:idx]
 	}
-	return sanitizePatchPath(parseMaybeQuotedPath(string(path)))
+	return sanitizePatchPath(parseMaybeQuotedPathBytes(path))
 }
 
 func sanitizePatchPath(path string) string {
 	path = strings.TrimPrefix(path, "a/")
 	path = strings.TrimPrefix(path, "b/")
 	return path
-}
-
-func parseDiffGitLine(line string) (string, string, bool) {
-	const prefix = "diff --git "
-	if !strings.HasPrefix(line, prefix) {
-		return "", "", false
-	}
-	rest := strings.TrimPrefix(line, prefix)
-	left, rest, ok := parsePathToken(rest)
-	if !ok {
-		return "", "", false
-	}
-	right, _, ok := parsePathToken(rest)
-	if !ok {
-		return "", "", false
-	}
-	return sanitizePatchPath(left), sanitizePatchPath(right), true
 }
 
 func parsePathToken(input string) (string, string, bool) {
@@ -593,6 +610,30 @@ func readQuotedToken(s string) (string, string, bool) {
 	return "", "", false
 }
 
+func readQuotedTokenBytes(s []byte) ([]byte, []byte, bool) {
+	if len(s) == 0 || s[0] != '"' {
+		return nil, nil, false
+	}
+	escaped := false
+	for i := 1; i < len(s); i++ {
+		ch := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == '"' {
+			token := s[:i+1]
+			rest := bytes.TrimLeft(s[i+1:], " ")
+			return token, rest, true
+		}
+	}
+	return nil, nil, false
+}
+
 func parseMaybeQuotedPath(path string) string {
 	if path == "" {
 		return path
@@ -607,6 +648,23 @@ func parseMaybeQuotedPath(path string) string {
 		}
 	}
 	return unescapeGitPath(path)
+}
+
+func parseMaybeQuotedPathBytes(path []byte) string {
+	if len(path) == 0 {
+		return ""
+	}
+	if path[0] == '"' {
+		token, _, ok := readQuotedTokenBytes(path)
+		if ok {
+			text := string(token)
+			if unquoted, err := strconv.Unquote(text); err == nil {
+				return unquoted
+			}
+			return strings.Trim(text, "\"")
+		}
+	}
+	return unescapeGitPath(string(path))
 }
 
 func unescapeGitPath(path string) string {
