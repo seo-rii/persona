@@ -17,6 +17,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func readPatchStore(store *PatchStore) ([]byte, error) {
+	file, err := store.OpenRead()
+	if err != nil || file == nil {
+		return nil, err
+	}
+	defer file.Close()
+	return readAllFile(file)
+}
+
 func TestValidatePatchPathsOK(t *testing.T) {
 	patch := strings.Join([]string{
 		"diff --git a/foo.txt b/foo.txt",
@@ -714,7 +723,7 @@ func TestPatchStoreStaysOnOpenedDirectoryAcrossPathMove(t *testing.T) {
 		t.Fatalf("write replacement patch: %v", err)
 	}
 
-	data, err := store.ReadAll()
+	data, err := readPatchStore(store)
 	if err != nil {
 		t.Fatalf("store read: %v", err)
 	}
@@ -1030,7 +1039,7 @@ func TestPatchStoreReadAllMissingReturnsNil(t *testing.T) {
 		t.Fatalf("open patch store: %v", err)
 	}
 	defer store.Close()
-	data, err := store.ReadAll()
+	data, err := readPatchStore(store)
 	if err != nil {
 		t.Fatalf("ReadAll error: %v", err)
 	}
@@ -1052,7 +1061,7 @@ func TestPatchStoreReadAllAllowsPatchAtSizeLimit(t *testing.T) {
 		t.Fatalf("open patch store: %v", err)
 	}
 	defer store.Close()
-	data, err := store.ReadAll()
+	data, err := readPatchStore(store)
 	if err != nil {
 		t.Fatalf("ReadAll error: %v", err)
 	}
@@ -1076,7 +1085,7 @@ func TestPatchStoreReadAllRejectsPatchOverSizeLimit(t *testing.T) {
 		t.Fatalf("open patch store: %v", err)
 	}
 	defer store.Close()
-	data, err := store.ReadAll()
+	data, err := readPatchStore(store)
 	if err == nil {
 		t.Fatal("expected oversize patch read to fail")
 	}
@@ -1125,7 +1134,7 @@ func TestPatchStoreReadAllRejectsStreamingInputOverSizeLimit(t *testing.T) {
 		t.Fatalf("open patch store: %v", err)
 	}
 	defer store.Close()
-	data, err := store.ReadAll()
+	data, err := readPatchStore(store)
 	if err == nil {
 		t.Fatal("expected oversize streaming patch read to fail")
 	}

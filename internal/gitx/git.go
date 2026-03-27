@@ -19,6 +19,14 @@ type Git struct {
 	Verbose  bool
 }
 
+type alreadyExistsApplyError struct {
+	error
+}
+
+func (alreadyExistsApplyError) AlreadyExists() bool {
+	return true
+}
+
 // Compile-time check that Git satisfies model.GitOps.
 var _ model.GitOps = (*Git)(nil)
 
@@ -313,6 +321,18 @@ func (g Git) env() []string {
 
 func (g Git) envWith(workTree, gitDir string) []string {
 	base := FilterGitEnv(os.Environ())
+	filtered := base[:0]
+	for _, item := range base {
+		if idx := strings.IndexByte(item, '='); idx > 0 {
+			switch item[:idx] {
+			case "LANG", "LC_ALL", "LC_MESSAGES":
+				continue
+			}
+		}
+		filtered = append(filtered, item)
+	}
+	base = filtered
+	base = append(base, "LANG=C", "LC_ALL=C")
 	if workTree != "" {
 		base = append(base, "GIT_WORK_TREE="+workTree)
 	}
@@ -378,7 +398,11 @@ func (g Git) gitRunWithReader(ctx context.Context, dir string, env []string, inp
 		_, _ = os.Stderr.Write(out)
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, truncateOutput(string(out)))
+		wrapped := fmt.Errorf("%w: %s", err, truncateOutput(string(out)))
+		if strings.Contains(string(out), "already exists in working directory") {
+			return alreadyExistsApplyError{error: wrapped}
+		}
+		return wrapped
 	}
 	return nil
 }

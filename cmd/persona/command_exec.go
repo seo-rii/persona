@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -110,14 +109,6 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 	}
 	fmt.Fprintln(os.Stderr, err)
 	return 127
-}
-
-func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string) ([]byte, error) {
-	var out bytes.Buffer
-	if _, err := exportPatchToWriter(ctx, g, repoRoot, gitDir, patchInRepo, patchRel, ignoredMode, ignoredMax, initialIgnored, &out); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
 }
 
 func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string, out io.Writer) (int, error) {

@@ -73,15 +73,6 @@ func (s *PatchStore) OpenRead() (*os.File, error) {
 	return openReadAt(s.dir, s.name)
 }
 
-func (s *PatchStore) ReadAll() ([]byte, error) {
-	file, err := s.OpenRead()
-	if err != nil || file == nil {
-		return nil, err
-	}
-	defer file.Close()
-	return readAllFile(file)
-}
-
 func (s *PatchStore) WriteAll(data []byte) error {
 	return s.WriteFromReader(bytes.NewReader(data))
 }
@@ -386,6 +377,12 @@ func ValidatePatchReader(reader io.Reader) error {
 func IsAlreadyExistsError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var tagged interface {
+		AlreadyExists() bool
+	}
+	if errors.As(err, &tagged) && tagged.AlreadyExists() {
+		return true
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "already exists in working directory") || strings.Contains(msg, "existiert bereits")

@@ -20,6 +20,14 @@ import (
 	"persona/internal/testutil"
 )
 
+func exportPatchBytes(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string) ([]byte, error) {
+	var out bytes.Buffer
+	if _, err := exportPatchToWriter(ctx, g, repoRoot, gitDir, patchInRepo, patchRel, ignoredMode, ignoredMax, initialIgnored, &out); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
 func TestExportPatchSortAndExclude(t *testing.T) {
 	repo := testutil.InitRepo(t)
 	testutil.WriteFile(t, filepath.Join(repo, "b.txt"), "b\n")
@@ -27,7 +35,7 @@ func TestExportPatchSortAndExclude(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch1, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
+	patch1, err := exportPatchBytes(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -46,7 +54,7 @@ func TestExportPatchSortAndExclude(t *testing.T) {
 		t.Fatalf("unexpected .git path in patch")
 	}
 
-	patch2, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
+	patch2, err := exportPatchBytes(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch second call error: %v", err)
 	}
@@ -60,7 +68,7 @@ func TestExportPatchIncludesPatchFileWhenNotExcluded(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "state.patch"), "seed\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, false, "", model.IgnoredTransparent, 0, nil)
+	patch, err := exportPatchBytes(context.Background(), g, repo, g.GitDir, false, "", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -82,7 +90,7 @@ func TestExportPatchSkipsVanishedUntrackedFiles(t *testing.T) {
 		},
 	}
 
-	patch, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	patch, err := exportPatchBytes(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -99,7 +107,7 @@ func TestExportPatchFailsOnNewIgnoredCandidates(t *testing.T) {
 		ignored: []string{"late-ignored.txt"},
 	}
 
-	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 1, nil)
+	_, err := exportPatchBytes(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 1, nil)
 	if err == nil {
 		t.Fatalf("expected error when new ignored candidates appear after child run")
 	}
@@ -113,7 +121,7 @@ func TestExportPatchFailsOnNewIgnoredCandidatesInTransparentMode(t *testing.T) {
 		ignored: []string{"late-ignored.txt"},
 	}
 
-	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredTransparent, 1, nil)
+	_, err := exportPatchBytes(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredTransparent, 1, nil)
 	if err == nil {
 		t.Fatal("expected error when transparent mode ignored set changes after child run")
 	}
@@ -127,7 +135,7 @@ func TestExportPatchFailsWhenIgnoredCandidateCapExceeded(t *testing.T) {
 		ignored: []string{"a.tmp", "b.tmp", "c.tmp"},
 	}
 
-	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"a.tmp", "b.tmp"})
+	_, err := exportPatchBytes(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"a.tmp", "b.tmp"})
 	if err == nil {
 		t.Fatal("expected ignored-max overflow to fail")
 	}
@@ -141,7 +149,7 @@ func TestExportPatchIgnoredDriftDetectsNewCandidatesWithinIgnoredMax(t *testing.
 		ignored: []string{"a.tmp", "b.tmp"},
 	}
 
-	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"a.tmp"})
+	_, err := exportPatchBytes(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"a.tmp"})
 	if err == nil {
 		t.Fatalf("expected new ignored candidate within ignored-max to fail")
 	}
@@ -155,7 +163,7 @@ func TestExportPatchFailsOnIgnoredToUnignoredTransition(t *testing.T) {
 		ignored: []string{"keep.tmp"},
 	}
 
-	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"keep.tmp", "gone.tmp"})
+	_, err := exportPatchBytes(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 2, []string{"keep.tmp", "gone.tmp"})
 	if err == nil {
 		t.Fatal("expected ignored-to-unignored transition to fail")
 	}
@@ -169,7 +177,7 @@ func TestExportPatchIgnoredMaxZeroSkipsIgnoredDriftCheck(t *testing.T) {
 		ignoredErr: errors.New("should not list ignored candidates"),
 	}
 
-	patch, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 0, nil)
+	patch, err := exportPatchBytes(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredReadonly, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -198,7 +206,7 @@ func TestExportPatchWarnsAndSkipsSpecialFiles(t *testing.T) {
 	}
 	oldStderr := os.Stderr
 	os.Stderr = stderrW
-	patch, patchErr := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	patch, patchErr := exportPatchBytes(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
 	_ = stderrW.Close()
 	os.Stderr = oldStderr
 	warn, readErr := io.ReadAll(stderrR)
@@ -229,7 +237,7 @@ func TestBinaryNewFileRoundTrip(t *testing.T) {
 	}
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
 
-	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, false, "", model.IgnoredTransparent, 0, nil)
+	patch, err := exportPatchBytes(context.Background(), g, repo, g.GitDir, false, "", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -266,7 +274,7 @@ func TestExportPatchFailsWhenAccumulatedDiffExceedsSizeLimit(t *testing.T) {
 		},
 	}
 
-	_, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	_, err := exportPatchBytes(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
 	if err == nil {
 		t.Fatal("expected accumulated patch size overflow to fail")
 	}
@@ -281,7 +289,7 @@ func TestExportPatchFailsOnOversizeTrackedDiffBeforeListingUntracked(t *testing.
 		untrackedErr: errors.New("ListUntracked should not be called after tracked overflow"),
 	}
 
-	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredTransparent, 0, nil)
+	_, err := exportPatchBytes(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredTransparent, 0, nil)
 	if err == nil {
 		t.Fatal("expected oversize tracked diff to fail")
 	}
@@ -296,7 +304,7 @@ func TestExportPatchAllowsExactSizeLimit(t *testing.T) {
 		tracked: bytes.Repeat([]byte("t"), patchio.MaxPatchBytes),
 	}
 
-	patch, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	patch, err := exportPatchBytes(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -322,7 +330,7 @@ func TestExportPatchAllowsExactSizeLimitByAppend(t *testing.T) {
 		},
 	}
 
-	patch, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	patch, err := exportPatchBytes(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -347,7 +355,7 @@ func TestExportPatchAllowsExactSizeLimitFromFirstUntracked(t *testing.T) {
 		},
 	}
 
-	patch, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	patch, err := exportPatchBytes(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -372,7 +380,7 @@ func TestExportPatchFailsWhenLateAppendCrossesSizeLimit(t *testing.T) {
 		},
 	}
 
-	_, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	_, err := exportPatchBytes(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
 	if err == nil {
 		t.Fatal("expected late append overflow to fail")
 	}
@@ -393,7 +401,7 @@ func TestExportPatchExcludesTrackedPatchState(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "other.txt"), "other\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
+	patch, err := exportPatchBytes(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}
@@ -415,7 +423,7 @@ func TestExportPatchExcludesUntrackedPatchLockFile(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, "other.txt"), "other\n")
 
 	g := &gitx.Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
-	patch, err := exportPatch(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
+	patch, err := exportPatchBytes(context.Background(), g, repo, g.GitDir, true, "state.patch", model.IgnoredTransparent, 0, nil)
 	if err != nil {
 		t.Fatalf("exportPatch error: %v", err)
 	}

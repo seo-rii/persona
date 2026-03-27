@@ -381,6 +381,28 @@ func TestFilterGitEnvStripsAllGitVarsButKeepsOthers(t *testing.T) {
 	}
 }
 
+func TestEnvWithForcesCLocaleOverCallerLocale(t *testing.T) {
+	t.Setenv("LANG", "de_DE.UTF-8")
+	t.Setenv("LC_ALL", "ko_KR.UTF-8")
+	g := Git{RepoRoot: "/repo", GitDir: "/repo/.git"}
+
+	env := g.envWith("/repo", "/repo/.git")
+	var foundLang, foundLCAll bool
+	for _, item := range env {
+		switch item {
+		case "LANG=C":
+			foundLang = true
+		case "LC_ALL=C":
+			foundLCAll = true
+		case "LANG=de_DE.UTF-8", "LC_ALL=ko_KR.UTF-8":
+			t.Fatalf("caller locale must not leak into internal git env: %v", env)
+		}
+	}
+	if !foundLang || !foundLCAll {
+		t.Fatalf("expected internal git env to force C locale, got %v", env)
+	}
+}
+
 func TestTruncateOutputAddsMarker(t *testing.T) {
 	msg := strings.Repeat("x", maxErrOutput+1)
 	got := truncateOutput(msg)
