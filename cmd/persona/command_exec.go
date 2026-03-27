@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -166,9 +165,9 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 	untracked = patchio.FilterUntrackedPaths(untracked, excludePrefixes, excludeExact)
 	sort.Strings(untracked)
 
-	buf := &bytes.Buffer{}
+	var patchOut []byte
 	if len(tracked) > 0 {
-		buf = bytes.NewBuffer(tracked[:len(tracked):len(tracked)])
+		patchOut = tracked[:len(tracked):len(tracked)]
 	}
 	for _, path := range untracked {
 		absPath := filepath.Join(repoRoot, filepath.FromSlash(path))
@@ -191,14 +190,14 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 			}
 			return nil, err
 		}
-		if err := patchio.CheckPatchSize(buf.Len() + len(patch)); err != nil {
+		if err := patchio.CheckPatchSize(len(patchOut) + len(patch)); err != nil {
 			return nil, err
 		}
-		if buf.Len() == 0 {
-			buf = bytes.NewBuffer(patch[:len(patch):len(patch)])
+		if len(patchOut) == 0 {
+			patchOut = patch[:len(patch):len(patch)]
 			continue
 		}
-		buf.Write(patch)
+		patchOut = append(patchOut, patch...)
 	}
-	return buf.Bytes(), nil
+	return patchOut, nil
 }
