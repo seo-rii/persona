@@ -1,6 +1,7 @@
 package patchio
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
@@ -412,10 +413,6 @@ func shouldSkipNewFileBlock(block patchBlock, workTree string) bool {
 	if !block.isNew || block.isBinary || block.path == "" {
 		return false
 	}
-	content, ok, noFinalNL := extractNewFileContent(block.lines)
-	if !ok {
-		return false
-	}
 	path := filepath.Join(workTree, filepath.FromSlash(block.path))
 	info, err := os.Lstat(path)
 	if err != nil || info.IsDir() || !info.Mode().IsRegular() {
@@ -428,23 +425,12 @@ func shouldSkipNewFileBlock(block patchBlock, workTree string) bool {
 			}
 		}
 	}
-	existing, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	if noFinalNL {
-		return bytes.Equal(existing, content)
-	}
-	return bytes.Equal(existing, content)
-}
-
-func extractNewFileContent(lines [][]byte) ([]byte, bool, bool) {
-	var out bytes.Buffer
+	var expectedSize int64
 	inHunk := false
 	sawHeader := false
 	sawHunk := false
 	noFinalNL := false
-	for _, line := range lines {
+	for _, line := range block.lines {
 		raw := trimLineBytes(line)
 		if bytes.HasPrefix(raw, []byte("+++ ")) {
 			sawHeader = true
@@ -462,18 +448,65 @@ func extractNewFileContent(lines [][]byte) ([]byte, bool, bool) {
 			continue
 		}
 		if len(raw) > 0 && raw[0] == '+' {
-			out.Write(raw[1:])
-			out.WriteByte('\n')
+			expectedSize += int64(len(raw))
 		}
 	}
 	if !sawHunk && !sawHeader {
-		return nil, false, false
+		return false
 	}
-	content := out.Bytes()
-	if noFinalNL && bytes.HasSuffix(content, []byte("\n")) {
-		content = content[:len(content)-1]
+	if noFinalNL && expectedSize > 0 {
+		expectedSize--
 	}
-	return content, true, noFinalNL
+	if info.Size() != expectedSize {
+		return false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	reader := bufio.NewReader(file)
+	scratch := make([]byte, 32*1024)
+	inHunk = false
+	remaining := expectedSize
+	for _, line := range block.lines {
+		raw := trimLineBytes(line)
+		if bytes.HasPrefix(raw, []byte("@@ ")) {
+			inHunk = true
+			continue
+		}
+		if !inHunk || bytes.Equal(raw, []byte("\\ No newline at end of file")) {
+			continue
+		}
+		if len(raw) == 0 || raw[0] != '+' {
+			continue
+		}
+		content := raw[1:]
+		for len(content) > 0 {
+			n := len(content)
+			if n > len(scratch) {
+				n = len(scratch)
+			}
+			if _, err := io.ReadFull(reader, scratch[:n]); err != nil {
+				return false
+			}
+			if !bytes.Equal(scratch[:n], content[:n]) {
+				return false
+			}
+			content = content[n:]
+			remaining -= int64(n)
+		}
+		if remaining == 0 {
+			continue
+		}
+		b, err := reader.ReadByte()
+		if err != nil || b != '\n' {
+			return false
+		}
+		remaining--
+	}
+	_, err = reader.ReadByte()
+	return err == io.EOF && remaining == 0
 }
 
 func parseDiffGitPath(line string) string {
