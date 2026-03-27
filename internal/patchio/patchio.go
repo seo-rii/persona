@@ -253,13 +253,7 @@ func ValidatePatchPaths(patch []byte) error {
 			continue
 		}
 		if bytes.HasPrefix(line, []byte("+++ ")) || bytes.HasPrefix(line, []byte("--- ")) {
-			path := line[4:]
-			if n := len(path); n > 0 && path[n-1] == '\n' {
-				path = path[:n-1]
-			}
-			if n := len(path); n > 0 && path[n-1] == '\r' {
-				path = path[:n-1]
-			}
+			path := trimLineBytes(line[4:])
 			if bytes.Equal(path, []byte("/dev/null")) {
 				continue
 			}
@@ -308,11 +302,7 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 	if len(rawLines) > 0 && len(rawLines[len(rawLines)-1]) == 0 {
 		rawLines = rawLines[:len(rawLines)-1]
 	}
-	lines := make([]string, 0, len(rawLines))
-	for _, raw := range rawLines {
-		lines = append(lines, string(raw))
-	}
-	blocks := parsePatchBlocks(lines)
+	blocks := parsePatchBlocks(rawLines)
 	if len(blocks) == 0 {
 		return patch, nil, nil
 	}
@@ -334,50 +324,50 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 			continue
 		}
 		for _, line := range block.lines {
-			out.WriteString(line)
+			out.Write(line)
 		}
 	}
 	return out.Bytes(), skipped, nil
 }
 
 type patchBlock struct {
-	lines    []string
+	lines    [][]byte
 	path     string
 	isNew    bool
 	isBinary bool
 	mode     string
 }
 
-func parsePatchBlocks(lines []string) []patchBlock {
+func parsePatchBlocks(lines [][]byte) []patchBlock {
 	var blocks []patchBlock
 	var current patchBlock
 	seenDiff := false
 	for _, line := range lines {
-		raw := trimLine(line)
-		if strings.HasPrefix(raw, "diff --git ") || raw == "diff --git" {
+		raw := trimLineBytes(line)
+		if bytes.HasPrefix(raw, []byte("diff --git ")) || bytes.Equal(raw, []byte("diff --git")) {
 			if seenDiff && len(current.lines) > 0 {
 				blocks = append(blocks, current)
 			}
 			seenDiff = true
-			current = patchBlock{lines: []string{line}, path: parseDiffGitPath(raw)}
+			current = patchBlock{lines: [][]byte{line}, path: parseDiffGitPath(string(raw))}
 			continue
 		}
 		if !seenDiff {
 			continue
 		}
 		current.lines = append(current.lines, line)
-		if strings.HasPrefix(raw, "new file mode ") {
+		if bytes.HasPrefix(raw, []byte("new file mode ")) {
 			current.isNew = true
-			current.mode = strings.TrimSpace(strings.TrimPrefix(raw, "new file mode "))
+			current.mode = strings.TrimSpace(strings.TrimPrefix(string(raw), "new file mode "))
 		}
-		if strings.HasPrefix(raw, "--- /dev/null") {
+		if bytes.HasPrefix(raw, []byte("--- /dev/null")) {
 			current.isNew = true
 		}
-		if strings.HasPrefix(raw, "GIT binary patch") || strings.HasPrefix(raw, "Binary files ") {
+		if bytes.HasPrefix(raw, []byte("GIT binary patch")) || bytes.HasPrefix(raw, []byte("Binary files ")) {
 			current.isBinary = true
 		}
-		if strings.HasPrefix(raw, "+++ ") && current.path == "" {
-			current.path = parsePlusPath(raw)
+		if bytes.HasPrefix(raw, []byte("+++ ")) && current.path == "" {
+			current.path = parsePlusPath(string(raw))
 		}
 	}
 	if len(current.lines) > 0 {
@@ -411,23 +401,23 @@ func shouldSkipNewFileBlock(block patchBlock, workTree string) bool {
 		return false
 	}
 	if noFinalNL {
-		return string(existing) == content
+		return bytes.Equal(existing, content)
 	}
-	return bytes.Equal(existing, []byte(content))
+	return bytes.Equal(existing, content)
 }
 
-func extractNewFileContent(lines []string) (string, bool, bool) {
-	var out strings.Builder
+func extractNewFileContent(lines [][]byte) ([]byte, bool, bool) {
+	var out bytes.Buffer
 	inHunk := false
 	sawHeader := false
 	sawHunk := false
 	noFinalNL := false
 	for _, line := range lines {
-		raw := trimLine(line)
-		if strings.HasPrefix(raw, "+++ ") {
+		raw := trimLineBytes(line)
+		if bytes.HasPrefix(raw, []byte("+++ ")) {
 			sawHeader = true
 		}
-		if strings.HasPrefix(raw, "@@ ") {
+		if bytes.HasPrefix(raw, []byte("@@ ")) {
 			inHunk = true
 			sawHunk = true
 			continue
@@ -435,21 +425,21 @@ func extractNewFileContent(lines []string) (string, bool, bool) {
 		if !inHunk {
 			continue
 		}
-		if raw == "\\ No newline at end of file" {
+		if bytes.Equal(raw, []byte("\\ No newline at end of file")) {
 			noFinalNL = true
 			continue
 		}
-		if strings.HasPrefix(raw, "+") {
-			out.WriteString(raw[1:])
-			out.WriteString("\n")
+		if len(raw) > 0 && raw[0] == '+' {
+			out.Write(raw[1:])
+			out.WriteByte('\n')
 		}
 	}
 	if !sawHunk && !sawHeader {
-		return "", false, false
+		return nil, false, false
 	}
-	content := out.String()
-	if noFinalNL && strings.HasSuffix(content, "\n") {
-		content = strings.TrimSuffix(content, "\n")
+	content := out.Bytes()
+	if noFinalNL && bytes.HasSuffix(content, []byte("\n")) {
+		content = content[:len(content)-1]
 	}
 	return content, true, noFinalNL
 }
@@ -632,15 +622,25 @@ func parseFileMode(mode string) (os.FileMode, bool) {
 	return os.FileMode(val) & 0o777, true
 }
 
-func splitLinesKeepEOL(input string) []string {
+func splitLinesKeepEOL(input string) [][]byte {
 	if input == "" {
 		return nil
 	}
-	lines := strings.SplitAfter(input, "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
+	lines := bytes.SplitAfter([]byte(input), []byte("\n"))
+	if len(lines) > 0 && len(lines[len(lines)-1]) == 0 {
 		lines = lines[:len(lines)-1]
 	}
 	return lines
+}
+
+func trimLineBytes(line []byte) []byte {
+	if n := len(line); n > 0 && line[n-1] == '\n' {
+		line = line[:n-1]
+	}
+	if n := len(line); n > 0 && line[n-1] == '\r' {
+		line = line[:n-1]
+	}
+	return line
 }
 
 func trimLine(line string) string {
