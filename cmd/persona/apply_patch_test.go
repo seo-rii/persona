@@ -18,6 +18,18 @@ import (
 	"persona/internal/testutil"
 )
 
+type taggedAlreadyExistsError struct {
+	msg string
+}
+
+func (e taggedAlreadyExistsError) Error() string {
+	return e.msg
+}
+
+func (e taggedAlreadyExistsError) AlreadyExists() bool {
+	return true
+}
+
 func TestApplyPatchDataRetriesWithoutEnglishErrorString(t *testing.T) {
 	repoRoot := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
@@ -42,6 +54,40 @@ func TestApplyPatchDataRetriesWithoutEnglishErrorString(t *testing.T) {
 	}
 	if g.applyCalls != 1 {
 		t.Fatalf("expected a single apply attempt when filtered patch is empty, got %d", g.applyCalls)
+	}
+}
+
+func TestApplyPatchDataRetriesTaggedAlreadyExistsErrorWithMixedPatch(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"diff --git a/other.txt b/other.txt",
+		"new file mode 100644",
+		"index 0000000..3e75765",
+		"--- /dev/null",
+		"+++ b/other.txt",
+		"@@ -0,0 +1 @@",
+		"+other",
+		"",
+	}, "\n")
+	g := &applyRetryGitOps{
+		applyErrs: []error{taggedAlreadyExistsError{msg: "Datei existiert bereits"}, nil},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyStrict, []byte(patch), repoRoot, "", log)
+	if err != nil {
+		t.Fatalf("expected tagged already-exists error to retry filtered mixed patch, got %v", err)
+	}
+	if g.applyCalls != 2 {
+		t.Fatalf("expected two apply attempts, got %d", g.applyCalls)
 	}
 }
 
@@ -93,7 +139,7 @@ func TestApplyPatchDataRetriesWhenLocalizedExistingFileErrorLeavesFilteredPatch(
 		"+same",
 		"diff --git a/other.txt b/other.txt",
 		"new file mode 100644",
-		"index 0000000..d95f3ad",
+		"index 0000000..e45c9c2",
 		"--- /dev/null",
 		"+++ b/other.txt",
 		"@@ -0,0 +1 @@",
@@ -393,6 +439,50 @@ func TestApplyPatchStoreUsesReaderApplyPath(t *testing.T) {
 	}
 	if g.applyReaderCalls != 1 {
 		t.Fatalf("expected one reader apply attempt, got %d", g.applyReaderCalls)
+	}
+}
+
+func TestApplyPatchStoreRetriesTaggedAlreadyExistsErrorWithMixedPatch(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patchPath := filepath.Join(t.TempDir(), "state.patch")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"diff --git a/other.txt b/other.txt",
+		"new file mode 100644",
+		"index 0000000..3e75765",
+		"--- /dev/null",
+		"+++ b/other.txt",
+		"@@ -0,0 +1 @@",
+		"+other",
+		"",
+	}, "\n")
+	if err := os.WriteFile(patchPath, []byte(patch), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+	store, err := patchio.OpenPatchStore(patchPath)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	g := &applyRetryGitOps{
+		applyReaderErrs: []error{taggedAlreadyExistsError{msg: "Datei existiert bereits"}, nil},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err = applyPatchStore(context.Background(), g, model.ApplyStrict, store, repoRoot, "", t.TempDir(), log)
+	if err != nil {
+		t.Fatalf("expected tagged already-exists error to retry filtered mixed patch, got %v", err)
+	}
+	if g.applyReaderCalls != 2 {
+		t.Fatalf("expected two reader apply attempts, got %d", g.applyReaderCalls)
 	}
 }
 
