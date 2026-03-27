@@ -65,6 +65,21 @@ func TestNewRootCmdDoesNotExposeIgnoredScopeFlag(t *testing.T) {
 	}
 }
 
+func TestNewRootCmdExposesVersionSurface(t *testing.T) {
+	cmd := newRootCmd()
+	flag := cmd.Flags().Lookup("version")
+	if flag == nil {
+		t.Fatal("expected --version flag to exist")
+	}
+	sub, _, err := cmd.Find([]string{"version"})
+	if err != nil {
+		t.Fatalf("find version command: %v", err)
+	}
+	if sub == nil || sub.Name() != "version" {
+		t.Fatalf("expected version command, got %#v", sub)
+	}
+}
+
 func TestPatchStateRelPaths(t *testing.T) {
 	got := patchStateRelPaths("state.patch")
 	if len(got) != 2 || got[0] != "state.patch" || got[1] != "state.patch.lock" {

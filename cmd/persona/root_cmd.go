@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const personaVersion = "v0.2.0"
+
 func newRootCmd() *cobra.Command {
 	var (
 		patchPath      string
@@ -28,6 +30,7 @@ func newRootCmd() *cobra.Command {
 		applyMode   string
 		keepSession string
 		verbose     bool
+		showVersion bool
 	)
 
 	cmd := &cobra.Command{
@@ -37,6 +40,10 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		Args:          cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if showVersion {
+				fmt.Fprintln(os.Stdout, personaVersion)
+				return nil
+			}
 			if len(args) == 0 {
 				fmt.Fprintln(os.Stderr, "command is required")
 				_ = cmd.Help()
@@ -80,7 +87,15 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&applyMode, "apply-mode", string(model.ApplyStrict), "apply mode: strict | reject")
 	cmd.Flags().StringVar(&keepSession, "keep-session", string(model.KeepOnFail), "keep session: on-fail | always | never")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "enable verbose logging")
+	cmd.Flags().BoolVar(&showVersion, "version", false, "print the current persona CLI version and exit")
 
+	cmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print the current persona CLI version",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Fprintln(os.Stdout, personaVersion)
+		},
+	})
 	addDiagnosticCommands(cmd)
 	return cmd
 }

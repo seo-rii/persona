@@ -169,6 +169,7 @@ func TestReadmeDocumentsCorePersonaFlagsFromHelp(t *testing.T) {
 	readme := string(data)
 	help := personaHelp(t, repoRoot)
 	for _, flag := range []string{
+		"--version",
 		"--patch",
 		"--patch-dir",
 		"--print-patch-path",
@@ -219,7 +220,7 @@ func TestReadmeDocumentsCorePersonaCommandsFromHelp(t *testing.T) {
 	}
 	readme := string(data)
 	help := personaHelp(t, repoRoot)
-	for _, cmd := range []string{"activate", "doctor"} {
+	for _, cmd := range []string{"activate", "doctor", "version"} {
 		if !strings.Contains(help, cmd) {
 			t.Fatalf("persona --help missing core command %s:\n%s", cmd, help)
 		}
@@ -244,6 +245,49 @@ func TestReadmeDocumentsActivateFlagsFromHelp(t *testing.T) {
 		if !strings.Contains(readme, flag) {
 			t.Fatalf("README missing documented activate flag %s:\n%s", flag, readme)
 		}
+	}
+}
+
+func TestReadmeDocumentsVersionSurface(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	help := personaHelp(t, repoRoot)
+	if !strings.Contains(help, "--version") {
+		t.Fatalf("persona --help missing --version flag:\n%s", help)
+	}
+	for _, want := range []string{
+		"# persona (v0.2.0)",
+		"`persona version`: print the current persona CLI version.",
+		"`--version`: print the current persona CLI version and exit.",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing version contract %q:\n%s", want, readme)
+		}
+	}
+}
+
+func TestPersonaVersionOutputMatchesReadme(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	versionOut := personaOutput(t, repoRoot, "--version")
+	versionOut = strings.TrimSpace(versionOut)
+	if versionOut == "" {
+		t.Fatal("expected non-empty version output")
+	}
+	if !strings.Contains(readme, "# persona ("+versionOut+")") {
+		t.Fatalf("README header must match persona --version output %q:\n%s", versionOut, readme)
+	}
+	subcommandOut := strings.TrimSpace(personaOutput(t, repoRoot, "version"))
+	if subcommandOut != versionOut {
+		t.Fatalf("expected persona version to match --version: %q vs %q", subcommandOut, versionOut)
 	}
 }
 
@@ -399,24 +443,23 @@ func repoRoot(t *testing.T) string {
 
 func personaHelp(t *testing.T, repoRoot string) string {
 	t.Helper()
-	cmd := exec.Command("go", "run", "./cmd/persona", "--help")
-	cmd.Dir = repoRoot
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("persona --help failed: %v\n%s", err, out)
-	}
-	return string(out)
+	return personaOutput(t, repoRoot, "--help")
 }
 
 func personaSubcommandHelp(t *testing.T, repoRoot string, args ...string) string {
 	t.Helper()
+	cmdArgs := append(append([]string{}, args...), "--help")
+	return personaOutput(t, repoRoot, cmdArgs...)
+}
+
+func personaOutput(t *testing.T, repoRoot string, args ...string) string {
+	t.Helper()
 	cmdArgs := append([]string{"run", "./cmd/persona"}, args...)
-	cmdArgs = append(cmdArgs, "--help")
 	cmd := exec.Command("go", cmdArgs...)
 	cmd.Dir = repoRoot
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("persona %s --help failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("persona %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
 }
