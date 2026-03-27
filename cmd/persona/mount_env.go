@@ -37,10 +37,7 @@ func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *
 		if err := g.WorktreeAddDetach(ctx, sess.BaseWT, opts.BaseRef); err != nil {
 			return "", model.Wrap(model.ExitRepo, "git worktree add", err)
 		}
-		cleanup.Push(func() error {
-			if retErr != nil && !shouldRemoveSession(*retErr, opts) {
-				return nil
-			}
+		pushKeepSessionCleanup(cleanup, retErr, opts, func() error {
 			return g.WorktreeRemoveForce(context.Background(), sess.BaseWT)
 		})
 		return sess.BaseWT, nil

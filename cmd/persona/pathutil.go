@@ -109,6 +109,18 @@ func patchStateRelPaths(patchRel string) []string {
 	return []string{patchRel, patchRel + ".lock"}
 }
 
+func pushKeepSessionCleanup(cleanup *cleanupStack, retErr *error, opts model.Options, fn func() error) {
+	if cleanup == nil || fn == nil {
+		return
+	}
+	cleanup.Push(func() error {
+		if retErr != nil && !shouldRemoveSession(*retErr, opts) {
+			return nil
+		}
+		return fn()
+	})
+}
+
 func shouldRemoveSession(err error, opts model.Options) bool {
 	switch opts.KeepSession {
 	case model.KeepAlways:

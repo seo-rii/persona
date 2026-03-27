@@ -1233,6 +1233,38 @@ func TestCleanupStackRunOrderAndErrors(t *testing.T) {
 	}
 }
 
+func TestPushKeepSessionCleanupHonorsPolicy(t *testing.T) {
+	var cleanup cleanupStack
+	calls := 0
+	retErr := error(nil)
+	opts := model.Options{KeepSession: model.KeepOnFail}
+
+	pushKeepSessionCleanup(&cleanup, &retErr, opts, func() error {
+		calls++
+		return nil
+	})
+	if err := cleanup.Run(); err != nil {
+		t.Fatalf("cleanup run: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected cleanup to run on success, got %d calls", calls)
+	}
+
+	cleanup = cleanupStack{}
+	calls = 0
+	retErr = errors.New("fail")
+	pushKeepSessionCleanup(&cleanup, &retErr, opts, func() error {
+		calls++
+		return nil
+	})
+	if err := cleanup.Run(); err != nil {
+		t.Fatalf("cleanup run: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("expected cleanup to be skipped when session is kept, got %d calls", calls)
+	}
+}
+
 func TestRunCommandExitCodes(t *testing.T) {
 	t.Run("no command", func(t *testing.T) {
 		if code := runCommand(t.TempDir(), ".", nil); code != 0 {

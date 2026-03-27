@@ -99,11 +99,8 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	}
 	log.Debug("session created", "root", sess.Root)
 
-	cleanup.Push(func() error {
-		if sess == nil {
-			return nil
-		}
-		if shouldRemoveSession(retErr, opts) {
+	pushKeepSessionCleanup(cleanup, &retErr, opts, func() error {
+		if sess != nil {
 			return sess.RemoveAll()
 		}
 		return nil
