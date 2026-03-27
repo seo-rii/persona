@@ -73,10 +73,6 @@ func (s *PatchStore) OpenRead() (*os.File, error) {
 	return openReadAt(s.dir, s.name)
 }
 
-func (s *PatchStore) WriteAll(data []byte) error {
-	return s.WriteFromReader(bytes.NewReader(data))
-}
-
 func (s *PatchStore) WriteFromReader(reader io.Reader) error {
 	if s == nil || s.dir == nil {
 		return errors.New("patch store is closed")
@@ -363,13 +359,6 @@ func validatePatchPathReader(reader io.Reader) error {
 	})
 }
 
-func ValidatePatchPaths(patch []byte) error {
-	if err := CheckPatchSize(len(patch)); err != nil {
-		return err
-	}
-	return validatePatchPathReader(bytes.NewReader(patch))
-}
-
 func ValidatePatchReader(reader io.Reader) error {
 	return validatePatchPathReader(reader)
 }
@@ -386,24 +375,6 @@ func IsAlreadyExistsError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "already exists in working directory") || strings.Contains(msg, "existiert bereits")
-}
-
-func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, error) {
-	if len(patch) == 0 {
-		return patch, nil, nil
-	}
-	if err := CheckPatchSize(len(patch)); err != nil {
-		return nil, nil, err
-	}
-	var out bytes.Buffer
-	skipped, err := FilterExistingNewFilesReader(bytes.NewReader(patch), workTree, &out)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(skipped) == 0 {
-		return patch, nil, nil
-	}
-	return out.Bytes(), skipped, nil
 }
 
 func FilterExistingNewFilesReader(reader io.Reader, workTree string, out io.Writer) ([]string, error) {

@@ -26,6 +26,35 @@ func readPatchStore(store *PatchStore) ([]byte, error) {
 	return readAllFile(file)
 }
 
+func (s *PatchStore) WriteAll(data []byte) error {
+	return s.WriteFromReader(bytes.NewReader(data))
+}
+
+func ValidatePatchPaths(patch []byte) error {
+	if err := CheckPatchSize(len(patch)); err != nil {
+		return err
+	}
+	return ValidatePatchReader(bytes.NewReader(patch))
+}
+
+func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, error) {
+	if len(patch) == 0 {
+		return patch, nil, nil
+	}
+	if err := CheckPatchSize(len(patch)); err != nil {
+		return nil, nil, err
+	}
+	var out bytes.Buffer
+	skipped, err := FilterExistingNewFilesReader(bytes.NewReader(patch), workTree, &out)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(skipped) == 0 {
+		return patch, nil, nil
+	}
+	return out.Bytes(), skipped, nil
+}
+
 func TestValidatePatchPathsOK(t *testing.T) {
 	patch := strings.Join([]string{
 		"diff --git a/foo.txt b/foo.txt",

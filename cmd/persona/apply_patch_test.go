@@ -77,15 +77,16 @@ func TestApplyPatchDataRetriesTaggedAlreadyExistsErrorWithMixedPatch(t *testing.
 		"+other",
 		"",
 	}, "\n")
-	filtered, skipped, ferr := patchio.FilterExistingNewFiles([]byte(patch), repoRoot)
+	var filtered bytes.Buffer
+	skipped, ferr := patchio.FilterExistingNewFilesReader(strings.NewReader(patch), repoRoot, &filtered)
 	if ferr != nil {
 		t.Fatalf("FilterExistingNewFiles error: %v", ferr)
 	}
 	if len(skipped) != 1 || skipped[0] != "same.txt" {
 		t.Fatalf("expected only same.txt to be skipped, got %v", skipped)
 	}
-	if !bytes.Contains(filtered, []byte("other.txt")) {
-		t.Fatalf("expected filtered patch to keep other.txt block, got %q", string(filtered))
+	if !bytes.Contains(filtered.Bytes(), []byte("other.txt")) {
+		t.Fatalf("expected filtered patch to keep other.txt block, got %q", filtered.String())
 	}
 	if !patchio.IsAlreadyExistsError(taggedAlreadyExistsError{msg: "same.txt: 작업 디렉터리에 이미 있습니다"}) {
 		t.Fatal("tagged already-exists marker must be accepted without relying on localized substrings")

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -16,14 +17,15 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 	if len(patchData) == 0 {
 		return nil
 	}
-	if err := patchio.ValidatePatchPaths(patchData); err != nil {
+	if err := patchio.ValidatePatchReader(bytes.NewReader(patchData)); err != nil {
 		return err
 	}
 	err := g.ApplyPatch(ctx, applyMode, repoRoot, gitDirForOps, patchData)
 	if err == nil {
 		return nil
 	}
-	filtered, skipped, ferr := patchio.FilterExistingNewFiles(patchData, repoRoot)
+	var filtered bytes.Buffer
+	skipped, ferr := patchio.FilterExistingNewFilesReader(bytes.NewReader(patchData), repoRoot, &filtered)
 	if ferr != nil || len(skipped) == 0 {
 		return err
 	}
@@ -31,13 +33,13 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 		return err
 	}
 	log.Info("apply patch: skipping existing new files", "skipped", skipped)
-	if len(filtered) == 0 {
+	if filtered.Len() == 0 {
 		return nil
 	}
 	if !shouldRetryExistingNewFileSkip(err, skipped) {
 		return err
 	}
-	if err2 := g.ApplyPatch(ctx, applyMode, repoRoot, gitDirForOps, filtered); err2 != nil {
+	if err2 := g.ApplyPatch(ctx, applyMode, repoRoot, gitDirForOps, filtered.Bytes()); err2 != nil {
 		return err2
 	}
 	return nil
