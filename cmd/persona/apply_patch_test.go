@@ -14,6 +14,7 @@ import (
 
 	"persona/internal/gitx"
 	"persona/internal/model"
+	"persona/internal/patchio"
 	"persona/internal/testutil"
 )
 
@@ -198,6 +199,30 @@ func TestApplyPatchDataEmptyPatchIsNoop(t *testing.T) {
 	}
 	if g.applyCalls != 0 {
 		t.Fatalf("expected no apply attempts, got %d", g.applyCalls)
+	}
+}
+
+func TestApplyPatchDataRejectsPatchOverSizeLimitBeforeGitCall(t *testing.T) {
+	g := &applyRetryGitOps{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(
+		context.Background(),
+		g,
+		model.ApplyStrict,
+		bytes.Repeat([]byte("a"), patchio.MaxPatchBytes+1),
+		t.TempDir(),
+		"",
+		log,
+	)
+	if err == nil {
+		t.Fatal("expected oversize patch to be rejected")
+	}
+	if g.applyCalls != 0 {
+		t.Fatalf("expected no apply attempts, got %d", g.applyCalls)
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

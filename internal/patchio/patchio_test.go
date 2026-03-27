@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1002,6 +1003,31 @@ func TestPatchStoreReadAllMissingReturnsNil(t *testing.T) {
 	}
 }
 
+func TestPatchStoreReadAllAllowsPatchAtSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.patch")
+	want := bytes.Repeat([]byte("a"), MaxPatchBytes)
+	if err := os.WriteFile(path, want, 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+
+	store, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+	data, err := store.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if len(data) != len(want) {
+		t.Fatalf("expected %d bytes, got %d", len(want), len(data))
+	}
+	if !bytes.Equal(data, want) {
+		t.Fatalf("expected exact cap-sized patch content")
+	}
+}
+
 func TestPatchStoreReadAllRejectsPatchOverSizeLimit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.patch")
@@ -1023,6 +1049,58 @@ func TestPatchStoreReadAllRejectsPatchOverSizeLimit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "patch exceeds size limit") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPatchStoreReadAllRejectsStreamingInputOverSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.patch")
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		file, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			done <- err
+			return
+		}
+		defer file.Close()
+
+		chunk := bytes.Repeat([]byte("a"), 64*1024)
+		remaining := MaxPatchBytes + 1
+		for remaining > 0 {
+			part := chunk
+			if remaining < len(part) {
+				part = part[:remaining]
+			}
+			if _, err := file.Write(part); err != nil {
+				done <- err
+				return
+			}
+			remaining -= len(part)
+		}
+		done <- nil
+	}()
+
+	store, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+	data, err := store.ReadAll()
+	if err == nil {
+		t.Fatal("expected oversize streaming patch read to fail")
+	}
+	if data != nil {
+		t.Fatalf("expected nil data on oversize streaming failure, got %d bytes", len(data))
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if writeErr := <-done; writeErr != nil && !errors.Is(writeErr, syscall.EPIPE) {
+		t.Fatalf("fifo writer error: %v", writeErr)
 	}
 }
 

@@ -293,6 +293,57 @@ func TestExportPatchAllowsExactSizeLimit(t *testing.T) {
 	}
 }
 
+func TestExportPatchAllowsExactSizeLimitByAppend(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "late.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write late.txt: %v", err)
+	}
+	want := bytes.Repeat([]byte("u"), 8)
+	g := exportGitOps{
+		tracked:   bytes.Repeat([]byte("t"), patchio.MaxPatchBytes-len(want)),
+		untracked: []string{"late.txt"},
+		diffByPath: map[string][]byte{
+			"late.txt": want,
+		},
+	}
+
+	patch, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	if err != nil {
+		t.Fatalf("exportPatch error: %v", err)
+	}
+	if len(patch) != patchio.MaxPatchBytes {
+		t.Fatalf("expected exact cap-sized patch, got %d bytes", len(patch))
+	}
+	if !bytes.Equal(patch[len(g.tracked):], want) {
+		t.Fatalf("expected appended diff to remain intact")
+	}
+}
+
+func TestExportPatchAllowsExactSizeLimitFromFirstUntracked(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "late.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write late.txt: %v", err)
+	}
+	want := bytes.Repeat([]byte("u"), patchio.MaxPatchBytes)
+	g := exportGitOps{
+		untracked: []string{"late.txt"},
+		diffByPath: map[string][]byte{
+			"late.txt": want,
+		},
+	}
+
+	patch, err := exportPatch(context.Background(), g, repo, "", false, "", model.IgnoredTransparent, 0, nil)
+	if err != nil {
+		t.Fatalf("exportPatch error: %v", err)
+	}
+	if len(patch) != patchio.MaxPatchBytes {
+		t.Fatalf("expected exact cap-sized patch, got %d bytes", len(patch))
+	}
+	if !bytes.Equal(patch, want) {
+		t.Fatalf("expected first untracked diff to pass through unchanged")
+	}
+}
+
 func TestExportPatchFailsWhenLateAppendCrossesSizeLimit(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repo, "late.txt"), []byte("seed\n"), 0o644); err != nil {

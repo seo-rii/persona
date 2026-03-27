@@ -716,7 +716,7 @@ func readAllAt(dir *os.File, name string) ([]byte, error) {
 		initialCap = int(stat.Size)
 	}
 	buf := bytes.NewBuffer(make([]byte, 0, initialCap))
-	if _, err := io.Copy(buf, file); err != nil {
+	if _, err := io.Copy(buf, io.LimitReader(file, MaxPatchBytes+1)); err != nil {
 		return nil, err
 	}
 	data := buf.Bytes()
