@@ -129,8 +129,8 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 
 func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string, out io.Writer) (int, error) {
 	if ignoredMax != 0 {
-		if ignoredMax > 0 && len(initialIgnored) > ignoredMax {
-			return 0, fmt.Errorf("ignored candidate count exceeds ignored-max %d", ignoredMax)
+		if err := checkIgnoredCandidateLimit(initialIgnored, ignoredMax); err != nil {
+			return 0, err
 		}
 		ignoredNow, err := listIgnoredCandidatesChecked(ctx, g, repoRoot, gitDir, ignoredMax)
 		if err != nil {

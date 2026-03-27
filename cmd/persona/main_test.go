@@ -75,6 +75,16 @@ func TestPatchStateRelPaths(t *testing.T) {
 	}
 }
 
+func TestCheckIgnoredCandidateLimit(t *testing.T) {
+	if err := checkIgnoredCandidateLimit([]string{"one", "two"}, 2); err != nil {
+		t.Fatalf("unexpected limit error: %v", err)
+	}
+	err := checkIgnoredCandidateLimit([]string{"one", "two", "three"}, 2)
+	if err == nil || !strings.Contains(err.Error(), "ignored-max 2") {
+		t.Fatalf("expected ignored-max overflow, got %v", err)
+	}
+}
+
 func TestListIgnoredCandidatesCheckedRejectsCapOverflow(t *testing.T) {
 	g := ignoredListGitOps{ignored: []string{"one", "two"}}
 
@@ -1039,8 +1049,8 @@ func TestMaskIgnoredFilesFailsWhenIgnoredCandidateCapExceeded(t *testing.T) {
 	if len(targets) != 0 {
 		t.Fatalf("expected no targets, got %v", targets)
 	}
-	if len(ignored) != 3 {
-		t.Fatalf("expected overflow sentinel list, got %v", ignored)
+	if ignored != nil {
+		t.Fatalf("expected ignored list to be discarded on overflow, got %v", ignored)
 	}
 	if len(mount.bindCalls) != 0 || len(mount.remountCalls) != 0 {
 		t.Fatalf("expected no mount calls, got bind=%v remount=%v", mount.bindCalls, mount.remountCalls)
