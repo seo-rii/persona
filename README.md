@@ -44,7 +44,7 @@ persona --patch /tmp/state.patch -- cat new.txt
 ## Commands
 
 - `persona doctor`: print capability/mount diagnostics and hints for permission issues.
-- `persona activate`: grant `cap_sys_admin` to the persona binary by default. Add `--allow-dac-override` only when patch writes must bypass DAC checks.
+- `persona activate`: grant `cap_sys_admin` to the persona binary by default. Use `--binary PATH` to target a different persona executable, and add `--allow-dac-override` only when patch writes must bypass DAC checks.
 
 Example:
 

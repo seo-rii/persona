@@ -189,6 +189,30 @@ func TestReadmeDocumentsCorePersonaCommandsFromHelp(t *testing.T) {
 	}
 }
 
+func TestReadmeDocumentsActivateFlagsFromHelp(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	cmd := exec.Command("go", "run", "./cmd/persona", "activate", "--help")
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("persona activate --help failed: %v\n%s", err, out)
+	}
+	help := string(out)
+	for _, flag := range []string{"--binary", "--allow-dac-override"} {
+		if !strings.Contains(help, flag) {
+			t.Fatalf("persona activate --help missing flag %s:\n%s", flag, help)
+		}
+		if !strings.Contains(readme, flag) {
+			t.Fatalf("README missing documented activate flag %s:\n%s", flag, readme)
+		}
+	}
+}
+
 func TestReadmeDocumentsIgnoredDriftOptOut(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
