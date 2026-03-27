@@ -198,19 +198,39 @@ func TestReadmeDocumentsActivateFlagsFromHelp(t *testing.T) {
 		t.Fatalf("read README: %v", err)
 	}
 	readme := string(data)
-	cmd := exec.Command("go", "run", "./cmd/persona", "activate", "--help")
-	cmd.Dir = repoRoot
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("persona activate --help failed: %v\n%s", err, out)
-	}
-	help := string(out)
+	help := personaSubcommandHelp(t, repoRoot, "activate")
 	for _, flag := range []string{"--binary", "--allow-dac-override"} {
 		if !strings.Contains(help, flag) {
 			t.Fatalf("persona activate --help missing flag %s:\n%s", flag, help)
 		}
 		if !strings.Contains(readme, flag) {
 			t.Fatalf("README missing documented activate flag %s:\n%s", flag, readme)
+		}
+	}
+}
+
+func TestReadmeDocumentsDoctorHelpSurface(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	help := personaSubcommandHelp(t, repoRoot, "doctor")
+	for _, want := range []string{
+		"Check capabilities, mounts, and prerequisites",
+		"Usage:",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("persona doctor --help missing %q:\n%s", want, help)
+		}
+	}
+	for _, want := range []string{
+		"`persona doctor`: print capability/mount diagnostics and hints for permission issues.",
+		"If your binary lives on a `nosuid` mount, file capabilities are ignored; use `sudo` or move the binary.",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing doctor guidance %q:\n%s", want, readme)
 		}
 	}
 }
@@ -272,6 +292,24 @@ func TestReadmeDocumentsExitCodeContract(t *testing.T) {
 	}
 }
 
+func TestReadmeDocumentsPrivilegedIntegrationFlow(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"sudo env \"PATH=$PATH\" PERSONA_INTEGRATION=1 $(command -v go) test ./integration -run TestPersonaIntegration",
+		"If `go` is not in the sudo PATH, keep the `env \"PATH=$PATH\"` prefix.",
+		"After changes around mount/masking, linked worktree handling, or patch export/apply boundaries, re-run the privileged integration suite",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("README missing privileged integration guidance %q:\n%s", want, text)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -288,6 +326,19 @@ func personaHelp(t *testing.T, repoRoot string) string {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("persona --help failed: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+func personaSubcommandHelp(t *testing.T, repoRoot string, args ...string) string {
+	t.Helper()
+	cmdArgs := append([]string{"run", "./cmd/persona"}, args...)
+	cmdArgs = append(cmdArgs, "--help")
+	cmd := exec.Command("go", cmdArgs...)
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("persona %s --help failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
 }
