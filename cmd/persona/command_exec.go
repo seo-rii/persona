@@ -111,7 +111,7 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 	return 127
 }
 
-func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMode model.IgnoredMode, ignoredMax int, initialIgnored []string, out io.Writer) (int, error) {
+func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMax int, initialIgnored []string, out io.Writer) (int, error) {
 	if ignoredMax != 0 {
 		if err := checkIgnoredCandidateLimit(initialIgnored, ignoredMax); err != nil {
 			return 0, err

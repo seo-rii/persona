@@ -785,31 +785,3 @@ func openReadAt(dir *os.File, name string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(fd), name), nil
 }
-
-func readAllFile(file *os.File) ([]byte, error) {
-	if file == nil {
-		return nil, nil
-	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err == nil {
-		if err := CheckPatchSize(int(stat.Size)); err != nil {
-			return nil, err
-		}
-		if stat.Mode&unix.S_IFMT == unix.S_IFREG {
-			data := make([]byte, int(stat.Size))
-			if _, err := io.ReadFull(file, data); err != nil {
-				return nil, err
-			}
-			return data, nil
-		}
-	}
-	buf := bytes.NewBuffer(nil)
-	if _, err := io.Copy(buf, io.LimitReader(file, MaxPatchBytes+1)); err != nil {
-		return nil, err
-	}
-	data := buf.Bytes()
-	if err := CheckPatchSize(len(data)); err != nil {
-		return nil, err
-	}
-	return data, nil
-}

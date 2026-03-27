@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,28 @@ func readPatchStore(store *PatchStore) ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
-	return readAllFile(file)
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err == nil {
+		if err := CheckPatchSize(int(stat.Size)); err != nil {
+			return nil, err
+		}
+		if stat.Mode&unix.S_IFMT == unix.S_IFREG {
+			data := make([]byte, int(stat.Size))
+			if _, err := io.ReadFull(file, data); err != nil {
+				return nil, err
+			}
+			return data, nil
+		}
+	}
+	buf := bytes.NewBuffer(nil)
+	if _, err := io.Copy(buf, io.LimitReader(file, MaxPatchBytes+1)); err != nil {
+		return nil, err
+	}
+	data := buf.Bytes()
+	if err := CheckPatchSize(len(data)); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (s *PatchStore) WriteAll(data []byte) error {

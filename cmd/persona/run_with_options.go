@@ -176,7 +176,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		return model.Wrap(model.ExitExport, "create export temp", err), 0
 	}
 	defer closeAndRemoveTempFile(exportFile)
-	written, err := exportPatchToWriter(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel, opts.IgnoredMode, opts.IgnoredMax, initialIgnored, exportFile)
+	written, err := exportPatchToWriter(postCtx, g, repoRoot, menv.gitDirForOps, patchInRepo, patchRel, opts.IgnoredMax, initialIgnored, exportFile)
 	if err != nil {
 		return model.Wrap(model.ExitExport, "export patch", err), 0
 	}
