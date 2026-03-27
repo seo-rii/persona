@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -126,14 +125,9 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	}
 
 	maskTargets := make([]string, 0, 16)
+	commandMaskPaths := patchStatePathsForRepo(repoRoot, patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git", patchRel).abs
 	cleanup.Push(func() error {
-		var errs []error
-		for i := len(maskTargets) - 1; i >= 0; i-- {
-			if err := mount.Umount(maskTargets[i]); err != nil {
-				errs = append(errs, err)
-			}
-		}
-		return errors.Join(errs...)
+		return umountPathsReverse(mount, maskTargets)
 	})
 	pushUmountCleanup(cleanup, mount, repoRoot)
 	cleanup.Push(func() error {
@@ -150,17 +144,11 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	}
 	maskTargets = append(maskTargets, ignoredMasks...)
 
-	var patchMaskPaths []string
-	if patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git" {
-		for _, relPath := range patchStateRelPaths(patchRel) {
-			patchMaskPaths = append(patchMaskPaths, filepath.Join(repoRoot, relPath))
+	for _, patchMaskPath := range commandMaskPaths {
+		if err := maskPathWithBacking(mount, patchMaskPath, model.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
+			return model.Wrap(model.ExitEnv, "mask patch file", err), 0
 		}
-		for _, patchMaskPath := range patchMaskPaths {
-			if err := maskPathWithBacking(mount, patchMaskPath, model.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
-				return model.Wrap(model.ExitEnv, "mask patch file", err), 0
-			}
-			maskTargets = append(maskTargets, patchMaskPath)
-		}
+		maskTargets = append(maskTargets, patchMaskPath)
 	}
 
 	var gitMaskPath string
@@ -181,12 +169,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 
 	postCtx := context.Background()
 
-	for i := len(patchMaskPaths) - 1; i >= 0; i-- {
-		_ = mount.Umount(patchMaskPaths[i])
-	}
-	if gitMaskPath != "" {
-		_ = mount.Umount(gitMaskPath)
-	}
+	_ = umountPathsReverse(mount, append(commandMaskPaths, gitMaskPath))
 
 	exportFile, err := os.CreateTemp(sess.Root, "persona-export-*.patch")
 	if err != nil {

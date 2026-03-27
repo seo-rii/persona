@@ -38,6 +38,11 @@ type exitError struct {
 	code model.ExitCode
 }
 
+type patchStatePaths struct {
+	rel []string
+	abs []string
+}
+
 func (e *exitError) Error() string {
 	return ""
 }
@@ -111,6 +116,21 @@ func patchStateRelPaths(patchRel string) []string {
 	return []string{patchRel, patchRel + ".lock"}
 }
 
+func patchStatePathsForRepo(repoRoot string, patchInRepo bool, patchRel string) patchStatePaths {
+	if !patchInRepo {
+		return patchStatePaths{}
+	}
+	relPaths := patchStateRelPaths(patchRel)
+	if len(relPaths) == 0 {
+		return patchStatePaths{}
+	}
+	absPaths := make([]string, 0, len(relPaths))
+	for _, relPath := range relPaths {
+		absPaths = append(absPaths, filepath.Join(repoRoot, relPath))
+	}
+	return patchStatePaths{rel: relPaths, abs: absPaths}
+}
+
 func closeAndRemoveTempFile(file *os.File) {
 	if file == nil {
 		return
@@ -139,6 +159,22 @@ func pushUmountCleanup(cleanup *cleanupStack, mount model.NSOps, path string) {
 	cleanup.Push(func() error {
 		return mount.Umount(path)
 	})
+}
+
+func umountPathsReverse(mount model.NSOps, paths []string) error {
+	if mount == nil {
+		return nil
+	}
+	var errs []error
+	for i := len(paths) - 1; i >= 0; i-- {
+		if paths[i] == "" {
+			continue
+		}
+		if err := mount.Umount(paths[i]); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func listIgnoredCandidatesChecked(ctx context.Context, g model.GitOps, repoRoot, gitDir string, max int) ([]string, error) {

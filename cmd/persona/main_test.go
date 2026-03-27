@@ -75,6 +75,24 @@ func TestPatchStateRelPaths(t *testing.T) {
 	}
 }
 
+func TestPatchStatePathsForRepo(t *testing.T) {
+	paths := patchStatePathsForRepo("/repo", true, "state.patch")
+	if len(paths.rel) != 2 || len(paths.abs) != 2 {
+		t.Fatalf("unexpected patch state path counts: %+v", paths)
+	}
+	if paths.rel[0] != "state.patch" || paths.rel[1] != "state.patch.lock" {
+		t.Fatalf("unexpected relative patch state paths: %+v", paths.rel)
+	}
+	if paths.abs[0] != filepath.Join("/repo", "state.patch") || paths.abs[1] != filepath.Join("/repo", "state.patch.lock") {
+		t.Fatalf("unexpected absolute patch state paths: %+v", paths.abs)
+	}
+
+	paths = patchStatePathsForRepo("/repo", false, "state.patch")
+	if len(paths.rel) != 0 || len(paths.abs) != 0 {
+		t.Fatalf("expected empty patch state paths outside repo, got %+v", paths)
+	}
+}
+
 func TestCheckIgnoredCandidateLimit(t *testing.T) {
 	if err := checkIgnoredCandidateLimit([]string{"one", "two"}, 2); err != nil {
 		t.Fatalf("unexpected limit error: %v", err)
@@ -1347,6 +1365,25 @@ func TestCloseAndRemoveTempFileRemovesPath(t *testing.T) {
 
 	if _, err := os.Stat(name); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected temp file to be removed, got %v", err)
+	}
+}
+
+func TestUmountPathsReverseSkipsEmptyAndJoinsErrors(t *testing.T) {
+	mount := &umountRecordingNSOps{
+		errs: map[string]error{
+			"/second": errors.New("second failed"),
+		},
+	}
+
+	err := umountPathsReverse(mount, []string{"/first", "", "/second"})
+	if err == nil || !strings.Contains(err.Error(), "second failed") {
+		t.Fatalf("expected joined umount error, got %v", err)
+	}
+	if len(mount.paths) != 2 {
+		t.Fatalf("expected two umount calls, got %v", mount.paths)
+	}
+	if mount.paths[0] != "/second" || mount.paths[1] != "/first" {
+		t.Fatalf("expected reverse umount order, got %v", mount.paths)
 	}
 }
 

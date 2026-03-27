@@ -20,10 +20,7 @@ func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *
 	switch opts.BaseMode {
 	case model.BaseRepo:
 		if !opts.AllowDirty {
-			excludePaths := []string{}
-			if patchInRepo && patchRel != "" && patchRel != "." {
-				excludePaths = append(excludePaths, patchStateRelPaths(patchRel)...)
-			}
+			excludePaths := patchStatePathsForRepo("", patchInRepo && patchRel != ".", patchRel).rel
 			clean, err := g.IsCleanExceptPaths(ctx, excludePaths)
 			if err != nil {
 				return "", model.Wrap(model.ExitRepo, "git clean check", err)

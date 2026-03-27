@@ -162,12 +162,7 @@ func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir s
 			return 0, fmt.Errorf("ignored paths changed during run: %s", strings.Join(problems, "; "))
 		}
 	}
-	trackedExclude := []string{}
-	if patchInRepo && patchRel != "" {
-		for _, path := range patchStateRelPaths(filepath.ToSlash(patchRel)) {
-			trackedExclude = append(trackedExclude, filepath.ToSlash(path))
-		}
-	}
+	trackedExclude := patchStatePathsForRepo("", patchInRepo, filepath.ToSlash(patchRel)).rel
 	limited := &patchLimitWriter{w: out}
 	if err := g.DiffHeadBinaryTo(ctx, repoRoot, gitDir, trackedExclude, limited); err != nil {
 		return 0, err
@@ -177,12 +172,7 @@ func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir s
 		return 0, err
 	}
 	excludePrefixes := []string{".git/"}
-	excludeExact := []string{}
-	if patchInRepo && patchRel != "" {
-		for _, path := range patchStateRelPaths(filepath.ToSlash(patchRel)) {
-			excludeExact = append(excludeExact, filepath.ToSlash(path))
-		}
-	}
+	excludeExact := patchStatePathsForRepo("", patchInRepo, filepath.ToSlash(patchRel)).rel
 	untracked = patchio.FilterUntrackedPaths(untracked, excludePrefixes, excludeExact)
 	sort.Strings(untracked)
 
