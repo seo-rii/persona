@@ -128,6 +128,23 @@ func TestReadmeDocumentsCurrentTestShCoverage(t *testing.T) {
 	}
 }
 
+func TestReadmeDocumentsTestHelperScriptBehavior(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"`test.sh` runs unit tests (`./cmd/... ./internal/...`) then integration tests.",
+		"`test_log_stderr.sh` runs unit + integration tests, appends a timestamp to the log filename, writes all output to a single log, and prints a summary at the end.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("README missing helper script contract %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestReadmeUsesRepoRelativeExamplesAndMentionsBuildCapabilities(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
