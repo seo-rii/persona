@@ -1159,6 +1159,40 @@ func TestMaskIgnoredFilesMaskedUsesDistinctBackingPerTarget(t *testing.T) {
 	}
 }
 
+func TestMaskPathWithBackingPreparesBackingAndMasks(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "masked.txt")
+	fileRoot := filepath.Join(t.TempDir(), "files")
+	dirRoot := filepath.Join(t.TempDir(), "dirs")
+	if err := os.MkdirAll(fileRoot, 0o755); err != nil {
+		t.Fatalf("mkdir file root: %v", err)
+	}
+	if err := os.MkdirAll(dirRoot, 0o755); err != nil {
+		t.Fatalf("mkdir dir root: %v", err)
+	}
+	mount := &recordingNSOps{}
+
+	if err := maskPathWithBacking(mount, target, model.MaskFile, fileRoot, dirRoot); err != nil {
+		t.Fatalf("maskPathWithBacking error: %v", err)
+	}
+	if len(mount.maskCalls) != 1 {
+		t.Fatalf("expected one mask call, got %v", mount.maskCalls)
+	}
+	call := mount.maskCalls[0]
+	if call.target != target || call.kind != model.MaskFile {
+		t.Fatalf("unexpected mask call: %+v", call)
+	}
+	if _, err := os.Stat(call.emptyFile); err != nil {
+		t.Fatalf("expected prepared empty file, got %v", err)
+	}
+	info, err := os.Stat(call.emptyDir)
+	if err != nil {
+		t.Fatalf("expected prepared empty dir, got %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected directory backing, got %v", info.Mode())
+	}
+}
+
 func TestCleanupStackRunOrderAndErrors(t *testing.T) {
 	var c cleanupStack
 	var order []int

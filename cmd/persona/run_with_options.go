@@ -160,11 +160,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		patchMaskPaths = append(patchMaskPaths, filepath.Join(repoRoot, patchRel))
 		patchMaskPaths = append(patchMaskPaths, filepath.Join(repoRoot, patchRel+".lock"))
 		for _, patchMaskPath := range patchMaskPaths {
-			maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(menv.emptyFile, menv.emptyDir, patchMaskPath)
-			if err != nil {
-				return model.Wrap(model.ExitEnv, "prepare patch mask backing", err), 0
-			}
-			if err := mount.MaskPath(patchMaskPath, model.MaskFile, maskEmptyFile, maskEmptyDir); err != nil {
+			if err := maskPathWithBacking(mount, patchMaskPath, model.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
 				return model.Wrap(model.ExitEnv, "mask patch file", err), 0
 			}
 			maskTargets = append(maskTargets, patchMaskPath)
@@ -178,11 +174,7 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		if !info.IsDir() {
 			kind = model.MaskFile
 		}
-		maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(menv.emptyFile, menv.emptyDir, gitPath)
-		if err != nil {
-			return model.Wrap(model.ExitEnv, "prepare .git mask backing", err), 0
-		}
-		if err := mount.MaskPath(gitPath, kind, maskEmptyFile, maskEmptyDir); err != nil {
+		if err := maskPathWithBacking(mount, gitPath, kind, menv.emptyFile, menv.emptyDir); err != nil {
 			return model.Wrap(model.ExitEnv, "mask .git", err), 0
 		}
 		gitMaskPath = gitPath

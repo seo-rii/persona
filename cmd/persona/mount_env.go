@@ -170,6 +170,14 @@ func prepareMaskBacking(emptyFileRoot, emptyDirRoot, target string) (string, str
 	return emptyFile, emptyDir, nil
 }
 
+func maskPathWithBacking(mount model.NSOps, target string, kind model.MaskKind, emptyFileRoot, emptyDirRoot string) error {
+	maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(emptyFileRoot, emptyDirRoot, target)
+	if err != nil {
+		return err
+	}
+	return mount.MaskPath(target, kind, maskEmptyFile, maskEmptyDir)
+}
+
 func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOps, extEmptyFile, extEmptyDir string, opts model.Options, mount model.NSOps, log *slog.Logger) ([]string, []string, error) {
 	if opts.IgnoredMax == 0 {
 		return nil, nil, nil
@@ -228,11 +236,7 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 			if !info.IsDir() {
 				kind = model.MaskFile
 			}
-			maskEmptyFile, maskEmptyDir, err := prepareMaskBacking(extEmptyFile, extEmptyDir, target)
-			if err != nil {
-				return targets, ignored, fmt.Errorf("prepare mask backing %s: %w", path, err)
-			}
-			if err := mount.MaskPath(target, kind, maskEmptyFile, maskEmptyDir); err != nil {
+			if err := maskPathWithBacking(mount, target, kind, extEmptyFile, extEmptyDir); err != nil {
 				return targets, ignored, fmt.Errorf("mask ignored %s: %w", path, err)
 			}
 			targets = append(targets, target)
