@@ -266,11 +266,9 @@ func ValidatePatchPaths(patch []byte) error {
 			continue
 		}
 		if bytes.HasPrefix(line, []byte("rename from ")) || bytes.HasPrefix(line, []byte("rename to ")) || bytes.HasPrefix(line, []byte("copy from ")) || bytes.HasPrefix(line, []byte("copy to ")) {
-			text := string(line)
-			for _, prefix := range []string{"rename from ", "rename to ", "copy from ", "copy to "} {
-				if strings.HasPrefix(text, prefix) {
-					path := trimLine(strings.TrimPrefix(text, prefix))
-					path = parseMaybeQuotedPath(path)
+			for _, prefix := range [][]byte{[]byte("rename from "), []byte("rename to "), []byte("copy from "), []byte("copy to ")} {
+				if bytes.HasPrefix(line, prefix) {
+					path := parseMaybeQuotedPath(string(trimLineBytes(line[len(prefix):])))
 					if err := checkPath(path); err != nil {
 						return err
 					}
@@ -335,7 +333,7 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 				firstDiffStart = start
 			}
 			blockStart = start
-			current = patchBlock{lines: [][]byte{line}, path: parseDiffGitPath(string(raw))}
+			current = patchBlock{lines: [][]byte{line}}
 			start = end
 			continue
 		}
@@ -346,7 +344,7 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 		current.lines = append(current.lines, line)
 		if bytes.HasPrefix(raw, []byte("new file mode ")) {
 			current.isNew = true
-			current.mode = strings.TrimSpace(strings.TrimPrefix(string(raw), "new file mode "))
+			current.mode = string(bytes.TrimSpace(raw[len("new file mode "):]))
 		}
 		if bytes.HasPrefix(raw, []byte("--- /dev/null")) {
 			current.isNew = true
@@ -388,7 +386,7 @@ func parsePatchBlocks(lines [][]byte) []patchBlock {
 				blocks = append(blocks, current)
 			}
 			seenDiff = true
-			current = patchBlock{lines: [][]byte{line}, path: parseDiffGitPath(string(raw))}
+			current = patchBlock{lines: [][]byte{line}}
 			continue
 		}
 		if !seenDiff {
@@ -397,7 +395,7 @@ func parsePatchBlocks(lines [][]byte) []patchBlock {
 		current.lines = append(current.lines, line)
 		if bytes.HasPrefix(raw, []byte("new file mode ")) {
 			current.isNew = true
-			current.mode = strings.TrimSpace(strings.TrimPrefix(string(raw), "new file mode "))
+			current.mode = string(bytes.TrimSpace(raw[len("new file mode "):]))
 		}
 		if bytes.HasPrefix(raw, []byte("--- /dev/null")) {
 			current.isNew = true
