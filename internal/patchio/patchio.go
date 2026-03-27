@@ -793,14 +793,19 @@ func readAllAt(dir *os.File, name string) ([]byte, error) {
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
 	var stat unix.Stat_t
-	var initialCap int
 	if err := unix.Fstat(fd, &stat); err == nil {
 		if err := CheckPatchSize(int(stat.Size)); err != nil {
 			return nil, err
 		}
-		initialCap = int(stat.Size)
+		if stat.Mode&unix.S_IFMT == unix.S_IFREG {
+			data := make([]byte, int(stat.Size))
+			if _, err := io.ReadFull(file, data); err != nil {
+				return nil, err
+			}
+			return data, nil
+		}
 	}
-	buf := bytes.NewBuffer(make([]byte, 0, initialCap))
+	buf := bytes.NewBuffer(nil)
 	if _, err := io.Copy(buf, io.LimitReader(file, MaxPatchBytes+1)); err != nil {
 		return nil, err
 	}
