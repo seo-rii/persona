@@ -29,7 +29,7 @@ func (g *Git) RepoRootPath() string { return g.RepoRoot }
 func (g *Git) GitDirPath() string { return g.GitDir }
 
 func DetectRepo(ctx context.Context, cwd string) (string, string, error) {
-	env := filterGitEnv(os.Environ())
+	env := FilterGitEnv(os.Environ())
 	repoRoot, err := gitOutput(ctx, cwd, env, "git", "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", "", err
@@ -312,7 +312,7 @@ func (g Git) env() []string {
 }
 
 func (g Git) envWith(workTree, gitDir string) []string {
-	base := filterGitEnv(os.Environ())
+	base := FilterGitEnv(os.Environ())
 	if workTree != "" {
 		base = append(base, "GIT_WORK_TREE="+workTree)
 	}
@@ -322,7 +322,7 @@ func (g Git) envWith(workTree, gitDir string) []string {
 	return base
 }
 
-func filterGitEnv(env []string) []string {
+func FilterGitEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, item := range env {
 		if idx := strings.IndexByte(item, '='); idx > 0 && strings.HasPrefix(item[:idx], "GIT_") {

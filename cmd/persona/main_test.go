@@ -1449,6 +1449,7 @@ func TestRunCommandExitCodes(t *testing.T) {
 		t.Setenv("GIT_DIR", "/tmp/nogit-dir")
 		t.Setenv("GIT_WORK_TREE", "/tmp/nogit-worktree")
 		t.Setenv("GIT_INDEX_FILE", "/tmp/nogit-index")
+		t.Setenv("GIT_SSH_COMMAND", "ssh -F /tmp/nogit-config")
 		code := runCommand(repo, ".", []string{"sh", "-c", "env > child.env"})
 		if code != 0 {
 			t.Fatalf("expected 0 got %d", code)
@@ -1458,7 +1459,7 @@ func TestRunCommandExitCodes(t *testing.T) {
 			t.Fatalf("read child.env: %v", err)
 		}
 		text := string(data)
-		for _, key := range []string{"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE="} {
+		for _, key := range []string{"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_SSH_COMMAND="} {
 			if strings.Contains(text, key) {
 				t.Fatalf("expected %s to be removed from child env: %s", key, text)
 			}

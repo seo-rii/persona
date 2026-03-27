@@ -372,7 +372,7 @@ func TestFilterGitEnvStripsAllGitVarsButKeepsOthers(t *testing.T) {
 		"HOME=/tmp/home",
 	}
 
-	filtered := filterGitEnv(env)
+	filtered := FilterGitEnv(env)
 	if len(filtered) != 2 {
 		t.Fatalf("expected 2 env vars left, got %v", filtered)
 	}
