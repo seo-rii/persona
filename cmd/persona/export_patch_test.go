@@ -275,6 +275,21 @@ func TestExportPatchFailsWhenAccumulatedDiffExceedsSizeLimit(t *testing.T) {
 	}
 }
 
+func TestExportPatchFailsOnOversizeTrackedDiffBeforeListingUntracked(t *testing.T) {
+	g := exportGitOps{
+		tracked:      bytes.Repeat([]byte("t"), patchio.MaxPatchBytes+1),
+		untrackedErr: errors.New("ListUntracked should not be called after tracked overflow"),
+	}
+
+	_, err := exportPatch(context.Background(), g, t.TempDir(), "", false, "", model.IgnoredTransparent, 0, nil)
+	if err == nil {
+		t.Fatal("expected oversize tracked diff to fail")
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestExportPatchAllowsExactSizeLimit(t *testing.T) {
 	repo := t.TempDir()
 	g := exportGitOps{
@@ -350,7 +365,7 @@ func TestExportPatchFailsWhenLateAppendCrossesSizeLimit(t *testing.T) {
 		t.Fatalf("write late.txt: %v", err)
 	}
 	g := exportGitOps{
-		tracked: bytes.Repeat([]byte("t"), patchio.MaxPatchBytes-1),
+		tracked:   bytes.Repeat([]byte("t"), patchio.MaxPatchBytes-1),
 		untracked: []string{"late.txt"},
 		diffByPath: map[string][]byte{
 			"late.txt": bytes.Repeat([]byte("u"), 2),

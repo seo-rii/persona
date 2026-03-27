@@ -86,12 +86,13 @@ type ignoredListGitOps struct {
 }
 
 type exportGitOps struct {
-	tracked    []byte
-	untracked  []string
-	ignored    []string
-	ignoredErr error
-	diffByPath map[string][]byte
-	errByPath  map[string]error
+	tracked      []byte
+	untracked    []string
+	untrackedErr error
+	ignored      []string
+	ignoredErr   error
+	diffByPath   map[string][]byte
+	errByPath    map[string]error
 }
 
 func (g ignoredListGitOps) RepoRootPath() string { return "" }
@@ -173,6 +174,9 @@ func (g exportGitOps) DiffHeadBinary(context.Context, string, string, []string) 
 }
 
 func (g exportGitOps) ListUntracked(context.Context, string, string) ([]string, error) {
+	if g.untrackedErr != nil {
+		return nil, g.untrackedErr
+	}
 	return g.untracked, nil
 }
 
