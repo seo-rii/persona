@@ -202,6 +202,25 @@ func TestReadmeDocumentsIgnoredDriftOptOut(t *testing.T) {
 	}
 }
 
+func TestReadmeDocumentsBehaviorContracts(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"Patch locking uses a sibling `<patch>.lock` file.",
+		"Child commands also run with ambient `GIT_*` variables removed.",
+		"Patch files and exported diffs are capped at 16 MiB;",
+		"If persona cannot preserve the existing patch file owner/group during atomic write-back, it fails",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("README missing behavior contract %q:\n%s", want, text)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
