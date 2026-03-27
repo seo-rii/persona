@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,6 +139,24 @@ func pushUmountCleanup(cleanup *cleanupStack, mount model.NSOps, path string) {
 	cleanup.Push(func() error {
 		return mount.Umount(path)
 	})
+}
+
+func listIgnoredCandidatesChecked(ctx context.Context, g model.GitOps, repoRoot, gitDir string, max int) ([]string, error) {
+	ignored, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, max)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkIgnoredCandidateLimit(ignored, max); err != nil {
+		return nil, err
+	}
+	return ignored, nil
+}
+
+func checkIgnoredCandidateLimit(ignored []string, max int) error {
+	if max > 0 && len(ignored) > max {
+		return fmt.Errorf("ignored candidate count exceeds ignored-max %d", max)
+	}
+	return nil
 }
 
 func shouldRemoveSession(err error, opts model.Options) bool {

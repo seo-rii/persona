@@ -75,6 +75,21 @@ func TestPatchStateRelPaths(t *testing.T) {
 	}
 }
 
+func TestListIgnoredCandidatesCheckedRejectsCapOverflow(t *testing.T) {
+	g := ignoredListGitOps{ignored: []string{"one", "two"}}
+
+	ignored, err := listIgnoredCandidatesChecked(context.Background(), g, "/repo", "", 1)
+	if err == nil {
+		t.Fatal("expected ignored-max overflow error")
+	}
+	if ignored != nil {
+		t.Fatalf("expected nil ignored list on overflow, got %v", ignored)
+	}
+	if !strings.Contains(err.Error(), "ignored candidate count exceeds ignored-max 1") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 type buildOptionsInput struct {
 	patchPath      string
 	patchDir       string

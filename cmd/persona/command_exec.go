@@ -132,12 +132,9 @@ func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir s
 		if ignoredMax > 0 && len(initialIgnored) > ignoredMax {
 			return 0, fmt.Errorf("ignored candidate count exceeds ignored-max %d", ignoredMax)
 		}
-		ignoredNow, err := g.ListIgnoredCandidates(ctx, repoRoot, gitDir, ignoredMax)
+		ignoredNow, err := listIgnoredCandidatesChecked(ctx, g, repoRoot, gitDir, ignoredMax)
 		if err != nil {
 			return 0, err
-		}
-		if ignoredMax > 0 && len(ignoredNow) > ignoredMax {
-			return 0, fmt.Errorf("ignored candidate count exceeds ignored-max %d", ignoredMax)
 		}
 		ignoredSet := make(map[string]struct{}, len(initialIgnored))
 		for _, path := range initialIgnored {
