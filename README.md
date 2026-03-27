@@ -1,6 +1,6 @@
 # persona (v0.1)
 
-`persona` is a CLI that treats a single patch file as a persistent state store. It runs a command inside a Git repository view where the patch is already applied (OverlayFS + mount namespace), then exports changes back into the same patch file (HEAD-based) atomically.
+`persona` is a CLI that treats a single patch file as a persistent state store. Run a command in an overlay Git view backed by a patch file. It runs a command inside a Git repository view where the patch is already applied (OverlayFS + mount namespace), then exports changes back into the same patch file (HEAD-based) atomically.
 
 ## Requirements
 

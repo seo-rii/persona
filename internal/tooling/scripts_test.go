@@ -190,6 +190,27 @@ func TestReadmeDocumentsCorePersonaFlagsFromHelp(t *testing.T) {
 	}
 }
 
+func TestReadmeDocumentsPersonaUsageFromHelp(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	help := personaHelp(t, repoRoot)
+	for _, want := range []string{
+		"persona [OPTIONS] -- <command> [args...]",
+		"Run a command in an overlay Git view backed by a patch file",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("persona --help missing usage contract %q:\n%s", want, help)
+		}
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing usage contract %q:\n%s", want, readme)
+		}
+	}
+}
+
 func TestReadmeDocumentsCorePersonaCommandsFromHelp(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
