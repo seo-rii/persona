@@ -80,6 +80,40 @@ func TestApplyPatchDataDoesNotRetryForUnrelatedApplyError(t *testing.T) {
 	}
 }
 
+func TestApplyPatchDataRetriesWhenLocalizedExistingFileErrorLeavesFilteredPatch(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"diff --git a/other.txt b/other.txt",
+		"new file mode 100644",
+		"index 0000000..d95f3ad",
+		"--- /dev/null",
+		"+++ b/other.txt",
+		"@@ -0,0 +1 @@",
+		"+other",
+		"",
+	}, "\n")
+	g := &applyRetryGitOps{
+		applyErrs: []error{errors.New("Datei existiert bereits"), nil},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyStrict, []byte(patch), repoRoot, "", log)
+	if err != nil {
+		t.Fatalf("expected localized existing-file failure to retry filtered patch, got %v", err)
+	}
+	if g.applyCalls != 2 {
+		t.Fatalf("expected two apply attempts, got %d", g.applyCalls)
+	}
+}
+
 func TestApplyPatchDataRejectModeDoesNotRetryExistingNewFileSkip(t *testing.T) {
 	repoRoot := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
@@ -105,6 +139,40 @@ func TestApplyPatchDataRejectModeDoesNotRetryExistingNewFileSkip(t *testing.T) {
 	}
 	if g.applyCalls != 1 {
 		t.Fatalf("expected a single apply attempt, got %d", g.applyCalls)
+	}
+}
+
+func TestApplyPatchDataRetriesWhenLocalizedErrorNamesSkippedPath(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"diff --git a/other.txt b/other.txt",
+		"new file mode 100644",
+		"index 0000000..e45c9c2",
+		"--- /dev/null",
+		"+++ b/other.txt",
+		"@@ -0,0 +1 @@",
+		"+other",
+		"",
+	}, "\n")
+	g := &applyRetryGitOps{
+		applyErrs: []error{errors.New("same.txt: Datei existiert bereits"), nil},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := applyPatchData(context.Background(), g, model.ApplyStrict, []byte(patch), repoRoot, "", log)
+	if err != nil {
+		t.Fatalf("expected localized already-exists retry to succeed, got %v", err)
+	}
+	if g.applyCalls != 2 {
+		t.Fatalf("expected two apply attempts, got %d", g.applyCalls)
 	}
 }
 
@@ -325,5 +393,49 @@ func TestApplyPatchStoreUsesReaderApplyPath(t *testing.T) {
 	}
 	if g.applyReaderCalls != 1 {
 		t.Fatalf("expected one reader apply attempt, got %d", g.applyReaderCalls)
+	}
+}
+
+func TestApplyPatchStoreRetriesWhenLocalizedErrorNamesSkippedPath(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patchPath := filepath.Join(t.TempDir(), "state.patch")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"diff --git a/other.txt b/other.txt",
+		"new file mode 100644",
+		"index 0000000..e45c9c2",
+		"--- /dev/null",
+		"+++ b/other.txt",
+		"@@ -0,0 +1 @@",
+		"+other",
+		"",
+	}, "\n")
+	if err := os.WriteFile(patchPath, []byte(patch), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+	store, err := patchio.OpenPatchStore(patchPath)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	g := &applyRetryGitOps{
+		applyReaderErrs: []error{errors.New("same.txt: Datei existiert bereits"), nil},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err = applyPatchStore(context.Background(), g, model.ApplyStrict, store, repoRoot, "", t.TempDir(), log)
+	if err != nil {
+		t.Fatalf("expected localized already-exists retry to succeed, got %v", err)
+	}
+	if g.applyReaderCalls != 2 {
+		t.Fatalf("expected two reader apply attempts, got %d", g.applyReaderCalls)
 	}
 }

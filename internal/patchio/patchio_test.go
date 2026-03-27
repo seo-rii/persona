@@ -216,6 +216,25 @@ func TestEnsurePatchDirRejectsSymlinkedParentDir(t *testing.T) {
 	}
 }
 
+func TestIsAlreadyExistsError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"nil":                 {err: nil, want: false},
+		"english":             {err: errors.New("same.txt: already exists in working directory"), want: true},
+		"localized german":    {err: errors.New("Datei existiert bereits"), want: true},
+		"path aware localized": {err: errors.New("same.txt: Datei existiert bereits"), want: true},
+		"unrelated":           {err: errors.New("patch does not apply"), want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := IsAlreadyExistsError(tc.err); got != tc.want {
+				t.Fatalf("expected %v got %v for %v", tc.want, got, tc.err)
+			}
+		})
+	}
+}
+
 func TestValidatePatchPathsRenameCopy(t *testing.T) {
 	patch := strings.Join([]string{
 		"diff --git a/old.txt b/new.txt",

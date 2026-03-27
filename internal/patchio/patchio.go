@@ -387,7 +387,8 @@ func IsAlreadyExistsError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "already exists in working directory")
+	msg := err.Error()
+	return strings.Contains(msg, "already exists in working directory") || strings.Contains(msg, "existiert bereits")
 }
 
 func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, error) {
