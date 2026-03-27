@@ -1,7 +1,6 @@
 package patchio
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
@@ -235,10 +234,13 @@ func ValidatePatchPaths(patch []byte) error {
 	if err := CheckPatchSize(len(patch)); err != nil {
 		return err
 	}
-	scanner := bufio.NewScanner(bytes.NewReader(patch))
-	scanner.Buffer(make([]byte, 0, 64*1024), MaxPatchBytes)
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	for start := 0; start < len(patch); {
+		end := len(patch)
+		if next := bytes.IndexByte(patch[start:], '\n'); next != -1 {
+			end = start + next + 1
+		}
+		line := trimLineBytes(patch[start:end])
+		start = end
 		if bytes.HasPrefix(line, []byte("diff --git ")) {
 			text := string(line)
 			a, b, ok := parseDiffGitLine(text)
@@ -278,9 +280,6 @@ func ValidatePatchPaths(patch []byte) error {
 			continue
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -298,34 +297,74 @@ func FilterExistingNewFiles(patch []byte, workTree string) ([]byte, []string, er
 	if err := CheckPatchSize(len(patch)); err != nil {
 		return nil, nil, err
 	}
-	rawLines := bytes.SplitAfter(patch, []byte("\n"))
-	if len(rawLines) > 0 && len(rawLines[len(rawLines)-1]) == 0 {
-		rawLines = rawLines[:len(rawLines)-1]
-	}
-	blocks := parsePatchBlocks(rawLines)
-	if len(blocks) == 0 {
-		return patch, nil, nil
-	}
-	skipBlock := make([]bool, len(blocks))
-	skipped := make([]string, 0)
-	for i, block := range blocks {
-		if shouldSkipNewFileBlock(block, workTree) {
-			skipBlock[i] = true
-			skipped = append(skipped, block.path)
-		}
-	}
-	if len(skipped) == 0 {
-		return patch, nil, nil
-	}
+	seenDiff := false
+	firstDiffStart := -1
+	blockStart := -1
+	var current patchBlock
 	var out bytes.Buffer
-	out.Grow(len(patch))
-	for i, block := range blocks {
-		if skipBlock[i] {
+	skipped := make([]string, 0)
+	flushCurrent := func(nextStart int) {
+		if !seenDiff || len(current.lines) == 0 {
+			return
+		}
+		if shouldSkipNewFileBlock(current, workTree) {
+			if len(skipped) == 0 {
+				out.Grow(len(patch))
+				out.Write(patch[firstDiffStart:blockStart])
+			}
+			skipped = append(skipped, current.path)
+			return
+		}
+		if len(skipped) == 0 {
+			return
+		}
+		out.Write(patch[blockStart:nextStart])
+	}
+	for start := 0; start < len(patch); {
+		end := len(patch)
+		if next := bytes.IndexByte(patch[start:], '\n'); next != -1 {
+			end = start + next + 1
+		}
+		line := patch[start:end]
+		raw := trimLineBytes(line)
+		if bytes.HasPrefix(raw, []byte("diff --git ")) || bytes.Equal(raw, []byte("diff --git")) {
+			if seenDiff {
+				flushCurrent(start)
+			} else {
+				seenDiff = true
+				firstDiffStart = start
+			}
+			blockStart = start
+			current = patchBlock{lines: [][]byte{line}, path: parseDiffGitPath(string(raw))}
+			start = end
 			continue
 		}
-		for _, line := range block.lines {
-			out.Write(line)
+		if !seenDiff {
+			start = end
+			continue
 		}
+		current.lines = append(current.lines, line)
+		if bytes.HasPrefix(raw, []byte("new file mode ")) {
+			current.isNew = true
+			current.mode = strings.TrimSpace(strings.TrimPrefix(string(raw), "new file mode "))
+		}
+		if bytes.HasPrefix(raw, []byte("--- /dev/null")) {
+			current.isNew = true
+		}
+		if bytes.HasPrefix(raw, []byte("GIT binary patch")) || bytes.HasPrefix(raw, []byte("Binary files ")) {
+			current.isBinary = true
+		}
+		if bytes.HasPrefix(raw, []byte("+++ ")) && current.path == "" {
+			current.path = parsePlusPath(string(raw))
+		}
+		start = end
+	}
+	if !seenDiff {
+		return patch, nil, nil
+	}
+	flushCurrent(len(patch))
+	if len(skipped) == 0 {
+		return patch, nil, nil
 	}
 	return out.Bytes(), skipped, nil
 }
