@@ -168,7 +168,7 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 		if err := patchio.CheckPatchSize(len(tracked)); err != nil {
 			return nil, err
 		}
-		buf.Write(tracked)
+		buf = bytes.NewBuffer(tracked[:len(tracked):len(tracked)])
 	}
 	for _, path := range untracked {
 		absPath := filepath.Join(repoRoot, filepath.FromSlash(path))
@@ -193,6 +193,10 @@ func exportPatch(ctx context.Context, g model.GitOps, repoRoot, gitDir string, p
 		}
 		if err := patchio.CheckPatchSize(buf.Len() + len(patch)); err != nil {
 			return nil, err
+		}
+		if buf.Len() == 0 {
+			buf = bytes.NewBuffer(patch[:len(patch):len(patch)])
+			continue
 		}
 		buf.Write(patch)
 	}
