@@ -157,8 +157,9 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 
 	var patchMaskPaths []string
 	if patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git" {
-		patchMaskPaths = append(patchMaskPaths, filepath.Join(repoRoot, patchRel))
-		patchMaskPaths = append(patchMaskPaths, filepath.Join(repoRoot, patchRel+".lock"))
+		for _, relPath := range patchStateRelPaths(patchRel) {
+			patchMaskPaths = append(patchMaskPaths, filepath.Join(repoRoot, relPath))
+		}
 		for _, patchMaskPath := range patchMaskPaths {
 			if err := maskPathWithBacking(mount, patchMaskPath, model.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
 				return model.Wrap(model.ExitEnv, "mask patch file", err), 0

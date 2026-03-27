@@ -22,7 +22,7 @@ func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *
 		if !opts.AllowDirty {
 			excludePaths := []string{}
 			if patchInRepo && patchRel != "" && patchRel != "." {
-				excludePaths = append(excludePaths, patchRel, patchRel+".lock")
+				excludePaths = append(excludePaths, patchStateRelPaths(patchRel)...)
 			}
 			clean, err := g.IsCleanExceptPaths(ctx, excludePaths)
 			if err != nil {

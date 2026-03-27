@@ -65,6 +65,16 @@ func TestNewRootCmdDoesNotExposeIgnoredScopeFlag(t *testing.T) {
 	}
 }
 
+func TestPatchStateRelPaths(t *testing.T) {
+	got := patchStateRelPaths("state.patch")
+	if len(got) != 2 || got[0] != "state.patch" || got[1] != "state.patch.lock" {
+		t.Fatalf("unexpected patch state paths: %v", got)
+	}
+	if got := patchStateRelPaths(""); got != nil {
+		t.Fatalf("expected nil for empty patch path, got %v", got)
+	}
+}
+
 type buildOptionsInput struct {
 	patchPath      string
 	patchDir       string

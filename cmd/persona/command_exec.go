@@ -174,7 +174,9 @@ func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir s
 	}
 	trackedExclude := []string{}
 	if patchInRepo && patchRel != "" {
-		trackedExclude = append(trackedExclude, filepath.ToSlash(patchRel), filepath.ToSlash(patchRel+".lock"))
+		for _, path := range patchStateRelPaths(filepath.ToSlash(patchRel)) {
+			trackedExclude = append(trackedExclude, filepath.ToSlash(path))
+		}
 	}
 	limited := &patchLimitWriter{w: out}
 	if err := g.DiffHeadBinaryTo(ctx, repoRoot, gitDir, trackedExclude, limited); err != nil {
@@ -187,7 +189,9 @@ func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir s
 	excludePrefixes := []string{".git/"}
 	excludeExact := []string{}
 	if patchInRepo && patchRel != "" {
-		excludeExact = append(excludeExact, filepath.ToSlash(patchRel), filepath.ToSlash(patchRel+".lock"))
+		for _, path := range patchStateRelPaths(filepath.ToSlash(patchRel)) {
+			excludeExact = append(excludeExact, filepath.ToSlash(path))
+		}
 	}
 	untracked = patchio.FilterUntrackedPaths(untracked, excludePrefixes, excludeExact)
 	sort.Strings(untracked)

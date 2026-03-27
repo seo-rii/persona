@@ -102,6 +102,13 @@ func resolvePath(path string) string {
 	return path
 }
 
+func patchStateRelPaths(patchRel string) []string {
+	if patchRel == "" {
+		return nil
+	}
+	return []string{patchRel, patchRel + ".lock"}
+}
+
 func shouldRemoveSession(err error, opts model.Options) bool {
 	switch opts.KeepSession {
 	case model.KeepAlways:
