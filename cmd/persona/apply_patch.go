@@ -25,23 +25,17 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 	}
 	var filtered bytes.Buffer
 	skipped, ferr := patchio.FilterExistingNewFilesReader(bytes.NewReader(patchData), repoRoot, &filtered)
-	if ferr != nil || len(skipped) == 0 {
+	if ferr != nil {
 		return err
 	}
-	if applyMode != model.ApplyStrict {
-		return err
-	}
-	if !shouldRetryExistingNewFileSkip(err, skipped) {
-		return err
-	}
-	log.Info("apply patch: skipping existing new files", "skipped", skipped)
-	if filtered.Len() == 0 {
-		return nil
-	}
-	if err2 := g.ApplyPatch(ctx, applyMode, repoRoot, gitDirForOps, filtered.Bytes()); err2 != nil {
-		return err2
-	}
-	return nil
+	return retryFilteredExistingNewFiles(applyMode, err, skipped, log,
+		func() (bool, error) {
+			return filtered.Len() == 0, nil
+		},
+		func() error {
+			return g.ApplyPatch(ctx, applyMode, repoRoot, gitDirForOps, filtered.Bytes())
+		},
+	)
 }
 
 func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyMode, store *patchio.PatchStore, repoRoot, gitDirForOps, scratchDir string, log *slog.Logger) error {
@@ -93,33 +87,45 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 	if ferr != nil {
 		return ferr
 	}
-	if len(skipped) == 0 {
-		return err
-	}
-	if applyMode != model.ApplyStrict {
-		return err
-	}
-	if !shouldRetryExistingNewFileSkip(err, skipped) {
-		return err
-	}
-	log.Info("apply patch: skipping existing new files", "skipped", skipped)
-	if _, seekErr := filtered.Seek(0, io.SeekStart); seekErr != nil {
-		return seekErr
-	}
-	info, statErr = filtered.Stat()
-	if statErr != nil {
-		return statErr
-	}
-	if info.Size() == 0 {
-		return nil
-	}
-	if err2 := g.ApplyPatchReader(ctx, applyMode, repoRoot, gitDirForOps, filtered); err2 != nil {
-		return err2
-	}
-	return nil
+	return retryFilteredExistingNewFiles(applyMode, err, skipped, log,
+		func() (bool, error) {
+			info, statErr = filtered.Stat()
+			if statErr != nil {
+				return false, statErr
+			}
+			return info.Size() == 0, nil
+		},
+		func() error {
+			if _, seekErr := filtered.Seek(0, io.SeekStart); seekErr != nil {
+				return seekErr
+			}
+			return g.ApplyPatchReader(ctx, applyMode, repoRoot, gitDirForOps, filtered)
+		},
+	)
 }
 
-func shouldRetryExistingNewFileSkip(err error, _ []string) bool {
+func retryFilteredExistingNewFiles(applyMode model.ApplyMode, applyErr error, skipped []string, log *slog.Logger, filteredEmpty func() (bool, error), retry func() error) error {
+	if len(skipped) == 0 {
+		return applyErr
+	}
+	if applyMode != model.ApplyStrict {
+		return applyErr
+	}
+	if !shouldRetryExistingNewFileSkip(applyErr) {
+		return applyErr
+	}
+	log.Info("apply patch: skipping existing new files", "skipped", skipped)
+	empty, err := filteredEmpty()
+	if err != nil {
+		return err
+	}
+	if empty {
+		return nil
+	}
+	return retry()
+}
+
+func shouldRetryExistingNewFileSkip(err error) bool {
 	return patchio.IsAlreadyExistsError(err)
 }
 
