@@ -93,9 +93,37 @@ func TestBuildShDoesNotRunGoModTidyOnBuildFailure(t *testing.T) {
 	}
 }
 
+func TestBuildShFailsFastWhenGoVersionIsTooOld(t *testing.T) {
+	repoRoot := repoRoot(t)
+	binDir, argsFile := stubGo(t, "dirname", "mkdir", "id")
+
+	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "build.sh"))
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir,
+		"GO_ARGS_FILE="+argsFile,
+		"GO_STUB_GOVERSION=go1.24.9",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected build.sh to fail for old Go toolchain\n%s", out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "Go 1.25+ is required; found go1.24.9") {
+		t.Fatalf("expected explicit Go version failure, got:\n%s", text)
+	}
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	if strings.Contains(string(argsData), "build -o") {
+		t.Fatalf("build.sh must fail before go build when Go is too old, got %q", string(argsData))
+	}
+}
+
 func TestBuildShMentionsCustomOutputDirInFollowUpGuidance(t *testing.T) {
 	repoRoot := repoRoot(t)
-	binDir, _ := stubGoWithBody(t, "#!/bin/sh\nexit 0\n", "dirname", "mkdir", "id")
+	binDir, _ := stubGoBuildingPersonaBinary(t, "go1.25.3", "dirname", "mkdir", "id")
 	outDir := filepath.Join(t.TempDir(), "out")
 
 	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "build.sh"))
@@ -119,7 +147,7 @@ func TestBuildShMentionsCustomOutputDirInFollowUpGuidance(t *testing.T) {
 
 func TestBuildShWarnsWhenSetcapIsMissing(t *testing.T) {
 	repoRoot := repoRoot(t)
-	binDir, _ := stubGoWithBody(t, "#!/bin/sh\nexit 0\n", "dirname", "mkdir", "id", "sudo")
+	binDir, _ := stubGoBuildingPersonaBinary(t, "go1.25.3", "dirname", "mkdir", "id", "sudo")
 
 	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "build.sh"))
 	cmd.Dir = repoRoot
@@ -142,7 +170,7 @@ func TestBuildShWarnsWhenSetcapIsMissing(t *testing.T) {
 
 func TestBuildShWarnsWhenSudoSetcapFails(t *testing.T) {
 	repoRoot := repoRoot(t)
-	binDir, _ := stubGoWithBody(t, "#!/bin/sh\nexit 0\n", "dirname", "mkdir", "id")
+	binDir, _ := stubGoBuildingPersonaBinary(t, "go1.25.3", "dirname", "mkdir", "id")
 	sudoPath := filepath.Join(binDir, "sudo")
 	if err := os.WriteFile(sudoPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatalf("write sudo stub: %v", err)
@@ -168,6 +196,39 @@ func TestBuildShWarnsWhenSudoSetcapFails(t *testing.T) {
 	}
 	if strings.Contains(text, "warning: setcap not found") {
 		t.Fatalf("did not expect setcap-missing warning when override points to a tool, got:\n%s", text)
+	}
+}
+
+func TestBuildShPassesSetcapOverrideToActivate(t *testing.T) {
+	repoRoot := repoRoot(t)
+	binDir, _ := stubGoBuildingPersonaBinary(t, "go1.25.3", "dirname", "mkdir", "id")
+	sudoPath := filepath.Join(binDir, "sudo")
+	if err := os.WriteFile(sudoPath, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatalf("write sudo stub: %v", err)
+	}
+	setcapPath := filepath.Join(t.TempDir(), "setcap")
+	if err := os.WriteFile(setcapPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write setcap stub: %v", err)
+	}
+	envLog := filepath.Join(t.TempDir(), "activate-env.log")
+
+	cmd := exec.Command("script", "-qec", filepath.Join(repoRoot, "build.sh"), "/dev/null")
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"PERSONA_SETCAP_BIN="+setcapPath,
+		"PERSONA_ACTIVATE_ENV_LOG="+envLog,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("interactive build.sh failed: %v\n%s", err, out)
+	}
+	envData, err := os.ReadFile(envLog)
+	if err != nil {
+		t.Fatalf("read activate env log: %v", err)
+	}
+	if got := strings.TrimSpace(string(envData)); got != setcapPath {
+		t.Fatalf("expected activate to receive PERSONA_SETCAP_BIN=%q, got %q", setcapPath, got)
 	}
 }
 
@@ -211,6 +272,9 @@ func TestReadmeUsesRepoRelativeExamplesAndMentionsBuildCapabilities(t *testing.T
 	}
 	if !strings.Contains(text, "`build.sh` builds into `./bin` by default and may try to apply `setcap` (or `sudo setcap`) to the resulting binary.") {
 		t.Fatalf("README must describe build.sh capability behavior, got:\n%s", text)
+	}
+	if !strings.Contains(text, "`build.sh` checks `go env GOVERSION` up front and fails early unless the detected toolchain is Go 1.25+.") {
+		t.Fatalf("README must document build.sh Go version preflight, got:\n%s", text)
 	}
 }
 
@@ -375,7 +439,7 @@ func TestReadmeDocumentsDoctorHelpSurface(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"`persona doctor`: print capability/mount diagnostics and hints for permission issues.",
+		"`persona doctor`: print capability/mount diagnostics, trusted `setcap` path, OverlayFS availability, and `unshare -m true` preflight hints.",
 		"If your binary lives on a `nosuid` mount, file capabilities are ignored; use `sudo` or move the binary.",
 	} {
 		if !strings.Contains(readme, want) {
@@ -548,12 +612,64 @@ func stubGo(t *testing.T, extraCommands ...string) (string, string) {
 	return stubGoWithBody(t, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GO_ARGS_FILE\"\nexit 0\n", extraCommands...)
 }
 
+func stubGoBuildingPersonaBinary(t *testing.T, goVersion string, extraCommands ...string) (string, string) {
+	t.Helper()
+	body := strings.Join([]string{
+		"#!/bin/sh",
+		"printf '%s\\n' \"$*\" >> \"$GO_ARGS_FILE\"",
+		"if [ \"$1\" = \"env\" ] && [ \"$2\" = \"GOVERSION\" ]; then",
+		"  printf '%s\\n' \"" + goVersion + "\"",
+		"  exit 0",
+		"fi",
+		"if [ \"$1\" = \"build\" ] && [ \"$2\" = \"-o\" ]; then",
+		"  cat > \"$3\" <<'EOF'",
+		"#!/bin/sh",
+		"if [ \"$1\" = \"doctor\" ]; then",
+		"  if [ -n \"${PERSONA_SETCAP_BIN:-}\" ] && [ -x \"$PERSONA_SETCAP_BIN\" ] && [ ! -d \"$PERSONA_SETCAP_BIN\" ]; then",
+		"    printf 'setcap=%s\\n' \"$PERSONA_SETCAP_BIN\"",
+		"  else",
+		"    printf 'setcap=missing\\n'",
+		"  fi",
+		"  exit 0",
+		"fi",
+		"if [ \"$1\" = \"activate\" ]; then",
+		"  if [ -n \"${PERSONA_ACTIVATE_ENV_LOG:-}\" ]; then",
+		"    printf '%s\\n' \"${PERSONA_SETCAP_BIN:-}\" >> \"$PERSONA_ACTIVATE_ENV_LOG\"",
+		"  fi",
+		"  if [ \"${PERSONA_ACTIVATE_FAIL:-0}\" = \"1\" ]; then",
+		"    printf 'setcap failed\\n' >&2",
+		"    exit 1",
+		"  fi",
+		"  printf 'capabilities set on %s\\n' \"$3\"",
+		"  exit 0",
+		"fi",
+		"exit 0",
+		"EOF",
+		"  chmod +x \"$3\"",
+		"  exit 0",
+		"fi",
+		"exit 0",
+		"",
+	}, "\n")
+	return stubGoWithBody(t, body, extraCommands...)
+}
+
 func stubGoWithBody(t *testing.T, body string, extraCommands ...string) (string, string) {
 	t.Helper()
 	binDir := t.TempDir()
 	argsFile := filepath.Join(t.TempDir(), "go-args.txt")
 	script := filepath.Join(binDir, "go")
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+	body = strings.TrimPrefix(body, "#!/bin/sh\n")
+	scriptBody := strings.Join([]string{
+		"#!/bin/sh",
+		"printf '%s\\n' \"$*\" >> \"$GO_ARGS_FILE\"",
+		"if [ \"$1\" = \"env\" ] && [ \"$2\" = \"GOVERSION\" ]; then",
+		"  printf '%s\\n' \"${GO_STUB_GOVERSION:-go1.25.0}\"",
+		"  exit 0",
+		"fi",
+		body,
+	}, "\n")
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
 		t.Fatalf("write go stub: %v", err)
 	}
 	for _, name := range extraCommands {

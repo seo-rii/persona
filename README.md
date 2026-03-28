@@ -24,6 +24,7 @@ Helper script:
 
 Output directory can be customized via `PERSONA_BUILD_DIR` (default: `./bin`).
 `build.sh` builds into `./bin` by default and may try to apply `setcap` (or `sudo setcap`) to the resulting binary.
+`build.sh` checks `go env GOVERSION` up front and fails early unless the detected toolchain is Go 1.25+.
 If `setcap` lives outside the standard trusted absolute paths, set `PERSONA_SETCAP_BIN=/absolute/or/explicit/path/to/setcap`; `build.sh`, `persona doctor`, and `persona activate` all honor the same override.
 
 ## Usage
@@ -44,7 +45,7 @@ persona --patch /tmp/state.patch -- cat new.txt
 
 ## Commands
 
-- `persona doctor`: print capability/mount diagnostics and hints for permission issues.
+- `persona doctor`: print capability/mount diagnostics, trusted `setcap` path, OverlayFS availability, and `unshare -m true` preflight hints.
 - `persona activate`: grant `cap_sys_admin` to the persona binary by default. Use `--binary PATH` to target a different persona executable, and add `--allow-dac-override` only when patch writes must bypass DAC checks.
 - `persona version`: print the current persona CLI version.
 
