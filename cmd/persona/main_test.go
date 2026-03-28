@@ -1473,6 +1473,22 @@ func TestUmountPathsReverseSkipsEmptyAndJoinsErrors(t *testing.T) {
 	}
 }
 
+func TestUnmaskCommandViewReturnsUmountErrors(t *testing.T) {
+	mount := &umountRecordingNSOps{
+		errs: map[string]error{
+			"/repo/.git": errors.New("git umount failed"),
+		},
+	}
+
+	err := unmaskCommandView(mount, []string{"/repo/state.patch", "/repo/state.patch.lock"}, "/repo/.git")
+	if err == nil || !strings.Contains(err.Error(), "git umount failed") {
+		t.Fatalf("expected unmask error, got %v", err)
+	}
+	if got, want := strings.Join(mount.paths, ","), "/repo/.git,/repo/state.patch.lock,/repo/state.patch"; got != want {
+		t.Fatalf("expected reverse unmask order %q, got %q", want, got)
+	}
+}
+
 func TestRunCommandExitCodes(t *testing.T) {
 	t.Run("no command", func(t *testing.T) {
 		if code := runCommand(t.TempDir(), ".", nil); code != 0 {

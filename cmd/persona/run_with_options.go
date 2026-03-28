@@ -169,7 +169,9 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 
 	postCtx := context.Background()
 
-	_ = umountPathsReverse(mount, append(commandMaskPaths, gitMaskPath))
+	if err := unmaskCommandView(mount, commandMaskPaths, gitMaskPath); err != nil {
+		return model.Wrap(model.ExitEnv, "unmask command view", err), 0
+	}
 
 	exportFile, err := os.CreateTemp(menv.tempRoot, "persona-export-*.patch")
 	if err != nil {
@@ -192,4 +194,8 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 		fmt.Fprintln(os.Stdout, patchPathEffective)
 	}
 	return nil, childCode
+}
+
+func unmaskCommandView(mount model.NSOps, commandMaskPaths []string, gitMaskPath string) error {
+	return umountPathsReverse(mount, append(commandMaskPaths, gitMaskPath))
 }
