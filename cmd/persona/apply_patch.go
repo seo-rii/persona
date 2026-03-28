@@ -89,11 +89,11 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 	}
 	return retryFilteredExistingNewFiles(applyMode, err, skipped, log,
 		func() (bool, error) {
-			info, statErr = filtered.Stat()
+			filteredInfo, statErr := filtered.Stat()
 			if statErr != nil {
 				return false, statErr
 			}
-			return info.Size() == 0, nil
+			return filteredInfo.Size() == 0, nil
 		},
 		func() error {
 			if _, seekErr := filtered.Seek(0, io.SeekStart); seekErr != nil {

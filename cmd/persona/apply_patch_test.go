@@ -90,6 +90,50 @@ func TestOpenPatchStoreReadRejectsMissingAfterFirstSuccessfulOpen(t *testing.T) 
 	}
 }
 
+func TestRetryFilteredExistingNewFilesReturnsOriginalErrorWhenNothingWasSkipped(t *testing.T) {
+	wantErr := errors.New("apply failed")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	retried := false
+
+	err := retryFilteredExistingNewFiles(model.ApplyStrict, wantErr, nil, log,
+		func() (bool, error) {
+			t.Fatal("filteredEmpty callback should stay unused when nothing was skipped")
+			return false, nil
+		},
+		func() error {
+			retried = true
+			return nil
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected original error %v, got %v", wantErr, err)
+	}
+	if retried {
+		t.Fatal("expected retry callback to stay unused")
+	}
+}
+
+func TestRetryFilteredExistingNewFilesReturnsRetryError(t *testing.T) {
+	retryErr := errors.New("retry failed")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := retryFilteredExistingNewFiles(
+		model.ApplyStrict,
+		taggedAlreadyExistsError{msg: "same.txt: already exists in working directory"},
+		[]string{"same.txt"},
+		log,
+		func() (bool, error) {
+			return false, nil
+		},
+		func() error {
+			return retryErr
+		},
+	)
+	if !errors.Is(err, retryErr) {
+		t.Fatalf("expected retry error %v, got %v", retryErr, err)
+	}
+}
+
 func TestApplyPatchDataRetriesWithoutEnglishErrorString(t *testing.T) {
 	repoRoot := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
