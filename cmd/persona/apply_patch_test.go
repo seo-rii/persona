@@ -41,6 +41,55 @@ func closePatchStoreDirForTest(store *patchio.PatchStore) {
 	}
 }
 
+func TestOpenPatchStoreReadAllowsInitialMissingPatch(t *testing.T) {
+	store, err := patchio.OpenPatchStore(filepath.Join(t.TempDir(), "missing.patch"))
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	file, err := openPatchStoreRead(store, "initial read", true)
+	if err != nil {
+		t.Fatalf("expected missing initial patch to be allowed, got %v", err)
+	}
+	if file != nil {
+		_ = file.Close()
+		t.Fatal("expected nil file for missing initial patch")
+	}
+}
+
+func TestOpenPatchStoreReadRejectsMissingAfterFirstSuccessfulOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.patch")
+	if err := os.WriteFile(path, []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+	store, err := patchio.OpenPatchStore(path)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	file, err := openPatchStoreRead(store, "initial read", true)
+	if err != nil {
+		t.Fatalf("expected first open to succeed, got %v", err)
+	}
+	if file == nil {
+		t.Fatal("expected first open to return a file")
+	}
+	_ = file.Close()
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove patch: %v", err)
+	}
+
+	file, err = openPatchStoreRead(store, "validation reopen", false)
+	if err == nil || !strings.Contains(err.Error(), "patch disappeared during validation reopen") {
+		if file != nil {
+			_ = file.Close()
+		}
+		t.Fatalf("expected disappearance error on reopen, got file=%v err=%v", file, err)
+	}
+}
+
 func TestApplyPatchDataRetriesWithoutEnglishErrorString(t *testing.T) {
 	repoRoot := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -44,9 +45,12 @@ func applyPatchData(ctx context.Context, g model.GitOps, applyMode model.ApplyMo
 }
 
 func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyMode, store *patchio.PatchStore, repoRoot, gitDirForOps, scratchDir string, log *slog.Logger) error {
-	file, err := store.OpenRead()
-	if err != nil || file == nil {
+	file, err := openPatchStoreRead(store, "initial read", true)
+	if err != nil {
 		return err
+	}
+	if file == nil {
+		return nil
 	}
 	info, statErr := file.Stat()
 	_ = file.Close()
@@ -54,8 +58,8 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 		return nil
 	}
 
-	file, err = store.OpenRead()
-	if err != nil || file == nil {
+	file, err = openPatchStoreRead(store, "validation reopen", false)
+	if err != nil {
 		return err
 	}
 	err = patchio.ValidatePatchReader(file)
@@ -64,8 +68,8 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 		return err
 	}
 
-	file, err = store.OpenRead()
-	if err != nil || file == nil {
+	file, err = openPatchStoreRead(store, "apply reopen", false)
+	if err != nil {
 		return err
 	}
 	err = g.ApplyPatchReader(ctx, applyMode, repoRoot, gitDirForOps, file)
@@ -80,12 +84,9 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 	}
 	defer closeAndRemoveTempFile(filtered)
 
-	file, ferr = store.OpenRead()
+	file, ferr = openPatchStoreRead(store, "filter reopen", false)
 	if ferr != nil {
 		return ferr
-	}
-	if file == nil {
-		return err
 	}
 	skipped, ferr := patchio.FilterExistingNewFilesReader(file, repoRoot, filtered)
 	_ = file.Close()
@@ -120,4 +121,15 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 
 func shouldRetryExistingNewFileSkip(err error, _ []string) bool {
 	return patchio.IsAlreadyExistsError(err)
+}
+
+func openPatchStoreRead(store *patchio.PatchStore, stage string, allowMissing bool) (*os.File, error) {
+	file, err := store.OpenRead()
+	if err != nil {
+		return nil, err
+	}
+	if file == nil && !allowMissing {
+		return nil, fmt.Errorf("patch disappeared during %s", stage)
+	}
+	return file, nil
 }
