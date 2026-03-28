@@ -83,12 +83,18 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 	defer closeAndRemoveTempFile(filtered)
 
 	file, ferr = store.OpenRead()
-	if ferr != nil || file == nil {
+	if ferr != nil {
+		return ferr
+	}
+	if file == nil {
 		return err
 	}
 	skipped, ferr := patchio.FilterExistingNewFilesReader(file, repoRoot, filtered)
 	_ = file.Close()
-	if ferr != nil || len(skipped) == 0 {
+	if ferr != nil {
+		return ferr
+	}
+	if len(skipped) == 0 {
 		return err
 	}
 	if applyMode != model.ApplyStrict {

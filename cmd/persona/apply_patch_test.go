@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"persona/internal/gitx"
 	"persona/internal/model"
@@ -28,6 +30,15 @@ func (e taggedAlreadyExistsError) Error() string {
 
 func (e taggedAlreadyExistsError) AlreadyExists() bool {
 	return true
+}
+
+func closePatchStoreDirForTest(store *patchio.PatchStore) {
+	field := reflect.ValueOf(store).Elem().FieldByName("dir")
+	slot := (**os.File)(unsafe.Pointer(field.UnsafeAddr()))
+	if *slot != nil {
+		_ = (*slot).Close()
+		*slot = nil
+	}
 }
 
 func TestApplyPatchDataRetriesWithoutEnglishErrorString(t *testing.T) {
@@ -479,6 +490,48 @@ func TestApplyPatchStoreUsesReaderApplyPath(t *testing.T) {
 	}
 	if g.applyReaderCalls != 1 {
 		t.Fatalf("expected one reader apply attempt, got %d", g.applyReaderCalls)
+	}
+}
+
+func TestApplyPatchStoreReturnsReopenErrorDuringFallback(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(repoRoot, "same.txt"), "same\n")
+	patchPath := filepath.Join(t.TempDir(), "state.patch")
+	patch := strings.Join([]string{
+		"diff --git a/same.txt b/same.txt",
+		"new file mode 100644",
+		"index 0000000..2e65efe",
+		"--- /dev/null",
+		"+++ b/same.txt",
+		"@@ -0,0 +1 @@",
+		"+same",
+		"",
+	}, "\n")
+	if err := os.WriteFile(patchPath, []byte(patch), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+	store, err := patchio.OpenPatchStore(patchPath)
+	if err != nil {
+		t.Fatalf("open patch store: %v", err)
+	}
+	defer store.Close()
+
+	g := &applyRetryGitOps{
+		applyReaderErrs: []error{errors.New("same.txt: already exists in working directory")},
+		afterApplyReader: func(call int) {
+			if call == 1 {
+				closePatchStoreDirForTest(store)
+			}
+		},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err = applyPatchStore(context.Background(), g, model.ApplyStrict, store, repoRoot, "", t.TempDir(), log)
+	if err == nil || !strings.Contains(err.Error(), "patch store is closed") {
+		t.Fatalf("expected reopen error to be returned, got %v", err)
+	}
+	if g.applyReaderCalls != 1 {
+		t.Fatalf("expected one reader apply attempt before reopen failure, got %d", g.applyReaderCalls)
 	}
 }
 

@@ -348,6 +348,7 @@ type applyRetryGitOps struct {
 	applyErrs        []error
 	applyReaderCalls int
 	applyReaderErrs  []error
+	afterApplyReader func(call int)
 }
 
 func (g *worktreeGitOps) RepoRootPath() string { return "/repo" }
@@ -496,6 +497,9 @@ func (g *applyRetryGitOps) ApplyPatch(context.Context, model.ApplyMode, string, 
 func (g *applyRetryGitOps) ApplyPatchReader(ctx context.Context, mode model.ApplyMode, workTree, gitDir string, patchData io.Reader) error {
 	g.applyReaderCalls++
 	_, _ = io.Copy(io.Discard, patchData)
+	if g.afterApplyReader != nil {
+		g.afterApplyReader(g.applyReaderCalls)
+	}
 	if len(g.applyReaderErrs) >= g.applyReaderCalls {
 		return g.applyReaderErrs[g.applyReaderCalls-1]
 	}
