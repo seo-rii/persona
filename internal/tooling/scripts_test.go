@@ -493,6 +493,19 @@ func TestReadmeDocumentsStrictOnlyNewFileIdempotence(t *testing.T) {
 	}
 }
 
+func TestReadmeClarifiesKeepSessionOnFailScope(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	text := string(data)
+	want := "`on-fail` keeps the session only when persona itself returns an internal error; a child command exiting non-zero still counts as a completed run and does not keep the session."
+	if !strings.Contains(text, want) {
+		t.Fatalf("README must clarify keep-session=on-fail scope, got:\n%s", text)
+	}
+}
+
 func TestReadmeDocumentsExitCodeContract(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))

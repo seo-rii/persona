@@ -81,6 +81,7 @@ Patch apply:
 
 Session/logging:
 - `--keep-session {on-fail,always,never}` (default: `on-fail`)
+  `on-fail` keeps the session only when persona itself returns an internal error; a child command exiting non-zero still counts as a completed run and does not keep the session.
 - `--verbose`
 
 ## Behavior Notes
