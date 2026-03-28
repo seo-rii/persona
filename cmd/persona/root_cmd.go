@@ -7,12 +7,11 @@ import (
 	"strings"
 	"syscall"
 
+	"persona/internal/buildinfo"
 	"persona/internal/model"
 
 	"github.com/spf13/cobra"
 )
-
-const personaVersion = "v0.2.0"
 
 func newRootCmd() *cobra.Command {
 	var (
@@ -41,7 +40,7 @@ func newRootCmd() *cobra.Command {
 		Args:          cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if showVersion {
-				fmt.Fprintln(os.Stdout, personaVersion)
+				fmt.Fprintln(os.Stdout, buildinfo.PersonaVersion)
 				return nil
 			}
 			if len(args) == 0 {
@@ -93,7 +92,7 @@ func newRootCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print the current persona CLI version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprintln(os.Stdout, personaVersion)
+			fmt.Fprintln(os.Stdout, buildinfo.PersonaVersion)
 		},
 	})
 	addDiagnosticCommands(cmd)

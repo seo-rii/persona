@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"persona/internal/buildinfo"
 	"persona/internal/model"
 )
 
@@ -391,9 +392,10 @@ func TestReadmeDocumentsVersionSurface(t *testing.T) {
 		t.Fatalf("persona --help missing --version flag:\n%s", help)
 	}
 	for _, want := range []string{
-		"# persona (v0.2.0)",
+		"# persona",
 		"`persona version`: print the current persona CLI version.",
 		"`--version`: print the current persona CLI version and exit.",
+		"Run `persona version` or `persona --version` to see the current CLI version instead of relying on README text.",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README missing version contract %q:\n%s", want, readme)
@@ -401,20 +403,15 @@ func TestReadmeDocumentsVersionSurface(t *testing.T) {
 	}
 }
 
-func TestPersonaVersionOutputMatchesReadme(t *testing.T) {
+func TestPersonaVersionOutputMatchesBuildInfo(t *testing.T) {
 	repoRoot := repoRoot(t)
-	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
-	if err != nil {
-		t.Fatalf("read README: %v", err)
-	}
-	readme := string(data)
 	versionOut := personaOutput(t, repoRoot, "--version")
 	versionOut = strings.TrimSpace(versionOut)
 	if versionOut == "" {
 		t.Fatal("expected non-empty version output")
 	}
-	if !strings.Contains(readme, "# persona ("+versionOut+")") {
-		t.Fatalf("README header must match persona --version output %q:\n%s", versionOut, readme)
+	if versionOut != buildinfo.PersonaVersion {
+		t.Fatalf("expected persona --version to match buildinfo %q, got %q", buildinfo.PersonaVersion, versionOut)
 	}
 	subcommandOut := strings.TrimSpace(personaOutput(t, repoRoot, "version"))
 	if subcommandOut != versionOut {

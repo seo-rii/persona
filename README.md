@@ -1,4 +1,4 @@
-# persona (v0.2.0)
+# persona
 
 `persona` is a CLI that treats a single patch file as a persistent state store. Run a command in an overlay Git view backed by a patch file. It runs a command inside a Git repository view where the patch is already applied (OverlayFS + mount namespace), then exports changes back into the same patch file (HEAD-based) atomically.
 
@@ -48,6 +48,7 @@ persona --patch /tmp/state.patch -- cat new.txt
 - `persona doctor`: print capability/mount diagnostics, trusted `setcap` path, OverlayFS availability, and `unshare -m true` preflight hints.
 - `persona activate`: grant `cap_sys_admin` to the persona binary by default. Use `--binary PATH` to target a different persona executable, and add `--allow-dac-override` only when patch writes must bypass DAC checks.
 - `persona version`: print the current persona CLI version.
+- Run `persona version` or `persona --version` to see the current CLI version instead of relying on README text.
 
 Example:
 
