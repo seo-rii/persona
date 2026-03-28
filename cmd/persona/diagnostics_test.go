@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -198,6 +199,8 @@ func TestDoctorCommandPrintsNoSysAdminHint(t *testing.T) {
 			EUID:          1000,
 			FileCapStatus: "absent",
 			SetcapPath:    "/usr/bin/setcap",
+			Overlayfs:     "available",
+			UnshareMount:  "ok",
 		}
 	}
 
@@ -229,6 +232,8 @@ func TestDoctorCommandPrintsNosuidHint(t *testing.T) {
 			HasSysAdmin:  true,
 			MountOptions: "rw,nosuid,nodev",
 			SetcapPath:   "/usr/bin/setcap",
+			Overlayfs:    "available",
+			UnshareMount: "ok",
 		}
 	}
 
@@ -241,6 +246,43 @@ func TestDoctorCommandPrintsNosuidHint(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "hint: mount has nosuid; file capabilities are ignored.") {
 		t.Fatalf("expected nosuid hint, got %q", out.String())
+	}
+}
+
+func TestDoctorCommandPrintsRuntimePreflightHints(t *testing.T) {
+	origCollectDiagFn := collectDiagFn
+	t.Cleanup(func() {
+		collectDiagFn = origCollectDiagFn
+	})
+
+	collectDiagFn = func() diagInfo {
+		return diagInfo{
+			ExePath:       "/persona",
+			EUID:          1000,
+			FileCapStatus: "absent",
+			SetcapPath:    "/usr/bin/setcap",
+			Overlayfs:     "missing",
+			UnshareMount:  "blocked: operation not permitted",
+		}
+	}
+
+	var out bytes.Buffer
+	cmd := newDoctorCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("doctor RunE error: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"overlayfs=missing",
+		"unshare_mount=blocked: operation not permitted",
+		"hint: overlayfs support is unavailable",
+		"hint: `unshare -m true` must succeed",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in output, got %q", want, text)
+		}
 	}
 }
 
@@ -471,4 +513,72 @@ func TestReportPermissionHintOnlyOnPermissionErrors(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("expected no hint for non-permission error, got %q", out.String())
 	}
+}
+
+func TestOverlayfsStatus(t *testing.T) {
+	origReadFileFn := readFileFn
+	t.Cleanup(func() {
+		readFileFn = origReadFileFn
+	})
+
+	t.Run("available", func(t *testing.T) {
+		readFileFn = func(string) ([]byte, error) {
+			return []byte("nodev\toverlay\n"), nil
+		}
+		if got := overlayfsStatus(); got != "available" {
+			t.Fatalf("expected available, got %q", got)
+		}
+	})
+
+	t.Run("missing", func(t *testing.T) {
+		readFileFn = func(string) ([]byte, error) {
+			return []byte("nodev\tproc\n"), nil
+		}
+		if got := overlayfsStatus(); got != "missing" {
+			t.Fatalf("expected missing, got %q", got)
+		}
+	})
+
+	t.Run("read error", func(t *testing.T) {
+		readFileFn = func(string) ([]byte, error) {
+			return nil, errors.New("boom")
+		}
+		if got := overlayfsStatus(); got != "error: boom" {
+			t.Fatalf("expected read error status, got %q", got)
+		}
+	})
+}
+
+func TestUnshareMountStatus(t *testing.T) {
+	origLookPathFn := lookPathFn
+	origExecCommandFn := execCommandFn
+	t.Cleanup(func() {
+		lookPathFn = origLookPathFn
+		execCommandFn = origExecCommandFn
+	})
+
+	t.Run("missing", func(t *testing.T) {
+		lookPathFn = func(string) (string, error) {
+			return "", errors.New("missing")
+		}
+		if got := unshareMountStatus(); got != "missing" {
+			t.Fatalf("expected missing, got %q", got)
+		}
+	})
+
+	t.Run("blocked", func(t *testing.T) {
+		script := filepath.Join(t.TempDir(), "blocked-unshare")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\necho operation not permitted\nexit 1\n"), 0o755); err != nil {
+			t.Fatalf("write script: %v", err)
+		}
+		lookPathFn = func(string) (string, error) {
+			return "/usr/bin/unshare", nil
+		}
+		execCommandFn = func(name string, arg ...string) *exec.Cmd {
+			return exec.Command(script)
+		}
+		if got := unshareMountStatus(); got != "blocked: operation not permitted" {
+			t.Fatalf("expected blocked status, got %q", got)
+		}
+	})
 }

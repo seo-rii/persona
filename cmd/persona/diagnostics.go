@@ -34,11 +34,14 @@ var (
 	executablePathFn                    = os.Executable
 	geteuidFn                           = os.Geteuid
 	getxattrFn                          = unix.Getxattr
+	readFileFn                          = os.ReadFile
 	lookPathFn                          = exec.LookPath
 	execCommandFn                       = exec.Command
 	requireSetcapCapabilityFn           = requireSetcapCapability
 	findSetcapPathFn                    = findSetcapPath
 	resolveSetcapPathFn                 = resolveSetcapPath
+	overlayfsStatusFn                   = overlayfsStatus
+	unshareMountStatusFn                = unshareMountStatus
 	collectDiagFn                       = collectDiag
 	readCapEffFn                        = readCapEff
 )
@@ -57,6 +60,8 @@ type diagInfo struct {
 	MountSource    string
 	MountTarget    string
 	SetcapPath     string
+	Overlayfs      string
+	UnshareMount   string
 }
 
 func addDiagnosticCommands(cmd *cobra.Command) {
@@ -101,12 +106,24 @@ func newDoctorCmd() *cobra.Command {
 			} else {
 				fmt.Fprintln(w, "setcap=missing")
 			}
+			if info.Overlayfs != "" {
+				fmt.Fprintf(w, "overlayfs=%s\n", info.Overlayfs)
+			}
+			if info.UnshareMount != "" {
+				fmt.Fprintf(w, "unshare_mount=%s\n", info.UnshareMount)
+			}
 			if !info.HasSysAdmin {
 				fmt.Fprintln(w, "hint: CAP_SYS_ADMIN is required for unshare and OverlayFS mount.")
 				fmt.Fprintf(w, "hint: %s\n", leastPrivilegeCapabilityHint())
 			}
 			if strings.Contains(info.MountOptions, "nosuid") {
 				fmt.Fprintln(w, "hint: mount has nosuid; file capabilities are ignored. Use sudo or move the binary.")
+			}
+			if info.Overlayfs == "missing" || strings.HasPrefix(info.Overlayfs, "error:") {
+				fmt.Fprintln(w, "hint: overlayfs support is unavailable; load the overlay module or use a kernel/filesystem configuration that supports OverlayFS.")
+			}
+			if info.UnshareMount != "" && info.UnshareMount != "ok" {
+				fmt.Fprintln(w, "hint: `unshare -m true` must succeed for persona to create an isolated mount namespace.")
 			}
 			return nil
 		},
@@ -262,11 +279,13 @@ func collectDiag() diagInfo {
 	if setcapPath, err := resolveSetcapPathFn(setcapCandidates); err == nil {
 		info.SetcapPath = setcapPath
 	}
+	info.Overlayfs = overlayfsStatusFn()
+	info.UnshareMount = unshareMountStatusFn()
 	return info
 }
 
 func readCapEff() (uint64, error) {
-	data, err := os.ReadFile("/proc/self/status")
+	data, err := readFileFn("/proc/self/status")
 	if err != nil {
 		return 0, err
 	}
@@ -408,4 +427,37 @@ func reportPermissionHint(op string, err error) {
 	}
 	fmt.Fprintf(stderrWriter, "persona: hint: %s\n", leastPrivilegeCapabilityHint())
 	fmt.Fprintln(stderrWriter, "persona: hint: if still denied, check nosuid mounts or LSM (AppArmor/SELinux) policies.")
+}
+
+func overlayfsStatus() string {
+	data, err := readFileFn("/proc/filesystems")
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[len(fields)-1] == "overlay" {
+			return "available"
+		}
+	}
+	return "missing"
+}
+
+func unshareMountStatus() string {
+	unsharePath, err := lookPathFn("unshare")
+	if err != nil {
+		return "missing"
+	}
+	out, err := execCommandFn(unsharePath, "-m", "true").CombinedOutput()
+	if err == nil {
+		return "ok"
+	}
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		msg = err.Error()
+	}
+	return "blocked: " + msg
 }
