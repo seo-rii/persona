@@ -101,7 +101,7 @@ Session/logging:
 - Patch paths are resolved through symlinks. If the provided patch path is a symlink to a repo-internal file, the tool locks/writes the **target path**, and `--print-patch-path` prints the resolved path.
 - Existing parent directories for `--patch` and `--patch-dir` must not be symlinks. Symlink patch files are allowed; symlink parent directories are rejected.
 - Internal git operations use a bind-mounted gitdir outside the repo root to avoid `.git` masking interfering with export/apply.
-- If a text patch adds a new regular file that already exists with identical content and mode, persona skips that block during apply so re-running the same text new-file patch is idempotent. Binary new-file blocks are retried normally.
+- In `strict` apply mode, if a text patch adds a new regular file that already exists with identical content and mode, persona skips that block during apply so re-running the same text new-file patch is idempotent. Binary new-file blocks are retried normally.
 
 ## Exit Codes
 

@@ -403,6 +403,19 @@ func TestReadmeDocumentsBehaviorContracts(t *testing.T) {
 	}
 }
 
+func TestReadmeDocumentsStrictOnlyNewFileIdempotence(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	text := string(data)
+	want := "In `strict` apply mode, if a text patch adds a new regular file that already exists with identical content and mode, persona skips that block during apply so re-running the same text new-file patch is idempotent."
+	if !strings.Contains(text, want) {
+		t.Fatalf("README must scope identical text new-file idempotence to strict mode, got:\n%s", text)
+	}
+}
+
 func TestReadmeDocumentsExitCodeContract(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
