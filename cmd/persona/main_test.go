@@ -154,17 +154,20 @@ type ignoredListGitOps struct {
 }
 
 type exportGitOps struct {
-	tracked         []byte
-	untracked       []string
-	untrackedErr    error
-	ignored         []string
-	ignoredErr      error
-	diffByPath      map[string][]byte
-	errByPath       map[string]error
-	diffHeadCalls   int
-	diffHeadToCalls int
-	diffNewCalls    int
-	diffNewToCalls  int
+	tracked            []byte
+	trackedChunks      [][]byte
+	untracked          []string
+	untrackedErr       error
+	ignored            []string
+	ignoredErr         error
+	diffByPath         map[string][]byte
+	diffChunksByPath   map[string][][]byte
+	errByPath          map[string]error
+	listUntrackedCalls int
+	diffHeadCalls      int
+	diffHeadToCalls    int
+	diffNewCalls       int
+	diffNewToCalls     int
 }
 
 func (g ignoredListGitOps) RepoRootPath() string { return "" }
@@ -262,13 +265,26 @@ func (g *exportGitOps) DiffHeadBinary(context.Context, string, string, []string)
 	return g.tracked, nil
 }
 
+func writeExportChunks(w io.Writer, chunks [][]byte) error {
+	for _, chunk := range chunks {
+		if _, err := w.Write(chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (g *exportGitOps) DiffHeadBinaryTo(_ context.Context, _ string, _ string, _ []string, w io.Writer) error {
 	g.diffHeadToCalls++
+	if len(g.trackedChunks) != 0 {
+		return writeExportChunks(w, g.trackedChunks)
+	}
 	_, err := w.Write(g.tracked)
 	return err
 }
 
 func (g *exportGitOps) ListUntracked(context.Context, string, string) ([]string, error) {
+	g.listUntrackedCalls++
 	if g.untrackedErr != nil {
 		return nil, g.untrackedErr
 	}
@@ -287,6 +303,9 @@ func (g *exportGitOps) DiffNewFileNoIndexTo(_ context.Context, _ string, _ strin
 	g.diffNewToCalls++
 	if err, ok := g.errByPath[relPath]; ok {
 		return err
+	}
+	if len(g.diffChunksByPath[relPath]) != 0 {
+		return writeExportChunks(w, g.diffChunksByPath[relPath])
 	}
 	_, err := w.Write(g.diffByPath[relPath])
 	return err

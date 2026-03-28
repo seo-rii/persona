@@ -28,6 +28,24 @@ func exportPatchBytes(ctx context.Context, g model.GitOps, repoRoot, gitDir stri
 	return out.Bytes(), nil
 }
 
+func makeChunkedExportData(total, chunkSize int, start byte) ([][]byte, []byte) {
+	chunks := make([][]byte, 0, (total+chunkSize-1)/chunkSize)
+	want := make([]byte, 0, total)
+	marker := start
+	for remaining := total; remaining > 0; {
+		size := chunkSize
+		if size > remaining {
+			size = remaining
+		}
+		chunk := bytes.Repeat([]byte{marker}, size)
+		chunks = append(chunks, chunk)
+		want = append(want, chunk...)
+		remaining -= size
+		marker++
+	}
+	return chunks, want
+}
+
 func TestExportPatchSortAndExclude(t *testing.T) {
 	repo := testutil.InitRepo(t)
 	testutil.WriteFile(t, filepath.Join(repo, "b.txt"), "b\n")
@@ -316,6 +334,43 @@ func TestExportPatchAllowsExactSizeLimit(t *testing.T) {
 	}
 }
 
+func TestExportPatchAllowsChunkedTrackedDiffAtExactSizeLimit(t *testing.T) {
+	repo := t.TempDir()
+	chunks, want := makeChunkedExportData(patchio.MaxPatchBytes, 128*1024+17, 'a')
+	g := &exportGitOps{
+		trackedChunks: chunks,
+	}
+
+	patch, err := exportPatchBytes(context.Background(), g, repo, "", false, "", 0, nil)
+	if err != nil {
+		t.Fatalf("exportPatch error: %v", err)
+	}
+	if len(patch) != patchio.MaxPatchBytes {
+		t.Fatalf("expected exact cap-sized patch, got %d bytes", len(patch))
+	}
+	if !bytes.Equal(patch, want) {
+		t.Fatalf("expected chunked tracked payload to stream through unchanged")
+	}
+}
+
+func TestExportPatchFailsOnChunkedTrackedOverflowBeforeListingUntracked(t *testing.T) {
+	chunks, _ := makeChunkedExportData(patchio.MaxPatchBytes+1, 96*1024+23, 't')
+	g := &exportGitOps{
+		trackedChunks: chunks,
+	}
+
+	_, err := exportPatchBytes(context.Background(), g, t.TempDir(), "", false, "", 0, nil)
+	if err == nil {
+		t.Fatal("expected chunked tracked diff overflow to fail")
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if g.listUntrackedCalls != 0 {
+		t.Fatalf("expected overflow to abort before listing untracked files, got %d calls", g.listUntrackedCalls)
+	}
+}
+
 func TestExportPatchAllowsExactSizeLimitByAppend(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repo, "late.txt"), []byte("seed\n"), 0o644); err != nil {
@@ -367,6 +422,31 @@ func TestExportPatchAllowsExactSizeLimitFromFirstUntracked(t *testing.T) {
 	}
 }
 
+func TestExportPatchAllowsChunkedBinaryUntrackedDiffAtExactSizeLimit(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "late.bin"), []byte{0x00}, 0o644); err != nil {
+		t.Fatalf("write late.bin: %v", err)
+	}
+	chunks, want := makeChunkedExportData(patchio.MaxPatchBytes, 64*1024+29, 0x00)
+	g := &exportGitOps{
+		untracked: []string{"late.bin"},
+		diffChunksByPath: map[string][][]byte{
+			"late.bin": chunks,
+		},
+	}
+
+	patch, err := exportPatchBytes(context.Background(), g, repo, "", false, "", 0, nil)
+	if err != nil {
+		t.Fatalf("exportPatch error: %v", err)
+	}
+	if len(patch) != patchio.MaxPatchBytes {
+		t.Fatalf("expected exact cap-sized patch, got %d bytes", len(patch))
+	}
+	if !bytes.Equal(patch, want) {
+		t.Fatalf("expected chunked untracked payload to stream through unchanged")
+	}
+}
+
 func TestExportPatchFailsWhenLateAppendCrossesSizeLimit(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repo, "late.txt"), []byte("seed\n"), 0o644); err != nil {
@@ -383,6 +463,30 @@ func TestExportPatchFailsWhenLateAppendCrossesSizeLimit(t *testing.T) {
 	_, err := exportPatchBytes(context.Background(), g, repo, "", false, "", 0, nil)
 	if err == nil {
 		t.Fatal("expected late append overflow to fail")
+	}
+	if !strings.Contains(err.Error(), "patch exceeds size limit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestExportPatchFailsWhenChunkedLateAppendCrossesSizeLimit(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "late.bin"), []byte{0x00}, 0o644); err != nil {
+		t.Fatalf("write late.bin: %v", err)
+	}
+	trackedChunks, _ := makeChunkedExportData(patchio.MaxPatchBytes-63, 256*1024+11, 'm')
+	untrackedChunks, _ := makeChunkedExportData(64, 1, 0x80)
+	g := &exportGitOps{
+		trackedChunks: trackedChunks,
+		untracked:     []string{"late.bin"},
+		diffChunksByPath: map[string][][]byte{
+			"late.bin": untrackedChunks,
+		},
+	}
+
+	_, err := exportPatchBytes(context.Background(), g, repo, "", false, "", 0, nil)
+	if err == nil {
+		t.Fatal("expected late chunked append overflow to fail")
 	}
 	if !strings.Contains(err.Error(), "patch exceeds size limit") {
 		t.Fatalf("unexpected error: %v", err)
