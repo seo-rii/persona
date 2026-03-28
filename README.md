@@ -24,6 +24,7 @@ Helper script:
 
 Output directory can be customized via `PERSONA_BUILD_DIR` (default: `./bin`).
 `build.sh` builds into `./bin` by default and may try to apply `setcap` (or `sudo setcap`) to the resulting binary.
+If `setcap` lives outside the standard trusted absolute paths, set `PERSONA_SETCAP_BIN=/absolute/or/explicit/path/to/setcap`; `build.sh`, `persona doctor`, and `persona activate` all honor the same override.
 
 ## Usage
 

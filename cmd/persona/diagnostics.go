@@ -38,6 +38,7 @@ var (
 	execCommandFn                       = exec.Command
 	requireSetcapCapabilityFn           = requireSetcapCapability
 	findSetcapPathFn                    = findSetcapPath
+	resolveSetcapPathFn                 = resolveSetcapPath
 	collectDiagFn                       = collectDiag
 	readCapEffFn                        = readCapEff
 )
@@ -127,7 +128,7 @@ func newActivateCmd() *cobra.Command {
 				fmt.Fprintln(stderrWriter, "persona: hint: run this command with sudo or as root")
 				return err
 			}
-			setcapPath, err := findSetcapPathFn(setcapCandidates)
+			setcapPath, err := resolveSetcapPathFn(setcapCandidates)
 			if err != nil {
 				return fmt.Errorf("setcap not found; install libcap2-bin")
 			}
@@ -181,6 +182,21 @@ func findSetcapPath(candidates []string) (string, error) {
 		return candidate, nil
 	}
 	return "", fmt.Errorf("setcap not found")
+}
+
+func resolveSetcapPath(candidates []string) (string, error) {
+	override := strings.TrimSpace(os.Getenv("PERSONA_SETCAP_BIN"))
+	if override != "" {
+		info, err := os.Stat(override)
+		if err != nil {
+			return "", err
+		}
+		if info.IsDir() || info.Mode()&0o111 == 0 {
+			return "", fmt.Errorf("setcap not found")
+		}
+		return override, nil
+	}
+	return findSetcapPathFn(candidates)
 }
 
 func resolveBinaryPath(target string) (string, error) {
@@ -243,7 +259,7 @@ func collectDiag() diagInfo {
 			info.MountTarget = mi["TARGET"]
 		}
 	}
-	if setcapPath, err := findSetcapPathFn(setcapCandidates); err == nil {
+	if setcapPath, err := resolveSetcapPathFn(setcapCandidates); err == nil {
 		info.SetcapPath = setcapPath
 	}
 	return info

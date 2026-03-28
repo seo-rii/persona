@@ -214,6 +214,19 @@ func TestReadmeUsesRepoRelativeExamplesAndMentionsBuildCapabilities(t *testing.T
 	}
 }
 
+func TestReadmeDocumentsSharedSetcapOverride(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	text := string(data)
+	want := "If `setcap` lives outside the standard trusted absolute paths, set `PERSONA_SETCAP_BIN=/absolute/or/explicit/path/to/setcap`; `build.sh`, `persona doctor`, and `persona activate` all honor the same override."
+	if !strings.Contains(text, want) {
+		t.Fatalf("README must document shared setcap override behavior, got:\n%s", text)
+	}
+}
+
 func TestReadmeDocumentsCorePersonaFlagsFromHelp(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))

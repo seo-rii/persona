@@ -150,6 +150,42 @@ func TestFindSetcapPathErrorsWhenNoTrustedCandidateExists(t *testing.T) {
 	}
 }
 
+func TestResolveSetcapPathUsesOverrideBeforeCandidates(t *testing.T) {
+	override := filepath.Join(t.TempDir(), "custom-setcap")
+	if err := os.WriteFile(override, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write override: %v", err)
+	}
+	fallback := filepath.Join(t.TempDir(), "fallback-setcap")
+	if err := os.WriteFile(fallback, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fallback: %v", err)
+	}
+	t.Setenv("PERSONA_SETCAP_BIN", override)
+
+	got, err := resolveSetcapPath([]string{fallback})
+	if err != nil {
+		t.Fatalf("resolveSetcapPath error: %v", err)
+	}
+	if got != override {
+		t.Fatalf("expected override %q, got %q", override, got)
+	}
+}
+
+func TestResolveSetcapPathRejectsMissingOverrideWithoutFallback(t *testing.T) {
+	fallback := filepath.Join(t.TempDir(), "fallback-setcap")
+	if err := os.WriteFile(fallback, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fallback: %v", err)
+	}
+	t.Setenv("PERSONA_SETCAP_BIN", filepath.Join(t.TempDir(), "missing-setcap"))
+
+	_, err := resolveSetcapPath([]string{fallback})
+	if err == nil {
+		t.Fatal("expected override resolution error")
+	}
+	if !os.IsNotExist(err) {
+		t.Fatalf("expected missing override error, got %v", err)
+	}
+}
+
 func TestDoctorCommandPrintsNoSysAdminHint(t *testing.T) {
 	origCollectDiagFn := collectDiagFn
 	t.Cleanup(func() {
@@ -210,14 +246,14 @@ func TestDoctorCommandPrintsNosuidHint(t *testing.T) {
 
 func TestActivateCommandSetcapMissing(t *testing.T) {
 	origRequireSetcapCapabilityFn := requireSetcapCapabilityFn
-	origFindSetcapPathFn := findSetcapPathFn
+	origResolveSetcapPathFn := resolveSetcapPathFn
 	t.Cleanup(func() {
 		requireSetcapCapabilityFn = origRequireSetcapCapabilityFn
-		findSetcapPathFn = origFindSetcapPathFn
+		resolveSetcapPathFn = origResolveSetcapPathFn
 	})
 
 	requireSetcapCapabilityFn = func() error { return nil }
-	findSetcapPathFn = func([]string) (string, error) {
+	resolveSetcapPathFn = func([]string) (string, error) {
 		return "", errors.New("missing")
 	}
 
@@ -239,10 +275,10 @@ func TestActivateCommandSetcapMissing(t *testing.T) {
 
 func TestActivateCommandUsesDACOverrideSpec(t *testing.T) {
 	origRequireSetcapCapabilityFn := requireSetcapCapabilityFn
-	origFindSetcapPathFn := findSetcapPathFn
+	origResolveSetcapPathFn := resolveSetcapPathFn
 	t.Cleanup(func() {
 		requireSetcapCapabilityFn = origRequireSetcapCapabilityFn
-		findSetcapPathFn = origFindSetcapPathFn
+		resolveSetcapPathFn = origResolveSetcapPathFn
 	})
 
 	requireSetcapCapabilityFn = func() error { return nil }
@@ -258,7 +294,7 @@ func TestActivateCommandUsesDACOverrideSpec(t *testing.T) {
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write setcap script: %v", err)
 	}
-	findSetcapPathFn = func([]string) (string, error) {
+	resolveSetcapPathFn = func([]string) (string, error) {
 		return scriptPath, nil
 	}
 
@@ -288,6 +324,50 @@ func TestActivateCommandUsesDACOverrideSpec(t *testing.T) {
 	}
 	if lines[1] != binary {
 		t.Fatalf("unexpected binary path: %q", lines[1])
+	}
+}
+
+func TestActivateCommandUsesSetcapOverride(t *testing.T) {
+	origRequireSetcapCapabilityFn := requireSetcapCapabilityFn
+	t.Cleanup(func() {
+		requireSetcapCapabilityFn = origRequireSetcapCapabilityFn
+	})
+
+	requireSetcapCapabilityFn = func() error { return nil }
+
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "args.txt")
+	scriptPath := filepath.Join(tmp, "custom-setcap")
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"printf '%s\\n' \"$@\" > \"" + argsPath + "\"",
+		"",
+	}, "\n")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write setcap script: %v", err)
+	}
+	t.Setenv("PERSONA_SETCAP_BIN", scriptPath)
+
+	binary := filepath.Join(tmp, "persona-bin")
+	if err := os.WriteFile(binary, []byte("bin"), 0o755); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+
+	cmd := newActivateCmd()
+	cmd.SetArgs([]string{"--binary", binary})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("activate Execute error: %v", err)
+	}
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(argsData)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("unexpected setcap args: %q", string(argsData))
+	}
+	if lines[0] != "cap_sys_admin+ep" || lines[1] != binary {
+		t.Fatalf("unexpected setcap override invocation: %q", string(argsData))
 	}
 }
 
