@@ -336,7 +336,7 @@ func TestExportPatchAllowsExactSizeLimit(t *testing.T) {
 
 func TestExportPatchAllowsChunkedTrackedDiffAtExactSizeLimit(t *testing.T) {
 	repo := t.TempDir()
-	chunks, want := makeChunkedExportData(patchio.MaxPatchBytes, 128*1024+17, 'a')
+	chunks, want := makeChunkedExportData(patchio.MaxPatchBytes, 4*1024+17, 'a')
 	g := &exportGitOps{
 		trackedChunks: chunks,
 	}
@@ -354,7 +354,7 @@ func TestExportPatchAllowsChunkedTrackedDiffAtExactSizeLimit(t *testing.T) {
 }
 
 func TestExportPatchFailsOnChunkedTrackedOverflowBeforeListingUntracked(t *testing.T) {
-	chunks, _ := makeChunkedExportData(patchio.MaxPatchBytes+1, 96*1024+23, 't')
+	chunks, _ := makeChunkedExportData(patchio.MaxPatchBytes+1, 4*1024+23, 't')
 	g := &exportGitOps{
 		trackedChunks: chunks,
 	}
@@ -427,7 +427,7 @@ func TestExportPatchAllowsChunkedBinaryUntrackedDiffAtExactSizeLimit(t *testing.
 	if err := os.WriteFile(filepath.Join(repo, "late.bin"), []byte{0x00}, 0o644); err != nil {
 		t.Fatalf("write late.bin: %v", err)
 	}
-	chunks, want := makeChunkedExportData(patchio.MaxPatchBytes, 64*1024+29, 0x00)
+	chunks, want := makeChunkedExportData(patchio.MaxPatchBytes, 4*1024+29, 0x00)
 	g := &exportGitOps{
 		untracked: []string{"late.bin"},
 		diffChunksByPath: map[string][][]byte{
@@ -469,16 +469,14 @@ func TestExportPatchFailsWhenLateAppendCrossesSizeLimit(t *testing.T) {
 	}
 }
 
-func TestExportPatchFailsWhenChunkedLateAppendCrossesSizeLimit(t *testing.T) {
+func TestExportPatchFailsWhenChunkedUntrackedStreamCrossesSizeLimit(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repo, "late.bin"), []byte{0x00}, 0o644); err != nil {
 		t.Fatalf("write late.bin: %v", err)
 	}
-	trackedChunks, _ := makeChunkedExportData(patchio.MaxPatchBytes-63, 256*1024+11, 'm')
-	untrackedChunks, _ := makeChunkedExportData(64, 1, 0x80)
+	untrackedChunks, _ := makeChunkedExportData(patchio.MaxPatchBytes+1, 4*1024+31, 0x80)
 	g := &exportGitOps{
-		trackedChunks: trackedChunks,
-		untracked:     []string{"late.bin"},
+		untracked: []string{"late.bin"},
 		diffChunksByPath: map[string][][]byte{
 			"late.bin": untrackedChunks,
 		},
@@ -486,10 +484,16 @@ func TestExportPatchFailsWhenChunkedLateAppendCrossesSizeLimit(t *testing.T) {
 
 	_, err := exportPatchBytes(context.Background(), g, repo, "", false, "", 0, nil)
 	if err == nil {
-		t.Fatal("expected late chunked append overflow to fail")
+		t.Fatal("expected long-lived chunked untracked stream overflow to fail")
 	}
 	if !strings.Contains(err.Error(), "patch exceeds size limit") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if g.listUntrackedCalls != 1 {
+		t.Fatalf("expected one untracked listing, got %d", g.listUntrackedCalls)
+	}
+	if g.diffNewToCalls != 1 {
+		t.Fatalf("expected one streamed untracked diff call, got %d", g.diffNewToCalls)
 	}
 }
 
