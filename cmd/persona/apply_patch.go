@@ -6,8 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"persona/internal/model"
 	"persona/internal/patchio"
@@ -120,23 +118,6 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 	return nil
 }
 
-func shouldRetryExistingNewFileSkip(err error, skipped []string) bool {
-	if patchio.IsAlreadyExistsError(err) {
-		return true
-	}
-	if err == nil || len(skipped) == 0 {
-		return false
-	}
-	msg := err.Error()
-	for _, path := range skipped {
-		path = filepath.ToSlash(path)
-		if path != "" && strings.Contains(msg, path) {
-			return true
-		}
-		base := filepath.Base(path)
-		if base != "" && base != path && strings.Contains(msg, base) {
-			return true
-		}
-	}
-	return false
+func shouldRetryExistingNewFileSkip(err error, _ []string) bool {
+	return patchio.IsAlreadyExistsError(err)
 }
