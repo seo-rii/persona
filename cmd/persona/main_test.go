@@ -80,6 +80,45 @@ func TestNewRootCmdExposesVersionSurface(t *testing.T) {
 	}
 }
 
+func TestRunWithDepsWrapsGetwdError(t *testing.T) {
+	err, childCode := runWithDeps(context.Background(), model.Options{}, runDeps{
+		getwd: func() (string, error) {
+			return "", errors.New("getwd failed")
+		},
+	})
+	if childCode != 0 {
+		t.Fatalf("expected child code 0, got %d", childCode)
+	}
+	var personaErr *model.PersonaError
+	if !errors.As(err, &personaErr) {
+		t.Fatalf("expected PersonaError, got %v", err)
+	}
+	if personaErr.Code != model.ExitEnv || personaErr.Op != "getwd" {
+		t.Fatalf("unexpected wrapped error: %+v", personaErr)
+	}
+}
+
+func TestRunWithDepsWrapsDetectRepoError(t *testing.T) {
+	err, childCode := runWithDeps(context.Background(), model.Options{}, runDeps{
+		getwd: func() (string, error) {
+			return "/repo", nil
+		},
+		detectRepo: func(context.Context, string) (string, string, error) {
+			return "", "", errors.New("detect failed")
+		},
+	})
+	if childCode != 0 {
+		t.Fatalf("expected child code 0, got %d", childCode)
+	}
+	var personaErr *model.PersonaError
+	if !errors.As(err, &personaErr) {
+		t.Fatalf("expected PersonaError, got %v", err)
+	}
+	if personaErr.Code != model.ExitRepo || personaErr.Op != "detect repo" {
+		t.Fatalf("unexpected wrapped error: %+v", personaErr)
+	}
+}
+
 func TestPatchStateRelPaths(t *testing.T) {
 	got := patchStateRelPaths("state.patch")
 	if len(got) != 2 || got[0] != "state.patch" || got[1] != "state.patch.lock" {

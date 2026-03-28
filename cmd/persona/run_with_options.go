@@ -17,13 +17,35 @@ import (
 	"persona/internal/session"
 )
 
+type runDeps struct {
+	getwd      func() (string, error)
+	detectRepo func(context.Context, string) (string, string, error)
+	newGit     func(string, string, bool) model.GitOps
+	newMount   func() model.NSOps
+	now        func() time.Time
+}
+
 func runWithOptions(ctx context.Context, opts model.Options) (retErr error, childCode int) {
-	cwd, err := os.Getwd()
+	return runWithDeps(ctx, opts, runDeps{
+		getwd:      os.Getwd,
+		detectRepo: gitx.DetectRepo,
+		newGit: func(repoRoot, gitDir string, verbose bool) model.GitOps {
+			return &gitx.Git{RepoRoot: repoRoot, GitDir: gitDir, Verbose: verbose}
+		},
+		newMount: func() model.NSOps {
+			return ns.RealNS{}
+		},
+		now: time.Now,
+	})
+}
+
+func runWithDeps(ctx context.Context, opts model.Options, deps runDeps) (retErr error, childCode int) {
+	cwd, err := deps.getwd()
 	if err != nil {
 		return model.Wrap(model.ExitEnv, "getwd", err), 0
 	}
 
-	repoRoot, gitDir, err := gitx.DetectRepo(ctx, cwd)
+	repoRoot, gitDir, err := deps.detectRepo(ctx, cwd)
 	if err != nil {
 		return model.Wrap(model.ExitRepo, "detect repo", err), 0
 	}
@@ -41,10 +63,10 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 	}
 	log = log.With("component", "persona")
 
-	var g model.GitOps = &gitx.Git{RepoRoot: repoRoot, GitDir: gitDir, Verbose: opts.Verbose}
-	var mount model.NSOps = ns.RealNS{}
+	g := deps.newGit(repoRoot, gitDir, opts.Verbose)
+	mount := deps.newMount()
 
-	patchPath, err := patchio.EnsurePatchPath(opts, gitDir, time.Now())
+	patchPath, err := patchio.EnsurePatchPath(opts, gitDir, deps.now())
 	if err != nil {
 		return model.Wrap(model.ExitWrite, "ensure patch path", err), 0
 	}
