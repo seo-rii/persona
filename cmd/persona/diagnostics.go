@@ -147,6 +147,9 @@ func newActivateCmd() *cobra.Command {
 			}
 			setcapPath, err := resolveSetcapPathFn(setcapCandidates)
 			if err != nil {
+				if strings.TrimSpace(os.Getenv("PERSONA_SETCAP_BIN")) != "" {
+					return fmt.Errorf("invalid PERSONA_SETCAP_BIN: %w", err)
+				}
 				return fmt.Errorf("setcap not found; install libcap2-bin")
 			}
 			perm := activateCapabilitySpec(allowDACOverride)
@@ -204,14 +207,21 @@ func findSetcapPath(candidates []string) (string, error) {
 func resolveSetcapPath(candidates []string) (string, error) {
 	override := strings.TrimSpace(os.Getenv("PERSONA_SETCAP_BIN"))
 	if override != "" {
-		info, err := os.Stat(override)
+		if !filepath.IsAbs(override) {
+			return "", fmt.Errorf("PERSONA_SETCAP_BIN must be an absolute path")
+		}
+		resolved, err := filepath.EvalSymlinks(override)
+		if err != nil {
+			return "", err
+		}
+		info, err := os.Stat(resolved)
 		if err != nil {
 			return "", err
 		}
 		if info.IsDir() || info.Mode()&0o111 == 0 {
 			return "", fmt.Errorf("setcap not found")
 		}
-		return override, nil
+		return resolved, nil
 	}
 	return findSetcapPathFn(candidates)
 }

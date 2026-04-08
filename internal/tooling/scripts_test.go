@@ -170,6 +170,37 @@ func TestBuildShWarnsWhenSetcapIsMissing(t *testing.T) {
 	}
 }
 
+func TestBuildShTreatsRelativeSetcapOverrideAsMissing(t *testing.T) {
+	repoRoot := repoRoot(t)
+	binDir, _ := stubGoBuildingPersonaBinary(t, "go1.25.3", "dirname", "mkdir", "id", "sudo")
+	setcapPath := filepath.Join(t.TempDir(), "setcap")
+	if err := os.WriteFile(setcapPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write setcap stub: %v", err)
+	}
+	relOverride, err := filepath.Rel(repoRoot, setcapPath)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+
+	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "build.sh"))
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"PERSONA_SETCAP_BIN="+relOverride,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build.sh failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "warning: setcap not found") {
+		t.Fatalf("expected relative override to be treated as missing, got:\n%s", text)
+	}
+	if strings.Contains(text, "warning: sudo setcap failed") {
+		t.Fatalf("did not expect sudo failure warning for relative override, got:\n%s", text)
+	}
+}
+
 func TestBuildShWarnsWhenSudoSetcapFails(t *testing.T) {
 	repoRoot := repoRoot(t)
 	binDir, _ := stubGoBuildingPersonaBinary(t, "go1.25.3", "dirname", "mkdir", "id")
@@ -673,7 +704,7 @@ func stubGoBuildingPersonaBinary(t *testing.T, goVersion string, extraCommands .
 		"  cat > \"$3\" <<'EOF'",
 		"#!/bin/sh",
 		"if [ \"$1\" = \"doctor\" ]; then",
-		"  if [ -n \"${PERSONA_SETCAP_BIN:-}\" ] && [ -x \"$PERSONA_SETCAP_BIN\" ] && [ ! -d \"$PERSONA_SETCAP_BIN\" ]; then",
+		"  if [ -n \"${PERSONA_SETCAP_BIN:-}\" ] && [ \"${PERSONA_SETCAP_BIN#/}\" != \"$PERSONA_SETCAP_BIN\" ] && [ -x \"$PERSONA_SETCAP_BIN\" ] && [ ! -d \"$PERSONA_SETCAP_BIN\" ]; then",
 		"    printf 'setcap=%s\\n' \"$PERSONA_SETCAP_BIN\"",
 		"  else",
 		"    printf 'setcap=missing\\n'",

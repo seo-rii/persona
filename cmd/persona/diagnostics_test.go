@@ -171,6 +171,52 @@ func TestResolveSetcapPathUsesOverrideBeforeCandidates(t *testing.T) {
 	}
 }
 
+func TestResolveSetcapPathRejectsRelativeOverride(t *testing.T) {
+	tmp := t.TempDir()
+	override := filepath.Join(tmp, "custom-setcap")
+	if err := os.WriteFile(override, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write override: %v", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	relOverride, err := filepath.Rel(cwd, override)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+	t.Setenv("PERSONA_SETCAP_BIN", relOverride)
+
+	_, err = resolveSetcapPath(nil)
+	if err == nil {
+		t.Fatal("expected relative override error")
+	}
+	if !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("expected absolute path error, got %v", err)
+	}
+}
+
+func TestResolveSetcapPathResolvesAbsoluteSymlinkOverride(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "trusted-setcap")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	override := filepath.Join(tmp, "custom-setcap")
+	if err := os.Symlink(target, override); err != nil {
+		t.Fatalf("symlink override: %v", err)
+	}
+	t.Setenv("PERSONA_SETCAP_BIN", override)
+
+	got, err := resolveSetcapPath(nil)
+	if err != nil {
+		t.Fatalf("resolveSetcapPath error: %v", err)
+	}
+	if got != target {
+		t.Fatalf("expected resolved target %q, got %q", target, got)
+	}
+}
+
 func TestResolveSetcapPathRejectsMissingOverrideWithoutFallback(t *testing.T) {
 	fallback := filepath.Join(t.TempDir(), "fallback-setcap")
 	if err := os.WriteFile(fallback, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -413,6 +459,45 @@ func TestActivateCommandUsesSetcapOverride(t *testing.T) {
 	}
 }
 
+func TestActivateCommandRejectsRelativeSetcapOverride(t *testing.T) {
+	origRequireSetcapCapabilityFn := requireSetcapCapabilityFn
+	t.Cleanup(func() {
+		requireSetcapCapabilityFn = origRequireSetcapCapabilityFn
+	})
+
+	requireSetcapCapabilityFn = func() error { return nil }
+
+	tmp := t.TempDir()
+	override := filepath.Join(tmp, "custom-setcap")
+	if err := os.WriteFile(override, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write override: %v", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	relOverride, err := filepath.Rel(cwd, override)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+	t.Setenv("PERSONA_SETCAP_BIN", relOverride)
+
+	binary := filepath.Join(tmp, "persona-bin")
+	if err := os.WriteFile(binary, []byte("bin"), 0o755); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+
+	cmd := newActivateCmd()
+	cmd.SetArgs([]string{"--binary", binary})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "invalid PERSONA_SETCAP_BIN") {
+		t.Fatalf("expected invalid override error, got %v", err)
+	}
+}
+
 func TestRequireSetcapCapability(t *testing.T) {
 	origGeteuidFn := geteuidFn
 	origReadCapEffFn := readCapEffFn
@@ -422,11 +507,11 @@ func TestRequireSetcapCapability(t *testing.T) {
 	})
 
 	cases := []struct {
-		name       string
-		euid       int
-		capEff     uint64
-		readErr    error
-		wantErr    bool
+		name    string
+		euid    int
+		capEff  uint64
+		readErr error
+		wantErr bool
 	}{
 		{name: "root", euid: 0},
 		{name: "non-root with cap_setfcap", euid: 1000, capEff: 1 << capSetFcap},
