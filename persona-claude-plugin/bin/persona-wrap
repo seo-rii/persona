@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
-import hashlib
 import json
 import os
-import pathlib
 import re
 import shlex
 import shutil
@@ -157,23 +155,6 @@ def resolve_persona_bin():
     return ""
 
 
-def patch_root():
-    override = os.getenv("PERSONA_WRAP_PATCH_ROOT", "").strip()
-    if override:
-        return pathlib.Path(override).expanduser()
-    plugin_data = os.getenv("CLAUDE_PLUGIN_DATA", "").strip()
-    if plugin_data:
-        return pathlib.Path(plugin_data) / "patches"
-    return pathlib.Path.home() / ".cache" / "persona-claude-plugin" / "patches"
-
-
-def patch_path(session_id, repo_dir):
-    safe_session = re.sub(r"[^A-Za-z0-9._-]+", "-", session_id or "session")
-    safe_session = safe_session.strip("-") or "session"
-    digest = hashlib.sha256(f"{session_id}\0{repo_dir}".encode("utf-8")).hexdigest()[:16]
-    return patch_root() / f"{safe_session}-{digest}.patch"
-
-
 def selected_shell(event, tool_input):
     for candidate in (
         tool_input.get("shell"),
@@ -193,10 +174,10 @@ def shell_args(shell_command):
     return ["-c"]
 
 
-def wrapped_command(persona_bin, patch_file, shell_command, original_command):
+def wrapped_command(persona_bin, session_id, shell_command, original_command):
     shell_argv = " ".join(shlex.quote(arg) for arg in [shell_command, *shell_args(shell_command)])
     return (
-        f"{shlex.quote(persona_bin)} --patch {shlex.quote(str(patch_file))} -- "
+        f"{shlex.quote(persona_bin)} daemon exec --session-key {shlex.quote(session_id or 'session')} -- "
         f"{shell_argv} {shlex.quote(original_command)}"
     )
 
@@ -239,7 +220,7 @@ def main():
 
     updated_input = dict(tool_input)
     shell_command = selected_shell(event, tool_input)
-    updated_input["command"] = wrapped_command(persona_bin, patch_path(session_id, repo_dir), shell_command, command)
+    updated_input["command"] = wrapped_command(persona_bin, session_id, shell_command, command)
     emit_pretooluse("allow", "Run the Bash command through persona.", updated_input)
     return 0
 

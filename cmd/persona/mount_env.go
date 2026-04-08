@@ -51,6 +51,10 @@ type mountEnv struct {
 }
 
 func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mount model.NSOps, cleanup *cleanupStack, log *slog.Logger) (*mountEnv, error) {
+	return setupMountTargetEnv(repoRoot, gitDir, basePath, sess, mount, cleanup, log)
+}
+
+func setupMountTargetEnv(targetPath, gitDir, basePath string, sess *session.Session, mount model.NSOps, cleanup *cleanupStack, log *slog.Logger) (*mountEnv, error) {
 	extRoot, err := os.MkdirTemp("", "persona-session-")
 	if err != nil {
 		return nil, model.Wrap(model.ExitEnv, "create external session dir", err)
@@ -96,14 +100,14 @@ func setupMountEnv(repoRoot, gitDir, basePath string, sess *session.Session, mou
 	}
 	pushUmountCleanup(cleanup, mount, sess.MntBase)
 
-	if err := mount.MountOverlay(repoRoot, model.OverlayOpts{
+	if err := mount.MountOverlay(targetPath, model.OverlayOpts{
 		LowerDir: sess.MntBase,
 		UpperDir: sess.Upper,
 		WorkDir:  sess.Work,
 	}); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "mount overlay", err)
 	}
-	log.Debug("overlay mounted", "repo", repoRoot, "base", basePath)
+	log.Debug("overlay mounted", "target", targetPath, "base", basePath)
 
 	return env, nil
 }

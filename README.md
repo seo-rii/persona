@@ -39,8 +39,8 @@ When Claude Code enables the plugin, set `PERSONA_BIN` to the built persona bina
 
 What the plugin does:
 
-- `PreToolUse` on `Bash` rewrites eligible shell commands to `persona --patch <session-repo patch> -- <selected shell> ...`.
-- Patch files default to `${CLAUDE_PLUGIN_DATA}/patches/`, keyed by the Claude `session_id` and repo root.
+- `PreToolUse` on `Bash` rewrites eligible shell commands to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
+- Each Claude chat session key maps to its own daemon-backed patch/view pair, so concurrent chats in the same Claude instance stay isolated from each other.
 - The plugin ships a `persona-worker` agent, and `settings.json` sets `"agent": "persona-worker"` so the main thread prefers Bash-based editing.
 - `Edit`, `MultiEdit`, and `Write` are denied so mutations stay inside the persona-backed Bash path.
 - Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
@@ -49,7 +49,7 @@ What the plugin does:
 Important limits:
 
 - Native Claude Code file tools do not see persona's overlay view. Use Bash reads (`cat`, `sed -n`, `rg`) for files that were changed through persona in the same session.
-- This is a Bash execution wrapper, not a long-lived workspace API. persona still does not expose `start-session` / `exec` / `read` / `write` / `diff` / `end-session`.
+- `persona daemon` now provides stable per-session view paths, but the shipped plugin still only rewrites Bash. Native Claude file tools are not redirected into that view yet.
 - Codex does not currently support the same transparent Bash rewrite flow via plugins, so this repository only ships the Claude Code integration today.
 
 ## Usage
@@ -72,6 +72,9 @@ persona --patch /tmp/state.patch -- cat new.txt
 
 - `persona doctor`: print capability/mount diagnostics, trusted `setcap` path, OverlayFS availability, and `unshare -m true` preflight hints.
 - `persona activate`: grant `cap_sys_admin` to the persona binary by default. Use `--binary PATH` to target a different persona executable, and add `--allow-dac-override` only when patch writes must bypass DAC checks.
+- `persona daemon exec --session-key <key> -- <command...>`: create or reuse a daemon-backed overlay session, run the command inside its stable view, and flush back into that session's patch file.
+- `persona daemon info --session-key <key> --json`: ensure a daemon session exists and print its stable `view_path` / `patch_path` for tool integrations.
+- `persona daemon end --session-key <key>`: flush the daemon session and remove its overlay view.
 - `persona version`: print the current persona CLI version.
 - Run `persona version` or `persona --version` to see the current CLI version instead of relying on README text.
 
@@ -83,6 +86,14 @@ sudo ./bin/persona activate
 ```
 
 If your binary lives on a `nosuid` mount, file capabilities are ignored; use `sudo` or move the binary.
+
+Daemon example:
+
+```
+persona daemon info --session-key claude-chat-123 --json
+persona daemon exec --session-key claude-chat-123 -- sh -lc 'printf hello > note.txt'
+persona daemon end --session-key claude-chat-123
+```
 
 ## Options
 

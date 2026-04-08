@@ -384,7 +384,7 @@ func TestReadmeDocumentsCorePersonaCommandsFromHelp(t *testing.T) {
 	}
 	readme := string(data)
 	help := personaHelp(t, repoRoot)
-	for _, cmd := range []string{"activate", "doctor", "version"} {
+	for _, cmd := range []string{"activate", "daemon", "doctor", "version"} {
 		if !strings.Contains(help, cmd) {
 			t.Fatalf("persona --help missing core command %s:\n%s", cmd, help)
 		}
@@ -495,6 +495,36 @@ func TestReadmeDocumentsDoctorHelpSurface(t *testing.T) {
 	} {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README missing doctor guidance %q:\n%s", want, readme)
+		}
+	}
+}
+
+func TestReadmeDocumentsDaemonHelpSurface(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	help := personaSubcommandHelp(t, repoRoot, "daemon")
+	for _, want := range []string{
+		"Manage persistent overlay sessions for plugins and tools",
+		"Usage:",
+		"exec",
+		"info",
+		"end",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("persona daemon --help missing %q:\n%s", want, help)
+		}
+	}
+	for _, want := range []string{
+		"`persona daemon exec --session-key <key> -- <command...>`",
+		"`persona daemon info --session-key <key> --json`",
+		"`persona daemon end --session-key <key>`",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing daemon guidance %q:\n%s", want, readme)
 		}
 	}
 }

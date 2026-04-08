@@ -97,7 +97,6 @@ func TestPersonaClaudePluginHooksWrapBashAndBlockWrites(t *testing.T) {
 
 func TestPersonaWrapRewritesBashCommandsAndPreservesInput(t *testing.T) {
 	repoRoot := repoRoot(t)
-	pluginData := filepath.Join(t.TempDir(), "plugin-data")
 	personaStub := filepath.Join(t.TempDir(), "persona")
 	if err := os.WriteFile(personaStub, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write persona stub: %v", err)
@@ -115,7 +114,6 @@ func TestPersonaWrapRewritesBashCommandsAndPreservesInput(t *testing.T) {
 			"run_in_background": true,
 		},
 	}, map[string]string{
-		"CLAUDE_PLUGIN_DATA":               pluginData,
 		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
 		"CLAUDE_PROJECT_DIR":               repoRoot,
 	})
@@ -139,17 +137,11 @@ func TestPersonaWrapRewritesBashCommandsAndPreservesInput(t *testing.T) {
 		t.Fatalf("expected run_in_background to be preserved, got %#v", updatedInput["run_in_background"])
 	}
 	command := updatedInput["command"].(string)
-	if !strings.Contains(command, personaStub+" --patch ") {
-		t.Fatalf("expected wrapped command to invoke persona, got %q", command)
+	if !strings.Contains(command, personaStub+" daemon exec --session-key session-123 -- ") {
+		t.Fatalf("expected wrapped command to invoke persona daemon exec, got %q", command)
 	}
 	if !strings.Contains(command, " -- /bin/zsh -lc 'npm test'") {
 		t.Fatalf("expected wrapped command to run original payload through selected shell, got %q", command)
-	}
-	if !strings.Contains(command, filepath.Join(pluginData, "patches", "session-123-")) {
-		t.Fatalf("expected wrapped command to include plugin data patch path, got %q", command)
-	}
-	if !strings.Contains(command, "session-123-") || !strings.Contains(command, ".patch") {
-		t.Fatalf("expected wrapped command to include a session patch name, got %q", command)
 	}
 }
 
@@ -197,7 +189,7 @@ func TestPersonaWrapFallsBackToCurrentShellWhenToolInputShellIsMissing(t *testin
 		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
 	}
 	command := response["hookSpecificOutput"].(map[string]any)["updatedInput"].(map[string]any)["command"].(string)
-	if !strings.Contains(command, " -- /bin/sh -c 'printf ok'") {
+	if !strings.Contains(command, "daemon exec --session-key session-123 -- /bin/sh -c 'printf ok'") {
 		t.Fatalf("expected wrapper to fall back to current shell with shell-appropriate flags, got %q", command)
 	}
 }
@@ -238,6 +230,7 @@ func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 	for _, want := range []string{
 		"## Claude Code Plugin",
 		"claude --plugin-dir ./persona-claude-plugin",
+		"`persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`",
 		"selected shell",
 		"`settings.json` sets `\"agent\": \"persona-worker\"`",
 		"`Edit`, `MultiEdit`, and `Write` are denied",
@@ -258,7 +251,8 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 	text := string(data)
 	for _, want := range []string{
 		"claude --plugin-dir ./persona-claude-plugin",
-		"`${CLAUDE_PLUGIN_DATA}/patches/`",
+		"`persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`",
+		"Each Claude chat session key maps to its own daemon-backed patch/view pair.",
 		"`tool_input.shell` when Claude exposes it",
 		"`Edit`, `MultiEdit`, and `Write` are denied",
 		"`Read` observes the checkout on disk",

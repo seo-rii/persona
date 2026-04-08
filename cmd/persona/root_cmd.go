@@ -97,6 +97,7 @@ func newRootCmd() *cobra.Command {
 		},
 	})
 	addDiagnosticCommands(cmd)
+	addDaemonCommands(cmd)
 	return cmd
 }
 
