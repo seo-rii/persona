@@ -40,11 +40,11 @@ func newRootCmd() *cobra.Command {
 		Args:          cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if showVersion {
-				fmt.Fprintln(os.Stdout, buildinfo.PersonaVersion)
+				fmt.Fprintln(cmd.OutOrStdout(), buildinfo.PersonaVersion)
 				return nil
 			}
 			if len(args) == 0 {
-				fmt.Fprintln(os.Stderr, "command is required")
+				fmt.Fprintln(cmd.ErrOrStderr(), "command is required")
 				_ = cmd.Help()
 				return &exitError{code: model.ExitEnv}
 			}
@@ -70,7 +70,8 @@ func newRootCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.SetOut(os.Stderr)
+	cmd.SetOut(os.Stdout)
+	cmd.SetErr(os.Stderr)
 
 	cmd.Flags().StringVar(&patchPath, "patch", "", "patch file path (default: auto-generate)")
 	cmd.Flags().StringVar(&patchDir, "patch-dir", "", "directory for auto-generated patch files (default: <gitdir>/persona/patches)")
@@ -92,7 +93,7 @@ func newRootCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print the current persona CLI version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprintln(os.Stdout, buildinfo.PersonaVersion)
+			fmt.Fprintln(cmd.OutOrStdout(), buildinfo.PersonaVersion)
 		},
 	})
 	addDiagnosticCommands(cmd)

@@ -80,6 +80,26 @@ func TestNewRootCmdExposesVersionSurface(t *testing.T) {
 	}
 }
 
+func TestNewRootCmdSeparatesStdoutAndStderr(t *testing.T) {
+	cmd := newRootCmd()
+	if got := cmd.OutOrStdout(); got != os.Stdout {
+		t.Fatalf("expected root stdout writer %v, got %v", os.Stdout, got)
+	}
+	if got := cmd.ErrOrStderr(); got != os.Stderr {
+		t.Fatalf("expected root stderr writer %v, got %v", os.Stderr, got)
+	}
+	doctor, _, err := cmd.Find([]string{"doctor"})
+	if err != nil {
+		t.Fatalf("find doctor command: %v", err)
+	}
+	if got := doctor.OutOrStdout(); got != os.Stdout {
+		t.Fatalf("expected doctor stdout writer %v, got %v", os.Stdout, got)
+	}
+	if got := doctor.ErrOrStderr(); got != os.Stderr {
+		t.Fatalf("expected doctor stderr writer %v, got %v", os.Stderr, got)
+	}
+}
+
 func TestRunWithDepsWrapsGetwdError(t *testing.T) {
 	err, childCode := runWithDeps(context.Background(), model.Options{}, runDeps{
 		getwd: func() (string, error) {

@@ -1,6 +1,7 @@
 package tooling
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -362,6 +363,28 @@ func TestReadmeDocumentsCorePersonaCommandsFromHelp(t *testing.T) {
 	}
 }
 
+func TestPersonaHelpWritesUsageToStdout(t *testing.T) {
+	repoRoot := repoRoot(t)
+	stdout, stderr := personaStreams(t, repoRoot, "--help")
+	if !strings.Contains(stdout, "persona [OPTIONS] -- <command> [args...]") {
+		t.Fatalf("expected persona --help on stdout, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	if strings.Contains(stderr, "persona [OPTIONS] -- <command> [args...]") {
+		t.Fatalf("expected help usage to stay off stderr, got stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestPersonaDoctorWritesDiagnosticsToStdout(t *testing.T) {
+	repoRoot := repoRoot(t)
+	stdout, stderr := personaStreams(t, repoRoot, "doctor")
+	if !strings.Contains(stdout, "persona doctor") {
+		t.Fatalf("expected doctor output on stdout, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	if strings.Contains(stderr, "persona doctor") || strings.Contains(stderr, "setcap=") {
+		t.Fatalf("expected doctor diagnostics to stay off stderr, got stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
 func TestReadmeDocumentsActivateFlagsFromHelp(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
@@ -616,6 +639,21 @@ func personaOutput(t *testing.T, repoRoot string, args ...string) string {
 		t.Fatalf("persona %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
+}
+
+func personaStreams(t *testing.T, repoRoot string, args ...string) (string, string) {
+	t.Helper()
+	cmdArgs := append([]string{"run", "./cmd/persona"}, args...)
+	cmd := exec.Command("go", cmdArgs...)
+	cmd.Dir = repoRoot
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("persona %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String(), stderr.String()
 }
 
 func stubGo(t *testing.T, extraCommands ...string) (string, string) {
