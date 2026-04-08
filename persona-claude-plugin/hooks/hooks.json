@@ -1,0 +1,29 @@
+{
+  "description": "Route Bash commands through persona and block direct file writes.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap",
+            "timeout": 30,
+            "statusMessage": "Preparing persona-backed shell command"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap",
+            "timeout": 10,
+            "statusMessage": "Enforcing persona-backed edit path"
+          }
+        ]
+      }
+    ]
+  }
+}

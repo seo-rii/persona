@@ -27,6 +27,30 @@ Output directory can be customized via `PERSONA_BUILD_DIR` (default: `./bin`).
 `build.sh` checks `go env GOVERSION` up front and fails early unless the detected toolchain is Go 1.25+.
 If `setcap` lives outside the standard trusted absolute paths, set `PERSONA_SETCAP_BIN=/absolute/or/explicit/path/to/setcap`; `build.sh`, `persona doctor`, and `persona activate` all honor the same override.
 
+## Claude Code Plugin
+
+The repository ships a local Claude Code plugin root in `./persona-claude-plugin`.
+
+```
+claude --plugin-dir ./persona-claude-plugin
+```
+
+When Claude Code enables the plugin, set `PERSONA_BIN` to the built persona binary (`persona`, `/abs/path/to/persona`, or `./bin/persona`).
+
+What the plugin does:
+
+- `PreToolUse` on `Bash` rewrites eligible shell commands to `persona --patch <session-repo patch> -- bash -lc ...`.
+- Patch files default to `${CLAUDE_PLUGIN_DATA}/patches/`, keyed by the Claude `session_id` and repo root.
+- The plugin ships a `persona-worker` agent, and `settings.json` sets `"agent": "persona-worker"` so the main thread prefers Bash-based editing.
+- `Edit`, `MultiEdit`, and `Write` are denied so mutations stay inside the persona-backed Bash path.
+- Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
+
+Important limits:
+
+- Native Claude Code file tools do not see persona's overlay view. Use Bash reads (`cat`, `sed -n`, `rg`) for files that were changed through persona in the same session.
+- This is a Bash execution wrapper, not a long-lived workspace API. persona still does not expose `start-session` / `exec` / `read` / `write` / `diff` / `end-session`.
+- Codex does not currently support the same transparent Bash rewrite flow via plugins, so this repository only ships the Claude Code integration today.
+
 ## Usage
 
 ```

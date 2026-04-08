@@ -1,0 +1,19 @@
+{
+  "name": "persona-claude",
+  "version": "0.1.0",
+  "description": "Claude Code plugin that routes mutable Bash work through persona session patches.",
+  "keywords": [
+    "persona",
+    "claude-code",
+    "overlayfs",
+    "patch"
+  ],
+  "agents": "./agents/",
+  "hooks": "./hooks/hooks.json",
+  "userConfig": {
+    "PERSONA_BIN": {
+      "description": "Command name or path for the persona binary (for example persona or /abs/path/to/persona).",
+      "sensitive": false
+    }
+  }
+}

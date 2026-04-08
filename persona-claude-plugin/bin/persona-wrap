@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+
+DEFAULT_BYPASS_PREFIXES = ("git", "gh", "persona", "claude")
+SHELL_NAMES = {"bash", "sh", "zsh", "fish"}
+ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+
+
+def load_event():
+    try:
+        return json.load(sys.stdin)
+    except json.JSONDecodeError:
+        return {}
+
+
+def emit_pretooluse(decision, reason=None, updated_input=None):
+    payload = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+        }
+    }
+    if reason:
+        payload["hookSpecificOutput"]["permissionDecisionReason"] = reason
+    if updated_input is not None:
+        payload["hookSpecificOutput"]["updatedInput"] = updated_input
+    json.dump(payload, sys.stdout)
+
+
+def tokenize(command):
+    try:
+        return shlex.split(command, posix=True)
+    except ValueError:
+        return []
+
+
+def classify_tokens(tokens):
+    if not tokens:
+        return None
+
+    index = 0
+    while index < len(tokens) and ASSIGNMENT_RE.fullmatch(tokens[index]):
+        index += 1
+    if index >= len(tokens):
+        return None
+
+    token = os.path.basename(tokens[index])
+
+    if token == "env":
+        index += 1
+        while index < len(tokens):
+            current = tokens[index]
+            if current == "--":
+                index += 1
+                break
+            if current.startswith("-") or ASSIGNMENT_RE.fullmatch(current):
+                index += 1
+                continue
+            break
+        return classify_tokens(tokens[index:])
+
+    if token in {"command", "builtin", "time", "noglob"}:
+        return classify_tokens(tokens[index + 1 :])
+
+    if token == "sudo":
+        index += 1
+        while index < len(tokens):
+            current = tokens[index]
+            if current == "--":
+                index += 1
+                break
+            if current.startswith("-"):
+                index += 1
+                continue
+            break
+        return classify_tokens(tokens[index:])
+
+    if token in SHELL_NAMES:
+        for shell_index in range(index + 1, len(tokens) - 1):
+            flag = tokens[shell_index]
+            if flag == "--":
+                break
+            if flag.startswith("-") and "c" in flag[1:]:
+                return classify_tokens(tokenize(tokens[shell_index + 1]))
+        return token
+
+    return token
+
+
+def should_bypass(command):
+    bypass_regex = os.getenv("PERSONA_WRAP_BYPASS_REGEX", "").strip()
+    if bypass_regex:
+        try:
+            if re.search(bypass_regex, command):
+                return True
+        except re.error:
+            pass
+
+    prefixes = split_csv(os.getenv("PERSONA_WRAP_BYPASS_PREFIXES", ""))
+    if not prefixes:
+        prefixes = list(DEFAULT_BYPASS_PREFIXES)
+    primary = classify_tokens(tokenize(command))
+    return primary in prefixes
+
+
+def split_csv(raw):
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def repo_root(cwd):
+    try:
+        completed = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return completed.stdout.strip()
+
+
+def resolve_persona_bin():
+    configured = os.getenv("PERSONA_WRAP_PERSONA_BIN", "").strip()
+    if not configured:
+        configured = os.getenv("CLAUDE_PLUGIN_OPTION_PERSONA_BIN", "").strip()
+    if not configured:
+        configured = "persona"
+
+    if "/" in configured or configured.startswith("."):
+        candidate = configured
+        if not os.path.isabs(candidate):
+            project_dir = os.getenv("CLAUDE_PROJECT_DIR", "").strip()
+            if project_dir:
+                candidate = os.path.join(project_dir, candidate)
+            else:
+                candidate = os.path.abspath(candidate)
+        candidate = os.path.abspath(candidate)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+        return ""
+
+    if shutil.which(configured):
+        return configured
+    return ""
+
+
+def patch_root():
+    override = os.getenv("PERSONA_WRAP_PATCH_ROOT", "").strip()
+    if override:
+        return pathlib.Path(override).expanduser()
+    plugin_data = os.getenv("CLAUDE_PLUGIN_DATA", "").strip()
+    if plugin_data:
+        return pathlib.Path(plugin_data) / "patches"
+    return pathlib.Path.home() / ".cache" / "persona-claude-plugin" / "patches"
+
+
+def patch_path(session_id, repo_dir):
+    safe_session = re.sub(r"[^A-Za-z0-9._-]+", "-", session_id or "session")
+    safe_session = safe_session.strip("-") or "session"
+    digest = hashlib.sha256(f"{session_id}\0{repo_dir}".encode("utf-8")).hexdigest()[:16]
+    return patch_root() / f"{safe_session}-{digest}.patch"
+
+
+def wrapped_command(persona_bin, patch_file, original_command):
+    return (
+        f"{shlex.quote(persona_bin)} --patch {shlex.quote(str(patch_file))} -- "
+        f"bash -lc {shlex.quote(original_command)}"
+    )
+
+
+def main():
+    event = load_event()
+    tool_name = event.get("tool_name")
+
+    if tool_name in {"Edit", "MultiEdit", "Write"}:
+        emit_pretooluse(
+            "deny",
+            "persona-claude blocks direct file writes; use Bash so persona can export changes back into the session patch.",
+        )
+        return 0
+
+    if tool_name != "Bash":
+        return 0
+
+    tool_input = event.get("tool_input", {})
+    command = tool_input.get("command", "")
+    cwd = event.get("cwd") or os.getcwd()
+    session_id = event.get("session_id", "")
+
+    if not isinstance(command, str) or not command.strip():
+        return 0
+    if should_bypass(command):
+        return 0
+
+    repo_dir = repo_root(cwd)
+    if not repo_dir:
+        return 0
+
+    persona_bin = resolve_persona_bin()
+    if not persona_bin:
+        emit_pretooluse(
+            "deny",
+            "persona binary not found; configure the plugin PERSONA_BIN option or set PERSONA_WRAP_PERSONA_BIN.",
+        )
+        return 0
+
+    updated_input = dict(tool_input)
+    updated_input["command"] = wrapped_command(persona_bin, patch_path(session_id, repo_dir), command)
+    emit_pretooluse("allow", "Run the Bash command through persona.", updated_input)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
