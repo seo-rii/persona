@@ -109,6 +109,7 @@ func TestPersonaWrapRewritesBashCommandsAndPreservesInput(t *testing.T) {
 		"tool_name":       "Bash",
 		"tool_input": map[string]any{
 			"command":           "npm test",
+			"shell":             "/bin/zsh",
 			"description":       "Run tests",
 			"timeout":           45,
 			"run_in_background": true,
@@ -141,8 +142,8 @@ func TestPersonaWrapRewritesBashCommandsAndPreservesInput(t *testing.T) {
 	if !strings.Contains(command, personaStub+" --patch ") {
 		t.Fatalf("expected wrapped command to invoke persona, got %q", command)
 	}
-	if !strings.Contains(command, " -- bash -lc 'npm test'") {
-		t.Fatalf("expected wrapped command to run original Bash payload, got %q", command)
+	if !strings.Contains(command, " -- /bin/zsh -lc 'npm test'") {
+		t.Fatalf("expected wrapped command to run original payload through selected shell, got %q", command)
 	}
 	if !strings.Contains(command, filepath.Join(pluginData, "patches", "session-123-")) {
 		t.Fatalf("expected wrapped command to include plugin data patch path, got %q", command)
@@ -168,6 +169,36 @@ func TestPersonaWrapBypassesGitCommands(t *testing.T) {
 	})
 	if len(bytes.TrimSpace(output)) != 0 {
 		t.Fatalf("expected git command to bypass persona wrapping, got %s", output)
+	}
+}
+
+func TestPersonaWrapFallsBackToCurrentShellWhenToolInputShellIsMissing(t *testing.T) {
+	repoRoot := repoRoot(t)
+	personaStub := filepath.Join(t.TempDir(), "persona")
+	if err := os.WriteFile(personaStub, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write persona stub: %v", err)
+	}
+
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Bash",
+		"tool_input": map[string]any{
+			"command": "printf ok",
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"SHELL":                            "/bin/sh",
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
+	}
+	command := response["hookSpecificOutput"].(map[string]any)["updatedInput"].(map[string]any)["command"].(string)
+	if !strings.Contains(command, " -- /bin/sh -c 'printf ok'") {
+		t.Fatalf("expected wrapper to fall back to current shell with shell-appropriate flags, got %q", command)
 	}
 }
 
@@ -207,6 +238,7 @@ func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 	for _, want := range []string{
 		"## Claude Code Plugin",
 		"claude --plugin-dir ./persona-claude-plugin",
+		"selected shell",
 		"`settings.json` sets `\"agent\": \"persona-worker\"`",
 		"`Edit`, `MultiEdit`, and `Write` are denied",
 		"Codex does not currently support the same transparent Bash rewrite flow",
@@ -227,6 +259,7 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 	for _, want := range []string{
 		"claude --plugin-dir ./persona-claude-plugin",
 		"`${CLAUDE_PLUGIN_DATA}/patches/`",
+		"`tool_input.shell` when Claude exposes it",
 		"`Edit`, `MultiEdit`, and `Write` are denied",
 		"`Read` observes the checkout on disk",
 		"Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed",

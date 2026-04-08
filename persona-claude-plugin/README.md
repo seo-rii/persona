@@ -32,10 +32,11 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 
 ## Behavior
 
-- `PreToolUse` on `Bash` runs `bin/persona-wrap`, which rewrites eligible Bash calls to `persona --patch <session-repo patch> -- bash -lc ...`.
+- `PreToolUse` on `Bash` runs `bin/persona-wrap`, which rewrites eligible Bash calls to `persona --patch <session-repo patch> -- <selected shell> ...`.
 - Patch files live under `${CLAUDE_PLUGIN_DATA}/patches/` by default and are keyed by the Claude `session_id` plus the current repo root.
 - `Edit`, `MultiEdit`, and `Write` are denied so file mutations stay inside the persona-backed Bash path.
 - Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
+- The wrapper uses `tool_input.shell` when Claude exposes it, otherwise falls back to `event.shell`, then the hook process `SHELL`, and finally `bash`.
 
 ## Optional environment overrides
 

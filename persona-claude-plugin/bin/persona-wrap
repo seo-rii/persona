@@ -174,10 +174,30 @@ def patch_path(session_id, repo_dir):
     return patch_root() / f"{safe_session}-{digest}.patch"
 
 
-def wrapped_command(persona_bin, patch_file, original_command):
+def selected_shell(event, tool_input):
+    for candidate in (
+        tool_input.get("shell"),
+        event.get("shell"),
+        os.getenv("CLAUDE_SHELL", "").strip(),
+        os.getenv("SHELL", "").strip(),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return "bash"
+
+
+def shell_args(shell_command):
+    shell_name = os.path.basename(shell_command)
+    if shell_name in {"bash", "zsh", "ksh", "mksh", "fish"}:
+        return ["-lc"]
+    return ["-c"]
+
+
+def wrapped_command(persona_bin, patch_file, shell_command, original_command):
+    shell_argv = " ".join(shlex.quote(arg) for arg in [shell_command, *shell_args(shell_command)])
     return (
         f"{shlex.quote(persona_bin)} --patch {shlex.quote(str(patch_file))} -- "
-        f"bash -lc {shlex.quote(original_command)}"
+        f"{shell_argv} {shlex.quote(original_command)}"
     )
 
 
@@ -218,7 +238,8 @@ def main():
         return 0
 
     updated_input = dict(tool_input)
-    updated_input["command"] = wrapped_command(persona_bin, patch_path(session_id, repo_dir), command)
+    shell_command = selected_shell(event, tool_input)
+    updated_input["command"] = wrapped_command(persona_bin, patch_path(session_id, repo_dir), shell_command, command)
     emit_pretooluse("allow", "Run the Bash command through persona.", updated_input)
     return 0
 

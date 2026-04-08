@@ -39,11 +39,12 @@ When Claude Code enables the plugin, set `PERSONA_BIN` to the built persona bina
 
 What the plugin does:
 
-- `PreToolUse` on `Bash` rewrites eligible shell commands to `persona --patch <session-repo patch> -- bash -lc ...`.
+- `PreToolUse` on `Bash` rewrites eligible shell commands to `persona --patch <session-repo patch> -- <selected shell> ...`.
 - Patch files default to `${CLAUDE_PLUGIN_DATA}/patches/`, keyed by the Claude `session_id` and repo root.
 - The plugin ships a `persona-worker` agent, and `settings.json` sets `"agent": "persona-worker"` so the main thread prefers Bash-based editing.
 - `Edit`, `MultiEdit`, and `Write` are denied so mutations stay inside the persona-backed Bash path.
 - Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
+- The wrapper uses the selected shell from the hook payload when available, then falls back to the hook process `SHELL`, and only then to `bash`.
 
 Important limits:
 
