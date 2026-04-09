@@ -67,6 +67,7 @@ Recommended setup:
 Important limits:
 
 - Repo-scoped Claude file tools now run inside persona's stable daemon view, but their tool responses may still show internal daemon `view_path` absolute paths because Claude sees the rewritten input path.
+- The plugin adds path-mapping context after managed file-tool calls so Claude can relate internal daemon paths back to repository paths, but the underlying tool output still uses the executed absolute path.
 - The automatic wrapper uses daemon defaults. If you need advanced daemon options such as `--base-mode worktree`, run `persona daemon ...` commands explicitly.
 - Git-oriented shell commands are intentionally bypassed, so they do not run inside the persona overlay view.
 - Writes outside the current repository are denied instead of being sent through persona.

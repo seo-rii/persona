@@ -70,6 +70,7 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 ## Limits
 
 - Repo-scoped file tools are redirected into persona's daemon view, but tool responses may still show internal daemon `view_path` paths because Claude sees the rewritten absolute path.
+- After managed file-tool calls, the hook adds mapping context such as `Treat matching paths under <view_path> as repository paths under <repo_root>`, which helps Claude reason about those internal paths even though the tool output itself is unchanged.
 - The automatic wrapper uses daemon defaults. If you need `--base-mode worktree` or other daemon flags, run `persona daemon ...` commands manually.
 - Git-oriented shell commands are bypassed instead of wrapped, so they do not see the persona overlay view.
 - Writes outside the current repository are denied instead of being sent through persona.

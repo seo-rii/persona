@@ -332,6 +332,15 @@ def translated_directory_path(path_value, repo_dir, view_path, git_dir, patch_pa
     return path_value, False, ""
 
 
+def repo_path_for_view(path_value, repo_dir, view_path):
+    if not isinstance(path_value, str) or not path_value.strip():
+        return ""
+    candidate = os.path.abspath(path_value)
+    if not is_subpath(candidate, view_path):
+        return ""
+    return os.path.join(repo_dir, rel_to_root(candidate, view_path))
+
+
 def rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, git_dir, patch_path, cwd):
     updated_input = dict(tool_input)
     if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
@@ -356,6 +365,29 @@ def managed_write_target(tool_name, tool_input, repo_dir, view_path, git_dir, pa
         return False
     _, managed, _ = translated_repo_path(tool_input.get("file_path"), repo_dir, view_path, git_dir, patch_path)
     return managed
+
+
+def managed_tool_context(tool_name, tool_input, repo_dir, view_path, cwd):
+    if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
+        repo_path = repo_path_for_view(tool_input.get("file_path"), repo_dir, view_path)
+        if repo_path:
+            return (
+                f"This {tool_name} call used persona view path {os.path.abspath(tool_input.get('file_path'))}. "
+                f"Treat it as repository path {repo_path}."
+            )
+        return ""
+    if tool_name in {"Glob", "Grep"}:
+        search_root = tool_input.get("path")
+        if not isinstance(search_root, str) or not search_root.strip():
+            search_root = os.path.abspath(cwd)
+        repo_path = repo_path_for_view(search_root, repo_dir, view_path)
+        if repo_path:
+            return (
+                f"This {tool_name} call searched persona view path {os.path.abspath(search_root)}. "
+                f"Treat matching paths under {view_path} as repository paths under {repo_dir}; "
+                f"the search root corresponds to {repo_path}."
+            )
+    return ""
 
 
 def persona_not_found_reason():
@@ -442,7 +474,7 @@ def handle_pretooluse(event):
 
 def handle_posttooluse(event):
     tool_name = event.get("tool_name")
-    if tool_name not in WRITE_FILE_TOOLS:
+    if tool_name not in FILE_TOOLS:
         return 0
 
     cwd = event.get("cwd") or os.getcwd()
@@ -468,6 +500,13 @@ def handle_posttooluse(event):
         print(f"persona daemon session lookup failed: {subprocess_error_text(err)}", file=sys.stderr)
         return 1
 
+    managed_context = managed_tool_context(tool_name, event.get("tool_input", {}), repo_dir, info.get("view_path", ""), cwd)
+
+    if tool_name not in WRITE_FILE_TOOLS:
+        if managed_context:
+            emit_posttooluse(managed_context)
+        return 0
+
     if not managed_write_target(
         tool_name,
         event.get("tool_input", {}),
@@ -483,6 +522,9 @@ def handle_posttooluse(event):
     except (OSError, subprocess.SubprocessError) as err:
         print(f"persona daemon flush failed: {subprocess_error_text(err)}", file=sys.stderr)
         return 1
+    if managed_context:
+        emit_posttooluse(managed_context + " persona flushed the daemon-backed file-tool change into the session patch.")
+        return 0
     emit_posttooluse("persona flushed the daemon-backed file-tool change into the session patch.")
     return 0
 

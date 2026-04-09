@@ -115,7 +115,7 @@ func TestPersonaClaudePluginHooksWrapBashAndRouteFileTools(t *testing.T) {
 		}
 	}
 	postEntry := postToolUse[0].(map[string]any)
-	if got, want := postEntry["matcher"], "Edit|MultiEdit|Write"; got != want {
+	if got, want := postEntry["matcher"], "Read|Edit|MultiEdit|Write|Glob|Grep"; got != want {
 		t.Fatalf("unexpected PostToolUse matcher: got %v want %q", got, want)
 	}
 }
@@ -566,7 +566,7 @@ func TestPersonaWrapFlushesManagedWriteToolsOnPostToolUse(t *testing.T) {
 		t.Fatalf("unexpected hook event name: got %v want %q", got, want)
 	}
 	context, _ := hookOutput["additionalContext"].(string)
-	if !strings.Contains(context, "flushed") {
+	if !strings.Contains(context, "flushed") || !strings.Contains(context, filepath.Join(repoRoot, "docs", "note.txt")) {
 		t.Fatalf("expected flush context, got %q", context)
 	}
 	logData, err := os.ReadFile(logPath)
@@ -575,6 +575,37 @@ func TestPersonaWrapFlushesManagedWriteToolsOnPostToolUse(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "daemon flush --session-key session-123") {
 		t.Fatalf("expected daemon flush call, got log:\n%s", logData)
+	}
+}
+
+func TestPersonaWrapAddsPathContextForManagedReadPostToolUse(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	viewFile := filepath.Join(viewPath, "README.md")
+	if err := os.MkdirAll(viewPath, 0o755); err != nil {
+		t.Fatalf("mkdir view dir: %v", err)
+	}
+	personaStub := writePersonaDaemonStub(t, viewPath, filepath.Join(t.TempDir(), "persona.log"))
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PostToolUse",
+		"tool_name":       "Read",
+		"tool_input": map[string]any{
+			"file_path": viewFile,
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"PERSONA_TEST_VIEW_PATH":           viewPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal post-tool response: %v\n%s", err, output)
+	}
+	context, _ := response["hookSpecificOutput"].(map[string]any)["additionalContext"].(string)
+	if !strings.Contains(context, viewFile) || !strings.Contains(context, filepath.Join(repoRoot, "README.md")) {
+		t.Fatalf("expected path mapping context, got %q", context)
 	}
 }
 
@@ -635,6 +666,7 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 		"`.git` and daemon state paths",
 		"`--base-mode worktree`",
 		"tool responses may still show internal daemon `view_path` paths",
+		"Treat matching paths under",
 		"Writes outside the current repository are denied",
 		"Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed",
 	} {
@@ -660,6 +692,7 @@ func TestPersonaWorkerAgentDocumentsDaemonWorkflow(t *testing.T) {
 		"`DAEMON_*`",
 		"`persona daemon end --session-key <claude-session-id>`",
 		"internal daemon `view_path`",
+		"Treat it as repository path",
 		"`.git` or daemon state paths",
 	} {
 		if !strings.Contains(text, want) {
