@@ -194,6 +194,29 @@ func TestPersonaWrapFallsBackToCurrentShellWhenToolInputShellIsMissing(t *testin
 	}
 }
 
+func TestPersonaWrapNoopsOutsideGitRepositories(t *testing.T) {
+	repoRoot := repoRoot(t)
+	personaStub := filepath.Join(t.TempDir(), "persona")
+	if err := os.WriteFile(personaStub, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write persona stub: %v", err)
+	}
+	nonRepo := t.TempDir()
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             nonRepo,
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Bash",
+		"tool_input": map[string]any{
+			"command": "printf ok",
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+	})
+	if len(bytes.TrimSpace(output)) != 0 {
+		t.Fatalf("expected non-repo command to bypass wrapping, got %s", output)
+	}
+}
+
 func TestPersonaWrapDeniesDirectWriteTools(t *testing.T) {
 	repoRoot := repoRoot(t)
 	output := runPersonaWrap(t, repoRoot, map[string]any{

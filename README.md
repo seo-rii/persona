@@ -95,6 +95,8 @@ persona daemon exec --session-key claude-chat-123 -- sh -lc 'printf hello > note
 persona daemon end --session-key claude-chat-123
 ```
 
+`persona daemon exec` and `persona daemon info` accept the same `--base-mode`, `--base-ref`, `--allow-dirty`, `--ignored-mode`, `--ignored-max`, and `--apply-mode` knobs as the one-shot CLI. Reusing the same session key with different daemon option values is rejected until you run `persona daemon end` for that key.
+
 ## Options
 
 - `--version`: print the current persona CLI version and exit.

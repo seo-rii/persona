@@ -51,7 +51,7 @@ func TestDaemonSessionPatchPathIsStablePerKey(t *testing.T) {
 
 func TestDaemonStateEnsureSessionReusesKeyAndIsolatesDifferentKeys(t *testing.T) {
 	repoRoot, gitDir := daemonTestRepo(t)
-	state := newTestDaemonState(repoRoot, gitDir, func() model.GitOps {
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
 		return &exportGitOps{}
 	})
 	cfg := daemonTestConfig()
@@ -82,7 +82,7 @@ func TestDaemonStateEnsureSessionReusesKeyAndIsolatesDifferentKeys(t *testing.T)
 
 func TestDaemonStateRejectsOptionMismatchForExistingKey(t *testing.T) {
 	repoRoot, gitDir := daemonTestRepo(t)
-	state := newTestDaemonState(repoRoot, gitDir, func() model.GitOps {
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
 		return &exportGitOps{}
 	})
 	cfg := daemonTestConfig()
@@ -96,10 +96,135 @@ func TestDaemonStateRejectsOptionMismatchForExistingKey(t *testing.T) {
 	}
 }
 
+func TestDaemonStateRejectsBusySessionForLiveOwner(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &exportGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	_, leaseID, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg)
+	if err != nil {
+		t.Fatalf("acquire exec: %v", err)
+	}
+	if _, _, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg); err == nil || !strings.Contains(err.Error(), "already executing") {
+		t.Fatalf("expected busy-session rejection, got %v", err)
+	}
+	if err := state.releaseExec(context.Background(), "chat-a", leaseID); err != nil {
+		t.Fatalf("release exec: %v", err)
+	}
+}
+
+func TestDaemonStateRejectsWrongLeaseAndKeepsSessionBusy(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &exportGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	_, leaseID, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg)
+	if err != nil {
+		t.Fatalf("acquire exec: %v", err)
+	}
+	if err := state.releaseExec(context.Background(), "chat-a", "wrong-lease"); err == nil || !strings.Contains(err.Error(), "lease mismatch") {
+		t.Fatalf("expected lease mismatch, got %v", err)
+	}
+	if !state.sessions["chat-a"].busy {
+		t.Fatal("expected session to stay busy after wrong lease release")
+	}
+	if err := state.releaseExec(context.Background(), "chat-a", leaseID); err != nil {
+		t.Fatalf("release exec with correct lease: %v", err)
+	}
+}
+
+func TestDaemonStateRecoversStaleBusySessionAndFlushesPatch(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	g := &exportGitOps{tracked: []byte("diff --git a/recovered.txt b/recovered.txt\n")}
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return g
+	})
+	cfg := daemonTestConfig()
+
+	info, _, err := state.acquireExec(context.Background(), "chat-a", 99999999, cfg)
+	if err != nil {
+		t.Fatalf("acquire exec with stale owner: %v", err)
+	}
+	reacquired, leaseID, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg)
+	if err != nil {
+		t.Fatalf("reacquire after stale owner: %v", err)
+	}
+	if reacquired.ViewPath != info.ViewPath || reacquired.PatchPath != info.PatchPath {
+		t.Fatalf("expected stale recovery to reuse session paths, got %#v vs %#v", reacquired, info)
+	}
+	patchData, err := os.ReadFile(info.PatchPath)
+	if err != nil {
+		t.Fatalf("read recovered patch: %v", err)
+	}
+	if string(patchData) != string(g.tracked) {
+		t.Fatalf("expected stale recovery flush, got %q", patchData)
+	}
+	if err := state.releaseExec(context.Background(), "chat-a", leaseID); err != nil {
+		t.Fatalf("release reacquired exec: %v", err)
+	}
+}
+
+func TestDaemonStateKeepsConcurrentSessionKeysIsolated(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &exportGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	infoA, err := state.ensureSession(context.Background(), "chat-a", cfg)
+	if err != nil {
+		t.Fatalf("ensure chat-a: %v", err)
+	}
+	infoB, err := state.ensureSession(context.Background(), "chat-b", cfg)
+	if err != nil {
+		t.Fatalf("ensure chat-b: %v", err)
+	}
+	diffA := []byte("diff --git a/a.txt b/a.txt\n")
+	diffB := []byte("diff --git a/b.txt b/b.txt\n")
+	state.sessions["chat-a"].g = &exportGitOps{tracked: diffA}
+	state.sessions["chat-b"].g = &exportGitOps{tracked: diffB}
+
+	_, leaseA, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg)
+	if err != nil {
+		t.Fatalf("acquire chat-a: %v", err)
+	}
+	if _, _, err := state.acquireExec(context.Background(), "chat-b", os.Getpid(), cfg); err != nil {
+		t.Fatalf("acquire chat-b while chat-a is busy: %v", err)
+	}
+	leaseB := state.sessions["chat-b"].busyLease
+	if err := state.releaseExec(context.Background(), "chat-a", leaseA); err != nil {
+		t.Fatalf("release chat-a: %v", err)
+	}
+	if err := state.releaseExec(context.Background(), "chat-b", leaseB); err != nil {
+		t.Fatalf("release chat-b: %v", err)
+	}
+	patchA, err := os.ReadFile(infoA.PatchPath)
+	if err != nil {
+		t.Fatalf("read chat-a patch: %v", err)
+	}
+	patchB, err := os.ReadFile(infoB.PatchPath)
+	if err != nil {
+		t.Fatalf("read chat-b patch: %v", err)
+	}
+	if string(patchA) != string(diffA) {
+		t.Fatalf("unexpected chat-a patch contents: %q", patchA)
+	}
+	if string(patchB) != string(diffB) {
+		t.Fatalf("unexpected chat-b patch contents: %q", patchB)
+	}
+	if infoA.PatchPath == infoB.PatchPath || infoA.ViewPath == infoB.ViewPath {
+		t.Fatalf("expected isolated paths, got %#v and %#v", infoA, infoB)
+	}
+}
+
 func TestDaemonStateReleaseExecWritesPatchAndEndCleansView(t *testing.T) {
 	repoRoot, gitDir := daemonTestRepo(t)
 	g := &exportGitOps{tracked: []byte("diff --git a/file.txt b/file.txt\n")}
-	state := newTestDaemonState(repoRoot, gitDir, func() model.GitOps {
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
 		return g
 	})
 	cfg := daemonTestConfig()
@@ -137,6 +262,144 @@ func TestDaemonStateReleaseExecWritesPatchAndEndCleansView(t *testing.T) {
 	}
 }
 
+func TestDaemonStateRecoversStaleLeaseAndFlushesPriorChanges(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	g := &exportGitOps{tracked: []byte("first\n")}
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return g
+	})
+	cfg := daemonTestConfig()
+
+	info1, lease1, err := state.acquireExec(context.Background(), "chat-a", -1, cfg)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	if lease1 == "" {
+		t.Fatal("expected first lease id")
+	}
+
+	info2, lease2, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg)
+	if err != nil {
+		t.Fatalf("second acquire after stale lease: %v", err)
+	}
+	if info1.ViewPath != info2.ViewPath {
+		t.Fatalf("expected stale recovery to reuse the same view, got %q and %q", info1.ViewPath, info2.ViewPath)
+	}
+	if lease1 == lease2 || lease2 == "" {
+		t.Fatalf("expected a fresh lease after stale recovery, got old=%q new=%q", lease1, lease2)
+	}
+	patchData, err := os.ReadFile(info2.PatchPath)
+	if err != nil {
+		t.Fatalf("read recovered patch: %v", err)
+	}
+	if string(patchData) != "first\n" {
+		t.Fatalf("expected stale recovery to flush prior changes, got %q", patchData)
+	}
+
+	g.tracked = []byte("second\n")
+	if err := state.releaseExec(context.Background(), "chat-a", lease2); err != nil {
+		t.Fatalf("release fresh lease: %v", err)
+	}
+	patchData, err = os.ReadFile(info2.PatchPath)
+	if err != nil {
+		t.Fatalf("read final patch: %v", err)
+	}
+	if string(patchData) != "second\n" {
+		t.Fatalf("expected current lease flush to update patch, got %q", patchData)
+	}
+}
+
+func TestDaemonStateDifferentSessionsFlushIndependentPatches(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &exportGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	infoA, err := state.ensureSession(context.Background(), "chat-a", cfg)
+	if err != nil {
+		t.Fatalf("ensure chat-a: %v", err)
+	}
+	infoB, err := state.ensureSession(context.Background(), "chat-b", cfg)
+	if err != nil {
+		t.Fatalf("ensure chat-b: %v", err)
+	}
+	gA := &exportGitOps{tracked: []byte("patch-a\n")}
+	gB := &exportGitOps{tracked: []byte("patch-b\n")}
+	state.sessions["chat-a"].g = gA
+	state.sessions["chat-b"].g = gB
+
+	_, leaseA, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg)
+	if err != nil {
+		t.Fatalf("acquire chat-a: %v", err)
+	}
+	if err := state.releaseExec(context.Background(), "chat-a", leaseA); err != nil {
+		t.Fatalf("release chat-a: %v", err)
+	}
+	_, leaseB, err := state.acquireExec(context.Background(), "chat-b", os.Getpid(), cfg)
+	if err != nil {
+		t.Fatalf("acquire chat-b: %v", err)
+	}
+	if err := state.releaseExec(context.Background(), "chat-b", leaseB); err != nil {
+		t.Fatalf("release chat-b: %v", err)
+	}
+
+	patchA, err := os.ReadFile(infoA.PatchPath)
+	if err != nil {
+		t.Fatalf("read patch-a: %v", err)
+	}
+	patchB, err := os.ReadFile(infoB.PatchPath)
+	if err != nil {
+		t.Fatalf("read patch-b: %v", err)
+	}
+	if string(patchA) != "patch-a\n" {
+		t.Fatalf("unexpected chat-a patch: %q", patchA)
+	}
+	if string(patchB) != "patch-b\n" {
+		t.Fatalf("unexpected chat-b patch: %q", patchB)
+	}
+
+	ended, err := state.endSession(context.Background(), "chat-a")
+	if err != nil {
+		t.Fatalf("end chat-a: %v", err)
+	}
+	if !ended {
+		t.Fatal("expected chat-a to end")
+	}
+	if _, ok := state.sessions["chat-b"]; !ok {
+		t.Fatal("expected chat-b session to remain live")
+	}
+	if _, err := os.Stat(infoB.ViewPath); err != nil {
+		t.Fatalf("expected chat-b view to remain after ending chat-a, got %v", err)
+	}
+}
+
+func TestDaemonStateEndRejectsBusyLiveSession(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &exportGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	_, leaseID, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg)
+	if err != nil {
+		t.Fatalf("acquire chat-a: %v", err)
+	}
+	ended, err := state.endSession(context.Background(), "chat-a")
+	if err == nil || !strings.Contains(err.Error(), "still busy") {
+		t.Fatalf("expected busy end rejection, got ended=%v err=%v", ended, err)
+	}
+	if ended {
+		t.Fatal("expected end=false while session is busy")
+	}
+	if _, ok := state.sessions["chat-a"]; !ok {
+		t.Fatal("expected busy session to remain registered")
+	}
+	if err := state.releaseExec(context.Background(), "chat-a", leaseID); err != nil {
+		t.Fatalf("release busy session: %v", err)
+	}
+}
+
 func daemonTestRepo(t *testing.T) (string, string) {
 	t.Helper()
 	repoRoot := t.TempDir()
@@ -158,8 +421,9 @@ func daemonTestConfig() daemonSessionConfig {
 	}
 }
 
-func newTestDaemonState(repoRoot, gitDir string, newGit func() model.GitOps) *daemonState {
-	return &daemonState{
+func newTestDaemonState(t *testing.T, repoRoot, gitDir string, newGit func() model.GitOps) *daemonState {
+	t.Helper()
+	state := &daemonState{
 		repoRoot: repoRoot,
 		gitDir:   gitDir,
 		deps: daemonDeps{
@@ -176,4 +440,6 @@ func newTestDaemonState(repoRoot, gitDir string, newGit func() model.GitOps) *da
 		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		sessions: make(map[string]*daemonSession),
 	}
+	t.Cleanup(state.closeAll)
+	return state
 }

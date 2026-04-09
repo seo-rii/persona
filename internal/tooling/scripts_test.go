@@ -529,6 +529,40 @@ func TestReadmeDocumentsDaemonHelpSurface(t *testing.T) {
 	}
 }
 
+func TestReadmeDocumentsDaemonExecFlagsFromHelp(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	help := personaSubcommandHelp(t, repoRoot, "daemon", "exec")
+	for _, flag := range []string{
+		"--session-key",
+		"--base-mode",
+		"--base-ref",
+		"--allow-dirty",
+		"--ignored-mode",
+		"--ignored-max",
+		"--apply-mode",
+	} {
+		if !strings.Contains(help, flag) {
+			t.Fatalf("persona daemon exec --help missing flag %s:\n%s", flag, help)
+		}
+		if !strings.Contains(readme, flag) {
+			t.Fatalf("README missing daemon flag contract %s:\n%s", flag, readme)
+		}
+	}
+	for _, want := range []string{
+		"same session key with different daemon option values is rejected",
+		"`persona daemon end`",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing daemon session-option contract %q:\n%s", want, readme)
+		}
+	}
+}
+
 func TestReadmeDocumentsIgnoredDriftOptOut(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
