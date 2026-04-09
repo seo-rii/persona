@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -323,6 +325,127 @@ func TestDaemonStateEndRemovesPersistedMetadata(t *testing.T) {
 	}
 	if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
 		t.Fatalf("expected metadata removal, got %v", err)
+	}
+}
+
+func TestDaemonStatePruneUsesPersistedLastUsedAfterRestart(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	now := time.Unix(1700000000, 0)
+	state1 := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &daemonExportApplyGitOps{}
+	})
+	state1.deps.now = func() time.Time { return now }
+	cfg := daemonTestConfig()
+
+	for _, key := range []string{"stale", "fresh"} {
+		if _, err := state1.ensureSession(context.Background(), key, cfg); err != nil {
+			t.Fatalf("ensure %s: %v", key, err)
+		}
+	}
+	state1.sessions["stale"].lastUsed = now.Add(-4 * time.Hour)
+	if err := state1.persistSessionLocked(state1.sessions["stale"]); err != nil {
+		t.Fatalf("persist stale session: %v", err)
+	}
+	state1.sessions["fresh"].lastUsed = now.Add(-10 * time.Minute)
+	if err := state1.persistSessionLocked(state1.sessions["fresh"]); err != nil {
+		t.Fatalf("persist fresh session: %v", err)
+	}
+	state1.closeAll()
+
+	state2 := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &daemonExportApplyGitOps{}
+	})
+	state2.deps.now = func() time.Time { return now }
+	pruned, err := state2.pruneSessions(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("prune restored sessions: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0] != "stale" {
+		t.Fatalf("expected only stale session to be pruned after restart, got %#v", pruned)
+	}
+	if _, ok := state2.sessions["fresh"]; !ok {
+		t.Fatal("expected fresh restored session to remain")
+	}
+}
+
+func TestDaemonStateStressConcurrentSessionIsolation(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &daemonExportApplyGitOps{}
+	})
+	cfg := daemonTestConfig()
+	const sessionCount = 6
+	const rounds = 3
+
+	type sessionExpectation struct {
+		key       string
+		patch     string
+		patchPath string
+	}
+	expectations := make([]sessionExpectation, 0, sessionCount)
+	for i := 0; i < sessionCount; i++ {
+		key := fmt.Sprintf("chat-%d", i)
+		info, err := state.ensureSession(context.Background(), key, cfg)
+		if err != nil {
+			t.Fatalf("ensure %s: %v", key, err)
+		}
+		g := &daemonExportApplyGitOps{}
+		state.sessions[key].g = g
+		expectations = append(expectations, sessionExpectation{key: key, patchPath: info.PatchPath})
+	}
+
+	start := make(chan struct{})
+	errCh := make(chan error, sessionCount)
+	var wg sync.WaitGroup
+	for i := range expectations {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			g := state.sessions[expectations[i].key].g.(*daemonExportApplyGitOps)
+			for round := 0; round < rounds; round++ {
+				payload := fmt.Sprintf("%s-round-%d\n", expectations[i].key, round)
+				g.tracked = []byte(payload)
+				_, leaseID, err := state.acquireExec(context.Background(), expectations[i].key, os.Getpid(), cfg)
+				if err != nil {
+					errCh <- fmt.Errorf("acquire %s round %d: %w", expectations[i].key, round, err)
+					return
+				}
+				time.Sleep(2 * time.Millisecond)
+				if err := state.releaseExec(context.Background(), expectations[i].key, leaseID); err != nil {
+					errCh <- fmt.Errorf("release %s round %d: %w", expectations[i].key, round, err)
+					return
+				}
+				expectations[i].patch = payload
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, expectation := range expectations {
+		patchData, err := os.ReadFile(expectation.patchPath)
+		if err != nil {
+			t.Fatalf("read %s patch: %v", expectation.key, err)
+		}
+		if string(patchData) != expectation.patch {
+			t.Fatalf("unexpected patch for %s: got %q want %q", expectation.key, patchData, expectation.patch)
+		}
+		for _, other := range expectations {
+			if other.key == expectation.key || other.patch == "" {
+				continue
+			}
+			if string(patchData) == other.patch {
+				t.Fatalf("patch for %s was overwritten by %s payload %q", expectation.key, other.key, other.patch)
+			}
+		}
 	}
 }
 
