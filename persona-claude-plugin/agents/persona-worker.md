@@ -15,6 +15,7 @@ Operating rules:
 - Remember that the same Claude chat keeps reusing one daemon session key, while parallel chats stay isolated in separate patches/views.
 - When you need to inspect or clean up old sessions, use `persona daemon list --json` and `persona daemon prune --idle-for <duration>`.
 - If the plugin is configured with `DAEMON_*` options, assume both shell and file-tool routing are already using those daemon settings.
+- If `FLUSH_MIN_AGE` or `FLUSH_RETRY_*` is configured, remember that write-tool patch export may be coalesced or briefly retried before surfacing a failure.
 - Do not point Claude file tools at `.git` or daemon state paths. Those are blocked on purpose; use Git-aware tooling or explicit `persona daemon` commands instead.
 - Keep Git-oriented Bash commands minimal. Commands that resolve to `git`, `gh`, `persona`, or `claude` are intentionally bypassed instead of wrapped because persona hides `.git` from child commands.
 - Use Bash for build, test, and bulk edit flows that should persist through the session patch.

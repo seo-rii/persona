@@ -62,7 +62,7 @@ Recommended setup:
 2. If you want capability-based execution, run `sudo ./bin/persona activate` once for that binary.
 3. Start Claude Code with `claude --plugin-dir ./persona-claude-plugin`.
 4. Point plugin config `PERSONA_BIN` at the built persona binary.
-5. If the default daemon settings are not enough, set plugin options such as `DAEMON_BASE_MODE`, `DAEMON_BASE_REF`, `DAEMON_ALLOW_DIRTY`, `DAEMON_IGNORED_MODE`, `DAEMON_IGNORED_MAX`, and `DAEMON_APPLY_MODE`.
+5. If the default daemon settings are not enough, set plugin options such as `DAEMON_BASE_MODE`, `DAEMON_BASE_REF`, `DAEMON_ALLOW_DIRTY`, `DAEMON_IGNORED_MODE`, `DAEMON_IGNORED_MAX`, `DAEMON_APPLY_MODE`, `FLUSH_MIN_AGE`, `FLUSH_RETRY_FOR`, and `FLUSH_RETRY_INTERVAL_MS`.
 
 Important limits:
 
@@ -96,7 +96,7 @@ persona --patch /tmp/state.patch -- cat new.txt
 - `persona daemon exec --session-key <key> -- <command...>`: create or reuse a daemon-backed overlay session, run the command inside its stable view, and flush back into that session's patch file.
 - `persona daemon info --session-key <key> --json`: ensure a daemon session exists and print its stable `view_path` / `patch_path` for tool integrations.
 - `persona daemon list --json`: list daemon sessions for the current repository, including busy / last-used metadata.
-- `persona daemon flush --session-key <key>`: write the current daemon view back into that session's patch file without ending the session.
+- `persona daemon flush --session-key <key> [--min-age <duration>]`: write the current daemon view back into that session's patch file without ending the session, optionally skipping very recent flushes.
 - `persona daemon prune --idle-for <duration>`: end idle daemon sessions for the current repository.
 - `persona daemon end --session-key <key>`: flush the daemon session and remove its overlay view.
 - `persona version`: print the current persona CLI version.
@@ -123,6 +123,7 @@ persona daemon end --session-key claude-chat-123
 ```
 
 `persona daemon exec` and `persona daemon info` accept the same `--base-mode`, `--base-ref`, `--allow-dirty`, `--ignored-mode`, `--ignored-max`, and `--apply-mode` knobs as the one-shot CLI. Reusing the same session key with different daemon option values is rejected until you run `persona daemon end` for that key.
+`persona daemon flush` accepts `--min-age` when you want to coalesce repeated write-backs instead of exporting after every write.
 For long-lived manual daemon sessions where the base should stay frozen even if the checkout changes outside the session, prefer `--base-mode worktree`.
 
 ## Options

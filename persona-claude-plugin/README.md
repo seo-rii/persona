@@ -34,6 +34,9 @@ persona-claude-plugin/
    - `DAEMON_IGNORED_MODE`
    - `DAEMON_IGNORED_MAX`
    - `DAEMON_APPLY_MODE`
+   - `FLUSH_MIN_AGE`
+   - `FLUSH_RETRY_FOR`
+   - `FLUSH_RETRY_INTERVAL_MS`
 
 The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 
@@ -66,6 +69,8 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 - `PERSONA_WRAP_BYPASS_PREFIXES` replaces the default bypass prefix list (`git,gh,persona,claude`) with a comma-separated list.
 - `PERSONA_WRAP_BYPASS_REGEX` bypasses wrapping when the raw Bash command matches the regex.
 - Claude plugin options `DAEMON_BASE_MODE`, `DAEMON_BASE_REF`, `DAEMON_ALLOW_DIRTY`, `DAEMON_IGNORED_MODE`, `DAEMON_IGNORED_MAX`, and `DAEMON_APPLY_MODE` are forwarded to both `persona daemon exec` and `persona daemon info`.
+- `FLUSH_MIN_AGE` forwards to `persona daemon flush --min-age <duration>` so repeated write-tool flushes can be coalesced.
+- `FLUSH_RETRY_FOR` and `FLUSH_RETRY_INTERVAL_MS` control how long the wrapper retries `persona daemon flush` when a concurrent shell command temporarily keeps the session busy.
 
 ## Limits
 

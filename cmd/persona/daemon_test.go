@@ -312,7 +312,7 @@ func TestDaemonStateFlushWritesPatchWithoutEndingSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure session: %v", err)
 	}
-	if err := state.flushSession(context.Background(), "chat-a"); err != nil {
+	if err := state.flushSession(context.Background(), "chat-a", 0); err != nil {
 		t.Fatalf("flush session: %v", err)
 	}
 	patchData, err := os.ReadFile(info.PatchPath)
@@ -340,8 +340,36 @@ func TestDaemonStateFlushRejectsBusyLiveSession(t *testing.T) {
 	if _, _, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg); err != nil {
 		t.Fatalf("acquire exec: %v", err)
 	}
-	if err := state.flushSession(context.Background(), "chat-a"); err == nil || !strings.Contains(err.Error(), "still busy") {
+	if err := state.flushSession(context.Background(), "chat-a", 0); err == nil || !strings.Contains(err.Error(), "still busy") {
 		t.Fatalf("expected busy flush rejection, got %v", err)
+	}
+}
+
+func TestDaemonStateFlushMinAgeSkipsRecentFlushes(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	g := &exportGitOps{tracked: []byte("first\n")}
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return g
+	})
+	cfg := daemonTestConfig()
+
+	info, err := state.ensureSession(context.Background(), "chat-a", cfg)
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	if err := state.flushSession(context.Background(), "chat-a", 0); err != nil {
+		t.Fatalf("initial flush: %v", err)
+	}
+	g.tracked = []byte("second\n")
+	if err := state.flushSession(context.Background(), "chat-a", time.Hour); err != nil {
+		t.Fatalf("min-age flush: %v", err)
+	}
+	patchData, err := os.ReadFile(info.PatchPath)
+	if err != nil {
+		t.Fatalf("read patch: %v", err)
+	}
+	if string(patchData) != "first\n" {
+		t.Fatalf("expected min-age flush to keep prior patch contents, got %q", patchData)
 	}
 }
 

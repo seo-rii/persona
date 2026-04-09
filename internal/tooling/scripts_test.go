@@ -525,7 +525,7 @@ func TestReadmeDocumentsDaemonHelpSurface(t *testing.T) {
 		"`persona daemon exec --session-key <key> -- <command...>`",
 		"`persona daemon info --session-key <key> --json`",
 		"`persona daemon list --json`",
-		"`persona daemon flush --session-key <key>`",
+		"`persona daemon flush --session-key <key> [--min-age <duration>]`",
 		"`persona daemon prune --idle-for <duration>`",
 		"`persona daemon end --session-key <key>`",
 		"`--base-mode worktree`",
@@ -567,6 +567,32 @@ func TestReadmeDocumentsDaemonExecFlagsFromHelp(t *testing.T) {
 	} {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README missing daemon session-option contract %q:\n%s", want, readme)
+		}
+	}
+}
+
+func TestReadmeDocumentsDaemonFlushFlagsFromHelp(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	readme := string(data)
+	help := personaSubcommandHelp(t, repoRoot, "daemon", "flush")
+	for _, flag := range []string{
+		"--session-key",
+		"--min-age",
+	} {
+		if !strings.Contains(help, flag) {
+			t.Fatalf("persona daemon flush --help missing flag %s:\n%s", flag, help)
+		}
+	}
+	for _, want := range []string{
+		"`persona daemon flush --session-key <key> [--min-age <duration>]`",
+		"`persona daemon flush` accepts `--min-age`",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing daemon flush contract %q:\n%s", want, readme)
 		}
 	}
 }

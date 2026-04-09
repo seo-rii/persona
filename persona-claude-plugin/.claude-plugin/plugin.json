@@ -38,6 +38,18 @@
     "DAEMON_APPLY_MODE": {
       "description": "Optional daemon apply mode override (strict or reject).",
       "sensitive": false
+    },
+    "FLUSH_MIN_AGE": {
+      "description": "Optional duration override to coalesce daemon flushes after write tools (for example 500ms or 2s).",
+      "sensitive": false
+    },
+    "FLUSH_RETRY_FOR": {
+      "description": "Optional duration override for retrying daemon flushes when a session is temporarily busy.",
+      "sensitive": false
+    },
+    "FLUSH_RETRY_INTERVAL_MS": {
+      "description": "Optional millisecond interval between daemon flush retries.",
+      "sensitive": false
     }
   }
 }

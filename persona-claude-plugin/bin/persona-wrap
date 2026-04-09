@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 
 DEFAULT_BYPASS_PREFIXES = ("git", "gh", "persona", "claude")
@@ -15,6 +16,7 @@ WRITE_FILE_TOOLS = {"Edit", "MultiEdit", "Write"}
 FILE_TOOLS = READ_ONLY_FILE_TOOLS | WRITE_FILE_TOOLS
 SHELL_NAMES = {"bash", "sh", "zsh", "fish"}
 ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+DURATION_RE = re.compile(r"(?i)^([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)$")
 
 
 def load_event():
@@ -215,6 +217,21 @@ def plugin_option(name):
     return os.getenv(f"CLAUDE_PLUGIN_OPTION_{name}", "").strip()
 
 
+def parse_duration_seconds(raw, option_name):
+    match = DURATION_RE.fullmatch(raw.strip())
+    if not match:
+        raise ValueError(f"{option_name} must be a duration like 250ms, 2s, 5m, or 1h")
+    magnitude = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "ms":
+        return magnitude / 1000.0
+    if unit == "s":
+        return magnitude
+    if unit == "m":
+        return magnitude * 60.0
+    return magnitude * 3600.0
+
+
 def daemon_option_args():
     args = []
     if plugin_option("DAEMON_BASE_MODE"):
@@ -238,6 +255,19 @@ def daemon_option_args():
     return args
 
 
+def flush_behavior():
+    min_age = plugin_option("FLUSH_MIN_AGE")
+    if min_age:
+        parse_duration_seconds(min_age, "FLUSH_MIN_AGE")
+    retry_for_raw = plugin_option("FLUSH_RETRY_FOR") or "2s"
+    retry_for = parse_duration_seconds(retry_for_raw, "FLUSH_RETRY_FOR")
+    retry_interval_raw = plugin_option("FLUSH_RETRY_INTERVAL_MS") or "150"
+    retry_interval_ms = int(retry_interval_raw)
+    if retry_interval_ms <= 0:
+        raise ValueError("FLUSH_RETRY_INTERVAL_MS must be > 0")
+    return min_age, retry_for, retry_interval_ms / 1000.0
+
+
 def daemon_session_info(persona_bin, session_id, daemon_args, cwd):
     completed = subprocess.run(
         [persona_bin, "daemon", "info", "--session-key", session_id or "session", *daemon_args, "--json"],
@@ -250,9 +280,12 @@ def daemon_session_info(persona_bin, session_id, daemon_args, cwd):
     return json.loads(completed.stdout)
 
 
-def daemon_flush(persona_bin, session_id, cwd):
+def daemon_flush(persona_bin, session_id, min_age, cwd):
+    args = [persona_bin, "daemon", "flush", "--session-key", session_id or "session"]
+    if min_age:
+        args.extend(["--min-age", min_age])
     subprocess.run(
-        [persona_bin, "daemon", "flush", "--session-key", session_id or "session"],
+        args,
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -495,6 +528,12 @@ def handle_posttooluse(event):
         return 1
 
     try:
+        flush_min_age, flush_retry_for, flush_retry_interval = flush_behavior()
+    except ValueError as err:
+        print(f"invalid persona flush plugin option: {err}", file=sys.stderr)
+        return 1
+
+    try:
         info = daemon_session_info(persona_bin, session_id, daemon_args, cwd)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as err:
         print(f"persona daemon session lookup failed: {subprocess_error_text(err)}", file=sys.stderr)
@@ -517,13 +556,26 @@ def handle_posttooluse(event):
     ):
         return 0
 
-    try:
-        daemon_flush(persona_bin, session_id, cwd)
-    except (OSError, subprocess.SubprocessError) as err:
-        print(f"persona daemon flush failed: {subprocess_error_text(err)}", file=sys.stderr)
-        return 1
+    deadline = time.monotonic() + flush_retry_for
+    while True:
+        try:
+            daemon_flush(persona_bin, session_id, flush_min_age, cwd)
+            break
+        except (OSError, subprocess.SubprocessError) as err:
+            err_text = subprocess_error_text(err)
+            if "still busy" in err_text and time.monotonic() < deadline:
+                time.sleep(flush_retry_interval)
+                continue
+            print(f"persona daemon flush failed: {err_text}", file=sys.stderr)
+            return 1
     if managed_context:
-        emit_posttooluse(managed_context + " persona flushed the daemon-backed file-tool change into the session patch.")
+        suffix = " persona flushed the daemon-backed file-tool change into the session patch."
+        if flush_min_age:
+            suffix = " persona flushed or deferred the daemon-backed file-tool change according to FLUSH_MIN_AGE."
+        emit_posttooluse(managed_context + suffix)
+        return 0
+    if flush_min_age:
+        emit_posttooluse("persona flushed or deferred the daemon-backed file-tool change according to FLUSH_MIN_AGE.")
         return 0
     emit_posttooluse("persona flushed the daemon-backed file-tool change into the session patch.")
     return 0

@@ -51,6 +51,9 @@ func TestPersonaClaudePluginManifestDeclaresExpectedPaths(t *testing.T) {
 		"DAEMON_IGNORED_MODE",
 		"DAEMON_IGNORED_MAX",
 		"DAEMON_APPLY_MODE",
+		"FLUSH_MIN_AGE",
+		"FLUSH_RETRY_FOR",
+		"FLUSH_RETRY_INTERVAL_MS",
 	} {
 		entry, ok := userConfig[key].(map[string]any)
 		if !ok {
@@ -578,6 +581,90 @@ func TestPersonaWrapFlushesManagedWriteToolsOnPostToolUse(t *testing.T) {
 	}
 }
 
+func TestPersonaWrapForwardsFlushMinAgeOption(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	viewFile := filepath.Join(viewPath, "docs", "note.txt")
+	if err := os.MkdirAll(filepath.Dir(viewFile), 0o755); err != nil {
+		t.Fatalf("mkdir view dir: %v", err)
+	}
+	logPath := filepath.Join(t.TempDir(), "persona.log")
+	personaStub := writePersonaDaemonStub(t, viewPath, logPath)
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PostToolUse",
+		"tool_name":       "Write",
+		"tool_input": map[string]any{
+			"file_path": viewFile,
+			"content":   "hello",
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN":          personaStub,
+		"CLAUDE_PLUGIN_OPTION_FLUSH_MIN_AGE":        "1s",
+		"PERSONA_TEST_VIEW_PATH":                    viewPath,
+		"PERSONA_TEST_LOG":                          logPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal post-tool response: %v\n%s", err, output)
+	}
+	context, _ := response["hookSpecificOutput"].(map[string]any)["additionalContext"].(string)
+	if !strings.Contains(context, "flushed or deferred") {
+		t.Fatalf("expected min-age context, got %q", context)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read persona stub log: %v", err)
+	}
+	if !strings.Contains(string(logData), "daemon flush --session-key session-123 --min-age 1s") {
+		t.Fatalf("expected flush --min-age call, got log:\n%s", logData)
+	}
+}
+
+func TestPersonaWrapRetriesBusyFlushes(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	viewFile := filepath.Join(viewPath, "docs", "note.txt")
+	if err := os.MkdirAll(filepath.Dir(viewFile), 0o755); err != nil {
+		t.Fatalf("mkdir view dir: %v", err)
+	}
+	logPath := filepath.Join(t.TempDir(), "persona.log")
+	retryFile := filepath.Join(t.TempDir(), "flush-retries")
+	if err := os.WriteFile(retryFile, []byte("1\n"), 0o644); err != nil {
+		t.Fatalf("write retry file: %v", err)
+	}
+	personaStub := writePersonaDaemonStub(t, viewPath, logPath)
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PostToolUse",
+		"tool_name":       "Write",
+		"tool_input": map[string]any{
+			"file_path": viewFile,
+			"content":   "hello",
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN":   personaStub,
+		"PERSONA_TEST_VIEW_PATH":             viewPath,
+		"PERSONA_TEST_LOG":                   logPath,
+		"PERSONA_TEST_FLUSH_FAIL_COUNT_FILE": retryFile,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal post-tool response: %v\n%s", err, output)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read persona stub log: %v", err)
+	}
+	if got := strings.Count(string(logData), "daemon flush --session-key session-123"); got < 2 {
+		t.Fatalf("expected flush retry attempts, got %d entries in log:\n%s", got, logData)
+	}
+}
+
 func TestPersonaWrapAddsPathContextForManagedReadPostToolUse(t *testing.T) {
 	repoRoot := repoRoot(t)
 	viewPath := filepath.Join(t.TempDir(), "view")
@@ -627,6 +714,8 @@ func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 		"`settings.json` sets `\"agent\": \"persona-worker\"`",
 		"`DAEMON_BASE_MODE`",
 		"`DAEMON_APPLY_MODE`",
+		"`FLUSH_MIN_AGE`",
+		"`FLUSH_RETRY_FOR`",
 		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
 		"`persona daemon flush --session-key <claude-session-id>`",
 		"`persona daemon list --json`",
@@ -660,6 +749,8 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 		"`persona daemon prune --idle-for 24h`",
 		"`DAEMON_BASE_MODE`",
 		"`DAEMON_ALLOW_DIRTY`",
+		"`FLUSH_MIN_AGE`",
+		"`FLUSH_RETRY_FOR`",
 		"`persona daemon end --session-key <claude-session-id>`",
 		"`tool_input.shell` when Claude exposes it",
 		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
@@ -690,6 +781,7 @@ func TestPersonaWorkerAgentDocumentsDaemonWorkflow(t *testing.T) {
 		"`persona daemon list --json`",
 		"`persona daemon prune --idle-for <duration>`",
 		"`DAEMON_*`",
+		"`FLUSH_MIN_AGE`",
 		"`persona daemon end --session-key <claude-session-id>`",
 		"internal daemon `view_path`",
 		"Treat it as repository path",
@@ -732,6 +824,14 @@ if [ "${1:-}" = "daemon" ] && [ "${2:-}" = "info" ]; then
   exit 0
 fi
 if [ "${1:-}" = "daemon" ] && [ "${2:-}" = "flush" ]; then
+  if [ -n "${PERSONA_TEST_FLUSH_FAIL_COUNT_FILE:-}" ] && [ -f "${PERSONA_TEST_FLUSH_FAIL_COUNT_FILE}" ]; then
+    remaining="$(tr -d '[:space:]' <"${PERSONA_TEST_FLUSH_FAIL_COUNT_FILE}")"
+    if [ -n "$remaining" ] && [ "$remaining" -gt 0 ]; then
+      printf '%s\n' "$((remaining - 1))" >"${PERSONA_TEST_FLUSH_FAIL_COUNT_FILE}"
+      printf '%s\n' 'session "session-123" is still busy in pid 1' >&2
+      exit 1
+    fi
+  fi
   exit 0
 fi
 exit 0

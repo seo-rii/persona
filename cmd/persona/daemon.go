@@ -64,6 +64,7 @@ type daemonRequest struct {
 	LeaseID        string              `json:"lease_id,omitempty"`
 	OwnerPID       int                 `json:"owner_pid,omitempty"`
 	IdleForSeconds int64               `json:"idle_for_seconds,omitempty"`
+	MinAgeNanos    int64               `json:"min_age_nanos,omitempty"`
 	Config         daemonSessionConfig `json:"config"`
 }
 
@@ -123,6 +124,7 @@ type daemonSession struct {
 	busyOwnerPID   int
 	busyLease      string
 	lastUsed       time.Time
+	lastFlushed    time.Time
 }
 
 func addDaemonCommands(root *cobra.Command) {
@@ -211,16 +213,25 @@ func addDaemonCommands(root *cobra.Command) {
 	listCmd.Flags().BoolVar(&listJSON, "json", false, "print daemon sessions as JSON")
 
 	var flushSessionKey string
+	var flushMinAge string
 	flushCmd := &cobra.Command{
 		Use:           "flush --session-key <key>",
 		Short:         "Write the current daemon view back into its patch file",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemonFlush(cmd.Context(), strings.TrimSpace(flushSessionKey))
+			minAge, err := time.ParseDuration(strings.TrimSpace(flushMinAge))
+			if err != nil {
+				return &model.PersonaError{Code: model.ExitEnv, Op: "parse flush min-age", Err: err}
+			}
+			if minAge < 0 {
+				return &model.PersonaError{Code: model.ExitEnv, Op: "parse flush min-age", Err: fmt.Errorf("min-age must be >= 0")}
+			}
+			return runDaemonFlush(cmd.Context(), strings.TrimSpace(flushSessionKey), minAge)
 		},
 	}
 	flushCmd.Flags().StringVar(&flushSessionKey, "session-key", "", "external session key, such as a Claude chat session id")
+	flushCmd.Flags().StringVar(&flushMinAge, "min-age", "0s", "skip the flush when the last successful daemon flush is newer than this duration")
 	_ = flushCmd.MarkFlagRequired("session-key")
 
 	var pruneIdleFor string
@@ -409,7 +420,7 @@ func runDaemonEnd(ctx context.Context, sessionKey string) error {
 	return client.end(ctx, sessionKey)
 }
 
-func runDaemonFlush(ctx context.Context, sessionKey string) error {
+func runDaemonFlush(ctx context.Context, sessionKey string, minAge time.Duration) error {
 	repoRoot, gitDir, _, err := daemonRepoContext(ctx)
 	if err != nil {
 		return err
@@ -418,7 +429,7 @@ func runDaemonFlush(ctx context.Context, sessionKey string) error {
 	if err != nil {
 		return err
 	}
-	return client.flush(ctx, sessionKey)
+	return client.flush(ctx, sessionKey, minAge)
 }
 
 func runDaemonList(ctx context.Context) ([]daemonSessionInfo, error) {
@@ -568,7 +579,7 @@ func (s *daemonState) handleRequest(req daemonRequest) daemonResponse {
 		err := s.releaseExec(context.Background(), key, req.LeaseID)
 		return daemonResponseForInfo(nil, err)
 	case "flush":
-		err := s.flushSession(context.Background(), key)
+		err := s.flushSession(context.Background(), key, time.Duration(req.MinAgeNanos))
 		return daemonResponseForInfo(nil, err)
 	case "prune":
 		pruned, err := s.pruneSessions(context.Background(), time.Duration(req.IdleForSeconds)*time.Second)
@@ -701,14 +712,14 @@ func (s *daemonState) endSession(ctx context.Context, sessionKey string) (bool, 
 	return true, nil
 }
 
-func (s *daemonState) flushSession(ctx context.Context, sessionKey string) error {
+func (s *daemonState) flushSession(ctx context.Context, sessionKey string, minAge time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess := s.sessions[sessionKey]
 	if sess == nil {
 		return nil
 	}
-	return s.flushSessionLocked(ctx, sessionKey, sess, "flush daemon session")
+	return s.flushSessionLocked(ctx, sessionKey, sess, "flush daemon session", minAge)
 }
 
 func (s *daemonState) pruneSessions(ctx context.Context, idleFor time.Duration) ([]string, error) {
@@ -876,12 +887,16 @@ func (s *daemonState) recoverBusyLocked(ctx context.Context, sess *daemonSession
 	return s.finishBusyLocked(ctx, sess)
 }
 
-func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string, sess *daemonSession, op string) error {
+func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string, sess *daemonSession, op string, minAge time.Duration) error {
 	if err := s.recoverBusyLocked(ctx, sess); err != nil {
 		return err
 	}
 	if sess.busy {
 		return model.Wrap(model.ExitEnv, op, fmt.Errorf("session %q is still busy in pid %d", sessionKey, sess.busyOwnerPID))
+	}
+	now := s.deps.now()
+	if minAge > 0 && !sess.lastFlushed.IsZero() && now.Sub(sess.lastFlushed) < minAge {
+		return nil
 	}
 	var currentIgnored []string
 	if sess.config.IgnoredMax != 0 {
@@ -894,12 +909,13 @@ func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string,
 	if err := s.writeSessionPatch(ctx, sess, currentIgnored); err != nil {
 		return err
 	}
-	sess.lastUsed = s.deps.now()
+	sess.lastUsed = now
+	sess.lastFlushed = now
 	return nil
 }
 
 func (s *daemonState) endSessionLocked(ctx context.Context, sessionKey string, sess *daemonSession) error {
-	if err := s.flushSessionLocked(ctx, sessionKey, sess, "end daemon session"); err != nil {
+	if err := s.flushSessionLocked(ctx, sessionKey, sess, "end daemon session", 0); err != nil {
 		return err
 	}
 	if err := sess.cleanup.Run(); err != nil {
@@ -918,6 +934,9 @@ func (s *daemonState) finishBusyLocked(ctx context.Context, sess *daemonSession)
 	sess.busyOwnerPID = 0
 	sess.busyLease = ""
 	sess.lastUsed = s.deps.now()
+	if exportErr == nil {
+		sess.lastFlushed = sess.lastUsed
+	}
 	if exportErr != nil && unmaskErr != nil {
 		return errors.Join(exportErr, model.Wrap(model.ExitEnv, "unmask ignored files", unmaskErr))
 	}
@@ -1165,10 +1184,11 @@ func (c *daemonClient) end(ctx context.Context, sessionKey string) error {
 	return err
 }
 
-func (c *daemonClient) flush(ctx context.Context, sessionKey string) error {
+func (c *daemonClient) flush(ctx context.Context, sessionKey string, minAge time.Duration) error {
 	_, err := c.call(ctx, daemonRequest{
-		Method:     "flush",
-		SessionKey: sessionKey,
+		Method:      "flush",
+		SessionKey:  sessionKey,
+		MinAgeNanos: int64(minAge),
 	})
 	return err
 }
