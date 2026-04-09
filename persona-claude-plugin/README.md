@@ -38,6 +38,7 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 - The first wrapped Bash call lazily starts a per-repo daemon under `<gitdir>/persona/daemon/` and reuses it for later sessions in that repository.
 - Each Claude chat session key maps to its own daemon-backed patch/view pair.
 - Repo-scoped write tools are allowed, but writes outside the current repository are denied because they cannot be backed by persona's patch store.
+- `.git` and daemon state paths are denied even for read-only file tools so Claude cannot poke at masked Git metadata or session patch internals.
 - Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
 - The wrapper uses `tool_input.shell` when Claude exposes it, otherwise falls back to `event.shell`, then the hook process `SHELL`, and finally `bash`.
 

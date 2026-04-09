@@ -46,6 +46,7 @@ What the plugin does:
 - Each Claude chat session key maps to its own daemon-backed patch/view pair, so concurrent chats in the same Claude instance stay isolated from each other.
 - The plugin ships a `persona-worker` agent, and `settings.json` sets `"agent": "persona-worker"` so the main thread prefers Bash-based editing.
 - Repo-scoped write tools are allowed; writes outside the current repository are denied because they cannot be backed by persona's patch store.
+- Claude file tools are also denied for `.git` and daemon state paths, even when they fall inside the repository tree.
 - Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
 - The wrapper uses the selected shell from the hook payload when available, then falls back to the hook process `SHELL`, and only then to `bash`.
 

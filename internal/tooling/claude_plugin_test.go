@@ -304,6 +304,68 @@ func TestPersonaWrapRewritesSearchToolsIntoDaemonView(t *testing.T) {
 	}
 }
 
+func TestPersonaWrapDeniesGitPathsForFileTools(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	personaStub := writePersonaDaemonStub(t, viewPath, filepath.Join(t.TempDir(), "persona.log"))
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Read",
+		"tool_input": map[string]any{
+			"file_path": filepath.Join(repoRoot, ".git", "config"),
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"PERSONA_TEST_VIEW_PATH":           viewPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
+	}
+	hookOutput := response["hookSpecificOutput"].(map[string]any)
+	if got, want := hookOutput["permissionDecision"], "deny"; got != want {
+		t.Fatalf("unexpected permission decision: got %v want %q", got, want)
+	}
+	reason := hookOutput["permissionDecisionReason"].(string)
+	if !strings.Contains(reason, ".git") || !strings.Contains(reason, "daemon state") {
+		t.Fatalf("unexpected deny reason: %q", reason)
+	}
+}
+
+func TestPersonaWrapDeniesExternalDaemonPatchPaths(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	externalGitDir := filepath.Join(t.TempDir(), "external.git")
+	patchPath := filepath.Join(externalGitDir, "persona", "daemon", "patches", "session-123.patch")
+	personaStub := writePersonaDaemonStub(t, viewPath, filepath.Join(t.TempDir(), "persona.log"))
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Read",
+		"tool_input": map[string]any{
+			"file_path": patchPath,
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"PERSONA_TEST_VIEW_PATH":           viewPath,
+		"PERSONA_TEST_GIT_DIR":             externalGitDir,
+		"PERSONA_TEST_PATCH_PATH":          patchPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
+	}
+	hookOutput := response["hookSpecificOutput"].(map[string]any)
+	if got, want := hookOutput["permissionDecision"], "deny"; got != want {
+		t.Fatalf("unexpected permission decision: got %v want %q", got, want)
+	}
+}
+
 func TestPersonaWrapDeniesWritesOutsideRepo(t *testing.T) {
 	repoRoot := repoRoot(t)
 	viewPath := filepath.Join(t.TempDir(), "view")
@@ -435,6 +497,7 @@ func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
 		"`persona daemon flush --session-key <claude-session-id>`",
 		"writes outside the current repository are denied",
+		"`.git` and daemon state paths",
 		"`--base-mode worktree`",
 		"Codex does not currently support the same transparent Bash rewrite flow",
 	} {
@@ -461,6 +524,7 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 		"`persona daemon end --session-key <claude-session-id>`",
 		"`tool_input.shell` when Claude exposes it",
 		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
+		"`.git` and daemon state paths",
 		"`--base-mode worktree`",
 		"tool responses may still show internal daemon `view_path` paths",
 		"Writes outside the current repository are denied",
@@ -485,6 +549,7 @@ func TestPersonaWorkerAgentDocumentsDaemonWorkflow(t *testing.T) {
 		"parallel chats stay isolated",
 		"`persona daemon end --session-key <claude-session-id>`",
 		"internal daemon `view_path`",
+		"`.git` or daemon state paths",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("persona-worker doc missing %q:\n%s", want, text)
@@ -517,7 +582,9 @@ if [ "${1:-}" = "daemon" ] && [ "${2:-}" = "info" ]; then
         ;;
     esac
   done
-  printf '{"session_key":"%s","repo_root":"%s","git_dir":"%s/.git","view_path":"%s","patch_path":"%s/.git/persona/daemon/patches/%s.patch"}\n' "$session" "$PWD" "$PWD" "${PERSONA_TEST_VIEW_PATH}" "$PWD" "$session"
+  git_dir="${PERSONA_TEST_GIT_DIR:-$PWD/.git}"
+  patch_path="${PERSONA_TEST_PATCH_PATH:-$git_dir/persona/daemon/patches/$session.patch}"
+  printf '{"session_key":"%s","repo_root":"%s","git_dir":"%s","view_path":"%s","patch_path":"%s"}\n' "$session" "$PWD" "$git_dir" "${PERSONA_TEST_VIEW_PATH}" "$patch_path"
   exit 0
 fi
 if [ "${1:-}" = "daemon" ] && [ "${2:-}" = "flush" ]; then

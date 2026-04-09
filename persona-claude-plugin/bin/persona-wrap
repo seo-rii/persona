@@ -165,6 +165,27 @@ def safe_existing_ancestor(path, root):
         probe = parent
 
 
+def protected_path_reason(path_value, repo_dir, view_path, git_dir, patch_path):
+    if not isinstance(path_value, str) or not path_value.strip():
+        return ""
+    candidate = os.path.abspath(path_value)
+    daemon_root = os.path.join(git_dir, "persona", "daemon") if git_dir else ""
+    protected_roots = [
+        os.path.join(repo_dir, ".git") if repo_dir else "",
+        os.path.join(view_path, ".git") if view_path else "",
+        daemon_root,
+        patch_path,
+        patch_path + ".lock" if patch_path else "",
+    ]
+    for root in protected_roots:
+        if root and is_subpath(candidate, os.path.abspath(root)):
+            return (
+                "persona-claude blocks Claude file tools from .git and daemon state paths; "
+                "use Git-aware tools or explicit persona daemon commands instead."
+            )
+    return ""
+
+
 def resolve_persona_bin():
     configured = os.getenv("PERSONA_WRAP_PERSONA_BIN", "").strip()
     if not configured:
@@ -251,49 +272,59 @@ def wrapped_command(persona_bin, session_id, shell_command, original_command):
     )
 
 
-def translated_repo_path(path_value, repo_dir, view_path):
+def translated_repo_path(path_value, repo_dir, view_path, git_dir, patch_path):
     if not isinstance(path_value, str) or not path_value.strip():
-        return "", False
+        return "", False, ""
     candidate = os.path.abspath(path_value)
+    denied_reason = protected_path_reason(candidate, repo_dir, view_path, git_dir, patch_path)
+    if denied_reason:
+        return candidate, False, denied_reason
     if is_subpath(candidate, view_path):
         if not safe_existing_ancestor(candidate, view_path):
-            return candidate, False
-        return candidate, True
+            return candidate, False, ""
+        return candidate, True, ""
     if not is_subpath(candidate, repo_dir):
-        return candidate, False
+        return candidate, False, ""
     if not safe_existing_ancestor(candidate, repo_dir):
-        return candidate, False
-    return os.path.join(view_path, rel_to_root(candidate, repo_dir)), True
+        return candidate, False, ""
+    return os.path.join(view_path, rel_to_root(candidate, repo_dir)), True, ""
 
 
-def translated_directory_path(path_value, repo_dir, view_path, cwd):
+def translated_directory_path(path_value, repo_dir, view_path, git_dir, patch_path, cwd):
     if isinstance(path_value, str) and path_value.strip():
-        return translated_repo_path(path_value, repo_dir, view_path)
+        return translated_repo_path(path_value, repo_dir, view_path, git_dir, patch_path)
     cwd_abs = os.path.abspath(cwd)
+    denied_reason = protected_path_reason(cwd_abs, repo_dir, view_path, git_dir, patch_path)
+    if denied_reason:
+        return cwd_abs, False, denied_reason
     if is_subpath(cwd_abs, repo_dir):
-        return os.path.join(view_path, rel_to_root(cwd_abs, repo_dir)), True
-    return path_value, False
+        return os.path.join(view_path, rel_to_root(cwd_abs, repo_dir)), True, ""
+    return path_value, False, ""
 
 
-def rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, cwd):
+def rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, git_dir, patch_path, cwd):
     updated_input = dict(tool_input)
     if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
-        rewritten_path, managed = translated_repo_path(tool_input.get("file_path"), repo_dir, view_path)
+        rewritten_path, managed, denied_reason = translated_repo_path(
+            tool_input.get("file_path"), repo_dir, view_path, git_dir, patch_path
+        )
         if managed:
             updated_input["file_path"] = rewritten_path
-        return updated_input, managed
+        return updated_input, managed, denied_reason
     if tool_name in {"Glob", "Grep"}:
-        rewritten_path, managed = translated_directory_path(tool_input.get("path"), repo_dir, view_path, cwd)
+        rewritten_path, managed, denied_reason = translated_directory_path(
+            tool_input.get("path"), repo_dir, view_path, git_dir, patch_path, cwd
+        )
         if managed:
             updated_input["path"] = rewritten_path
-        return updated_input, managed
-    return updated_input, False
+        return updated_input, managed, denied_reason
+    return updated_input, False, ""
 
 
-def managed_write_target(tool_name, tool_input, repo_dir, view_path):
+def managed_write_target(tool_name, tool_input, repo_dir, view_path, git_dir, patch_path):
     if tool_name not in WRITE_FILE_TOOLS:
         return False
-    _, managed = translated_repo_path(tool_input.get("file_path"), repo_dir, view_path)
+    _, managed, _ = translated_repo_path(tool_input.get("file_path"), repo_dir, view_path, git_dir, patch_path)
     return managed
 
 
@@ -348,7 +379,14 @@ def handle_pretooluse(event):
         return 0
 
     view_path = info.get("view_path", "")
-    updated_input, managed = rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, cwd)
+    git_dir = info.get("git_dir", "")
+    patch_path = info.get("patch_path", "")
+    updated_input, managed, denied_reason = rewrite_file_tool_input(
+        tool_name, tool_input, repo_dir, view_path, git_dir, patch_path, cwd
+    )
+    if denied_reason:
+        emit_pretooluse("deny", denied_reason)
+        return 0
     if tool_name in WRITE_FILE_TOOLS and not managed:
         emit_pretooluse(
             "deny",
@@ -382,7 +420,14 @@ def handle_posttooluse(event):
         print(f"persona daemon session lookup failed: {subprocess_error_text(err)}", file=sys.stderr)
         return 1
 
-    if not managed_write_target(tool_name, event.get("tool_input", {}), repo_dir, info.get("view_path", "")):
+    if not managed_write_target(
+        tool_name,
+        event.get("tool_input", {}),
+        repo_dir,
+        info.get("view_path", ""),
+        info.get("git_dir", ""),
+        info.get("patch_path", ""),
+    ):
         return 0
 
     try:
