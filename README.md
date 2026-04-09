@@ -40,10 +40,12 @@ When Claude Code enables the plugin, set `PERSONA_BIN` to the built persona bina
 What the plugin does:
 
 - `PreToolUse` on `Bash` rewrites eligible shell commands to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
+- Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` calls are rewritten into the daemon session's stable `view_path`.
+- Successful `Edit`, `MultiEdit`, and `Write` calls trigger `persona daemon flush --session-key <claude-session-id>` so file-tool edits are written back into the patch.
 - The first wrapped Bash call lazily starts a per-repo background daemon under `<gitdir>/persona/daemon/`.
 - Each Claude chat session key maps to its own daemon-backed patch/view pair, so concurrent chats in the same Claude instance stay isolated from each other.
 - The plugin ships a `persona-worker` agent, and `settings.json` sets `"agent": "persona-worker"` so the main thread prefers Bash-based editing.
-- `Edit`, `MultiEdit`, and `Write` are denied so mutations stay inside the persona-backed Bash path.
+- Repo-scoped write tools are allowed; writes outside the current repository are denied because they cannot be backed by persona's patch store.
 - Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
 - The wrapper uses the selected shell from the hook payload when available, then falls back to the hook process `SHELL`, and only then to `bash`.
 
@@ -62,10 +64,10 @@ Recommended setup:
 
 Important limits:
 
-- Native Claude Code file tools do not see persona's overlay view. Use Bash reads (`cat`, `sed -n`, `rg`) for files that were changed through persona in the same session.
-- `persona daemon` now provides stable per-session view paths, but the shipped plugin still only rewrites Bash. Native Claude file tools are not redirected into that view yet.
+- Repo-scoped Claude file tools now run inside persona's stable daemon view, but their tool responses may still show internal daemon `view_path` absolute paths because Claude sees the rewritten input path.
 - The automatic wrapper uses daemon defaults. If you need advanced daemon options such as `--base-mode worktree`, run `persona daemon ...` commands explicitly.
 - Git-oriented shell commands are intentionally bypassed, so they do not run inside the persona overlay view.
+- Writes outside the current repository are denied instead of being sent through persona.
 - Codex does not currently support the same transparent Bash rewrite flow via plugins, so this repository only ships the Claude Code integration today.
 
 ## Usage
@@ -90,6 +92,7 @@ persona --patch /tmp/state.patch -- cat new.txt
 - `persona activate`: grant `cap_sys_admin` to the persona binary by default. Use `--binary PATH` to target a different persona executable, and add `--allow-dac-override` only when patch writes must bypass DAC checks.
 - `persona daemon exec --session-key <key> -- <command...>`: create or reuse a daemon-backed overlay session, run the command inside its stable view, and flush back into that session's patch file.
 - `persona daemon info --session-key <key> --json`: ensure a daemon session exists and print its stable `view_path` / `patch_path` for tool integrations.
+- `persona daemon flush --session-key <key>`: write the current daemon view back into that session's patch file without ending the session.
 - `persona daemon end --session-key <key>`: flush the daemon session and remove its overlay view.
 - `persona version`: print the current persona CLI version.
 - Run `persona version` or `persona --version` to see the current CLI version instead of relying on README text.
@@ -108,6 +111,7 @@ Daemon example:
 ```
 persona daemon info --session-key claude-chat-123 --json
 persona daemon exec --session-key claude-chat-123 -- sh -lc 'printf hello > note.txt'
+persona daemon flush --session-key claude-chat-123
 persona daemon end --session-key claude-chat-123
 ```
 

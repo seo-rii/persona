@@ -172,6 +172,19 @@ func addDaemonCommands(root *cobra.Command) {
 	bindDaemonSessionFlags(infoCmd, &infoFlags)
 	infoCmd.Flags().BoolVar(&infoJSON, "json", false, "print daemon session info as JSON")
 
+	var flushSessionKey string
+	flushCmd := &cobra.Command{
+		Use:           "flush --session-key <key>",
+		Short:         "Write the current daemon view back into its patch file",
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDaemonFlush(cmd.Context(), strings.TrimSpace(flushSessionKey))
+		},
+	}
+	flushCmd.Flags().StringVar(&flushSessionKey, "session-key", "", "external session key, such as a Claude chat session id")
+	_ = flushCmd.MarkFlagRequired("session-key")
+
 	var endSessionKey string
 	endCmd := &cobra.Command{
 		Use:           "end --session-key <key>",
@@ -202,7 +215,7 @@ func addDaemonCommands(root *cobra.Command) {
 	serveCmd.Flags().StringVar(&serveGitDir, "git-dir", "", "git dir for the daemon server")
 	serveCmd.Flags().StringVar(&serveSocket, "socket", "", "unix socket path for the daemon server")
 
-	daemonCmd.AddCommand(execCmd, infoCmd, endCmd, serveCmd)
+	daemonCmd.AddCommand(execCmd, infoCmd, flushCmd, endCmd, serveCmd)
 	root.AddCommand(daemonCmd)
 }
 
@@ -325,6 +338,18 @@ func runDaemonEnd(ctx context.Context, sessionKey string) error {
 	return client.end(ctx, sessionKey)
 }
 
+func runDaemonFlush(ctx context.Context, sessionKey string) error {
+	repoRoot, gitDir, _, err := daemonRepoContext(ctx)
+	if err != nil {
+		return err
+	}
+	client, err := newDaemonClient(ctx, repoRoot, gitDir)
+	if err != nil {
+		return err
+	}
+	return client.flush(ctx, sessionKey)
+}
+
 func daemonRepoContext(ctx context.Context) (string, string, string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -440,6 +465,9 @@ func (s *daemonState) handleRequest(req daemonRequest) daemonResponse {
 	case "release_exec":
 		err := s.releaseExec(context.Background(), key, req.LeaseID)
 		return daemonResponseForInfo(nil, err)
+	case "flush":
+		err := s.flushSession(context.Background(), key)
+		return daemonResponseForInfo(nil, err)
 	case "end":
 		ended, err := s.endSession(context.Background(), key)
 		resp := daemonResponseForInfo(nil, err)
@@ -550,6 +578,34 @@ func (s *daemonState) endSession(ctx context.Context, sessionKey string) (bool, 
 	}
 	delete(s.sessions, sessionKey)
 	return true, nil
+}
+
+func (s *daemonState) flushSession(ctx context.Context, sessionKey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := s.sessions[sessionKey]
+	if sess == nil {
+		return nil
+	}
+	if err := s.recoverBusyLocked(ctx, sess); err != nil {
+		return err
+	}
+	if sess.busy {
+		return model.Wrap(model.ExitEnv, "flush daemon session", fmt.Errorf("session %q is still busy in pid %d", sessionKey, sess.busyOwnerPID))
+	}
+	var currentIgnored []string
+	if sess.config.IgnoredMax != 0 {
+		var err error
+		currentIgnored, err = listIgnoredCandidatesChecked(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.config.IgnoredMax)
+		if err != nil {
+			return model.Wrap(model.ExitEnv, "list ignored files", err)
+		}
+	}
+	if err := s.writeSessionPatch(ctx, sess, currentIgnored); err != nil {
+		return err
+	}
+	sess.lastUsed = s.deps.now()
+	return nil
 }
 
 func (s *daemonState) closeAll() {
@@ -930,6 +986,14 @@ func (c *daemonClient) releaseExec(ctx context.Context, sessionKey, leaseID stri
 func (c *daemonClient) end(ctx context.Context, sessionKey string) error {
 	_, err := c.call(ctx, daemonRequest{
 		Method:     "end",
+		SessionKey: sessionKey,
+	})
+	return err
+}
+
+func (c *daemonClient) flush(ctx context.Context, sessionKey string) error {
+	_, err := c.call(ctx, daemonRequest{
+		Method:     "flush",
 		SessionKey: sessionKey,
 	})
 	return err

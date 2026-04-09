@@ -1,5 +1,5 @@
 {
-  "description": "Route Bash commands through persona and block direct file writes.",
+  "description": "Route Bash and repo-scoped file tools through persona daemon sessions.",
   "hooks": {
     "PreToolUse": [
       {
@@ -14,13 +14,26 @@
         ]
       },
       {
+        "matcher": "Read|Edit|MultiEdit|Write|Glob|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap",
+            "timeout": 10,
+            "statusMessage": "Routing file tools through persona view"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
         "matcher": "Edit|MultiEdit|Write",
         "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap",
             "timeout": 10,
-            "statusMessage": "Enforcing persona-backed edit path"
+            "statusMessage": "Flushing persona-backed file changes"
           }
         ]
       }

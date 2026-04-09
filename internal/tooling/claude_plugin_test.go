@@ -46,7 +46,7 @@ func TestPersonaClaudePluginManifestDeclaresExpectedPaths(t *testing.T) {
 	}
 }
 
-func TestPersonaClaudePluginHooksWrapBashAndBlockWrites(t *testing.T) {
+func TestPersonaClaudePluginHooksWrapBashAndRouteFileTools(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "persona-claude-plugin", "hooks", "hooks.json"))
 	if err != nil {
@@ -65,6 +65,10 @@ func TestPersonaClaudePluginHooksWrapBashAndBlockWrites(t *testing.T) {
 	preToolUse, ok := hooks["PreToolUse"].([]any)
 	if !ok || len(preToolUse) != 2 {
 		t.Fatalf("expected two PreToolUse handlers, got %#v", hooks["PreToolUse"])
+	}
+	postToolUse, ok := hooks["PostToolUse"].([]any)
+	if !ok || len(postToolUse) != 1 {
+		t.Fatalf("expected one PostToolUse handler, got %#v", hooks["PostToolUse"])
 	}
 
 	matchers := map[string]bool{}
@@ -88,10 +92,14 @@ func TestPersonaClaudePluginHooksWrapBashAndBlockWrites(t *testing.T) {
 		}
 	}
 
-	for _, matcher := range []string{"Bash", "Edit|MultiEdit|Write"} {
+	for _, matcher := range []string{"Bash", "Read|Edit|MultiEdit|Write|Glob|Grep"} {
 		if !matchers[matcher] {
 			t.Fatalf("missing matcher %q in hooks config", matcher)
 		}
+	}
+	postEntry := postToolUse[0].(map[string]any)
+	if got, want := postEntry["matcher"], "Edit|MultiEdit|Write"; got != want {
+		t.Fatalf("unexpected PostToolUse matcher: got %v want %q", got, want)
 	}
 }
 
@@ -217,17 +225,102 @@ func TestPersonaWrapNoopsOutsideGitRepositories(t *testing.T) {
 	}
 }
 
-func TestPersonaWrapDeniesDirectWriteTools(t *testing.T) {
+func TestPersonaWrapRewritesWriteToolsIntoDaemonView(t *testing.T) {
 	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	if err := os.MkdirAll(filepath.Join(viewPath, "docs"), 0o755); err != nil {
+		t.Fatalf("mkdir view path: %v", err)
+	}
+	logPath := filepath.Join(t.TempDir(), "persona.log")
+	personaStub := writePersonaDaemonStub(t, viewPath, logPath)
+	originalPath := filepath.Join(repoRoot, "docs", "note.txt")
 	output := runPersonaWrap(t, repoRoot, map[string]any{
 		"session_id":      "session-123",
 		"cwd":             repoRoot,
 		"hook_event_name": "PreToolUse",
 		"tool_name":       "Write",
 		"tool_input": map[string]any{
-			"file_path": "hello.txt",
+			"file_path": originalPath,
+			"content":   "hello",
 		},
-	}, nil)
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"PERSONA_TEST_VIEW_PATH":           viewPath,
+		"PERSONA_TEST_LOG":                 logPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
+	}
+	hookOutput := response["hookSpecificOutput"].(map[string]any)
+	if got, want := hookOutput["permissionDecision"], "allow"; got != want {
+		t.Fatalf("unexpected permission decision: got %v want %q", got, want)
+	}
+	updatedInput := hookOutput["updatedInput"].(map[string]any)
+	if got, want := updatedInput["content"], "hello"; got != want {
+		t.Fatalf("expected content to be preserved: got %v want %q", got, want)
+	}
+	if got, want := updatedInput["file_path"], filepath.Join(viewPath, "docs", "note.txt"); got != want {
+		t.Fatalf("expected file path rewrite into daemon view: got %v want %q", got, want)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read persona stub log: %v", err)
+	}
+	if !strings.Contains(string(logData), "daemon info --session-key session-123 --json") {
+		t.Fatalf("expected daemon info lookup, got log:\n%s", logData)
+	}
+}
+
+func TestPersonaWrapRewritesSearchToolsIntoDaemonView(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	searchDir := filepath.Join(repoRoot, "internal")
+	if err := os.MkdirAll(filepath.Join(viewPath, "internal"), 0o755); err != nil {
+		t.Fatalf("mkdir view path: %v", err)
+	}
+	personaStub := writePersonaDaemonStub(t, viewPath, filepath.Join(t.TempDir(), "persona.log"))
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             filepath.Join(repoRoot, "internal"),
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Glob",
+		"tool_input": map[string]any{
+			"pattern": "*.go",
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"PERSONA_TEST_VIEW_PATH":           viewPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
+	}
+	updatedInput := response["hookSpecificOutput"].(map[string]any)["updatedInput"].(map[string]any)
+	if got, want := updatedInput["path"], filepath.Join(viewPath, "internal"); got != want {
+		t.Fatalf("expected default search path rewrite from cwd %q, got %v want %q", searchDir, got, want)
+	}
+}
+
+func TestPersonaWrapDeniesWritesOutsideRepo(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	personaStub := writePersonaDaemonStub(t, viewPath, filepath.Join(t.TempDir(), "persona.log"))
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Write",
+		"tool_input": map[string]any{
+			"file_path": filepath.Join(t.TempDir(), "outside.txt"),
+			"content":   "hello.txt",
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"PERSONA_TEST_VIEW_PATH":           viewPath,
+	})
 
 	var response map[string]any
 	if err := json.Unmarshal(output, &response); err != nil {
@@ -238,8 +331,88 @@ func TestPersonaWrapDeniesDirectWriteTools(t *testing.T) {
 		t.Fatalf("unexpected permission decision: got %v want %q", got, want)
 	}
 	reason := hookOutput["permissionDecisionReason"].(string)
-	if !strings.Contains(reason, "direct file writes") || !strings.Contains(reason, "persona") {
+	if !strings.Contains(reason, "only permits direct file writes") || !strings.Contains(reason, "repository") {
 		t.Fatalf("unexpected deny reason: %q", reason)
+	}
+}
+
+func TestPersonaWrapDeniesWritesThroughEscapingViewSymlinks(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	outside := t.TempDir()
+	if err := os.MkdirAll(viewPath, 0o755); err != nil {
+		t.Fatalf("mkdir view path: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(viewPath, "escape")); err != nil {
+		t.Fatalf("symlink escape dir: %v", err)
+	}
+	personaStub := writePersonaDaemonStub(t, viewPath, filepath.Join(t.TempDir(), "persona.log"))
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Write",
+		"tool_input": map[string]any{
+			"file_path": filepath.Join(viewPath, "escape", "outside.txt"),
+			"content":   "hello",
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"PERSONA_TEST_VIEW_PATH":           viewPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
+	}
+	hookOutput := response["hookSpecificOutput"].(map[string]any)
+	if got, want := hookOutput["permissionDecision"], "deny"; got != want {
+		t.Fatalf("unexpected permission decision: got %v want %q", got, want)
+	}
+}
+
+func TestPersonaWrapFlushesManagedWriteToolsOnPostToolUse(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	viewFile := filepath.Join(viewPath, "docs", "note.txt")
+	if err := os.MkdirAll(filepath.Dir(viewFile), 0o755); err != nil {
+		t.Fatalf("mkdir view dir: %v", err)
+	}
+	logPath := filepath.Join(t.TempDir(), "persona.log")
+	personaStub := writePersonaDaemonStub(t, viewPath, logPath)
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PostToolUse",
+		"tool_name":       "Write",
+		"tool_input": map[string]any{
+			"file_path": viewFile,
+			"content":   "hello",
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"PERSONA_TEST_VIEW_PATH":           viewPath,
+		"PERSONA_TEST_LOG":                 logPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal post-tool response: %v\n%s", err, output)
+	}
+	hookOutput := response["hookSpecificOutput"].(map[string]any)
+	if got, want := hookOutput["hookEventName"], "PostToolUse"; got != want {
+		t.Fatalf("unexpected hook event name: got %v want %q", got, want)
+	}
+	context, _ := hookOutput["additionalContext"].(string)
+	if !strings.Contains(context, "flushed") {
+		t.Fatalf("expected flush context, got %q", context)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read persona stub log: %v", err)
+	}
+	if !strings.Contains(string(logData), "daemon flush --session-key session-123") {
+		t.Fatalf("expected daemon flush call, got log:\n%s", logData)
 	}
 }
 
@@ -259,7 +432,9 @@ func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 		"./bin/persona doctor",
 		"selected shell",
 		"`settings.json` sets `\"agent\": \"persona-worker\"`",
-		"`Edit`, `MultiEdit`, and `Write` are denied",
+		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
+		"`persona daemon flush --session-key <claude-session-id>`",
+		"writes outside the current repository are denied",
 		"`--base-mode worktree`",
 		"Codex does not currently support the same transparent Bash rewrite flow",
 	} {
@@ -282,11 +457,13 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 		"lazily starts a per-repo daemon",
 		"Each Claude chat session key maps to its own daemon-backed patch/view pair.",
 		"`persona daemon info --session-key <claude-session-id> --json`",
+		"`persona daemon flush --session-key <claude-session-id>`",
 		"`persona daemon end --session-key <claude-session-id>`",
 		"`tool_input.shell` when Claude exposes it",
-		"`Edit`, `MultiEdit`, and `Write` are denied",
+		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
 		"`--base-mode worktree`",
-		"`Read` observes the checkout on disk",
+		"tool responses may still show internal daemon `view_path` paths",
+		"Writes outside the current repository are denied",
 		"Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed",
 	} {
 		if !strings.Contains(text, want) {
@@ -304,14 +481,64 @@ func TestPersonaWorkerAgentDocumentsDaemonWorkflow(t *testing.T) {
 	text := string(data)
 	for _, want := range []string{
 		"`persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`",
+		"Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
 		"parallel chats stay isolated",
 		"`persona daemon end --session-key <claude-session-id>`",
-		"Native `Read` sees the checkout on disk",
+		"internal daemon `view_path`",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("persona-worker doc missing %q:\n%s", want, text)
 		}
 	}
+}
+
+func writePersonaDaemonStub(t *testing.T, viewPath, logPath string) string {
+	t.Helper()
+	scriptPath := filepath.Join(t.TempDir(), "persona-stub")
+	script := `#!/bin/sh
+set -eu
+if [ -n "${PERSONA_TEST_LOG:-}" ]; then
+  printf '%s\n' "$*" >>"$PERSONA_TEST_LOG"
+fi
+if [ "${1:-}" = "daemon" ] && [ "${2:-}" = "info" ]; then
+  session=""
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --session-key)
+        session="$2"
+        shift 2
+        ;;
+      --json)
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  printf '{"session_key":"%s","repo_root":"%s","git_dir":"%s/.git","view_path":"%s","patch_path":"%s/.git/persona/daemon/patches/%s.patch"}\n' "$session" "$PWD" "$PWD" "${PERSONA_TEST_VIEW_PATH}" "$PWD" "$session"
+  exit 0
+fi
+if [ "${1:-}" = "daemon" ] && [ "${2:-}" = "flush" ]; then
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write persona stub: %v", err)
+	}
+	if logPath != "" {
+		if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+			t.Fatalf("init persona log: %v", err)
+		}
+	}
+	if viewPath != "" {
+		if err := os.MkdirAll(viewPath, 0o755); err != nil {
+			t.Fatalf("mkdir view path: %v", err)
+		}
+	}
+	return scriptPath
 }
 
 func runPersonaWrap(t *testing.T, repoRoot string, event map[string]any, env map[string]string) []byte {

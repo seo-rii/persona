@@ -19,6 +19,7 @@ func TestNewRootCmdExposesDaemonSurface(t *testing.T) {
 		{"daemon"},
 		{"daemon", "exec"},
 		{"daemon", "info"},
+		{"daemon", "flush"},
 		{"daemon", "end"},
 	} {
 		found, _, err := cmd.Find(args)
@@ -259,6 +260,51 @@ func TestDaemonStateReleaseExecWritesPatchAndEndCleansView(t *testing.T) {
 	}
 	if _, err := os.Stat(info.ViewPath); !os.IsNotExist(err) {
 		t.Fatalf("expected session view to be removed, got %v", err)
+	}
+}
+
+func TestDaemonStateFlushWritesPatchWithoutEndingSession(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	g := &exportGitOps{tracked: []byte("diff --git a/file.txt b/file.txt\n")}
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return g
+	})
+	cfg := daemonTestConfig()
+
+	info, err := state.ensureSession(context.Background(), "chat-a", cfg)
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	if err := state.flushSession(context.Background(), "chat-a"); err != nil {
+		t.Fatalf("flush session: %v", err)
+	}
+	patchData, err := os.ReadFile(info.PatchPath)
+	if err != nil {
+		t.Fatalf("read patch: %v", err)
+	}
+	if string(patchData) != string(g.tracked) {
+		t.Fatalf("unexpected patch contents after flush: %q", patchData)
+	}
+	if _, ok := state.sessions["chat-a"]; !ok {
+		t.Fatal("expected flush to keep session registered")
+	}
+	if _, err := os.Stat(info.ViewPath); err != nil {
+		t.Fatalf("expected flush to keep view path, got %v", err)
+	}
+}
+
+func TestDaemonStateFlushRejectsBusyLiveSession(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &exportGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	if _, _, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg); err != nil {
+		t.Fatalf("acquire exec: %v", err)
+	}
+	if err := state.flushSession(context.Background(), "chat-a"); err == nil || !strings.Contains(err.Error(), "still busy") {
+		t.Fatalf("expected busy flush rejection, got %v", err)
 	}
 }
 

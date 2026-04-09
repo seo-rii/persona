@@ -10,6 +10,9 @@ import sys
 
 
 DEFAULT_BYPASS_PREFIXES = ("git", "gh", "persona", "claude")
+READ_ONLY_FILE_TOOLS = {"Read", "Glob", "Grep"}
+WRITE_FILE_TOOLS = {"Edit", "MultiEdit", "Write"}
+FILE_TOOLS = READ_ONLY_FILE_TOOLS | WRITE_FILE_TOOLS
 SHELL_NAMES = {"bash", "sh", "zsh", "fish"}
 ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 
@@ -32,6 +35,13 @@ def emit_pretooluse(decision, reason=None, updated_input=None):
         payload["hookSpecificOutput"]["permissionDecisionReason"] = reason
     if updated_input is not None:
         payload["hookSpecificOutput"]["updatedInput"] = updated_input
+    json.dump(payload, sys.stdout)
+
+
+def emit_posttooluse(additional_context=None):
+    payload = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
+    if additional_context:
+        payload["hookSpecificOutput"]["additionalContext"] = additional_context
     json.dump(payload, sys.stdout)
 
 
@@ -130,6 +140,31 @@ def repo_root(cwd):
     return completed.stdout.strip()
 
 
+def is_subpath(path, root):
+    if not path or not root:
+        return False
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def rel_to_root(path, root):
+    return os.path.relpath(path, root)
+
+
+def safe_existing_ancestor(path, root):
+    probe = path
+    root_real = os.path.realpath(root)
+    while True:
+        if os.path.lexists(probe):
+            return is_subpath(os.path.realpath(probe), root_real)
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return False
+        probe = parent
+
+
 def resolve_persona_bin():
     configured = os.getenv("PERSONA_WRAP_PERSONA_BIN", "").strip()
     if not configured:
@@ -153,6 +188,40 @@ def resolve_persona_bin():
     if shutil.which(configured):
         return configured
     return ""
+
+
+def daemon_session_info(persona_bin, session_id, cwd):
+    completed = subprocess.run(
+        [persona_bin, "daemon", "info", "--session-key", session_id or "session", "--json"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+    )
+    return json.loads(completed.stdout)
+
+
+def daemon_flush(persona_bin, session_id, cwd):
+    subprocess.run(
+        [persona_bin, "daemon", "flush", "--session-key", session_id or "session"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+    )
+
+
+def subprocess_error_text(err):
+    if isinstance(err, subprocess.CalledProcessError):
+        stderr = (err.stderr or "").strip()
+        if stderr:
+            return stderr
+        stdout = (err.stdout or "").strip()
+        if stdout:
+            return stdout
+    return str(err)
 
 
 def selected_shell(event, tool_input):
@@ -182,28 +251,85 @@ def wrapped_command(persona_bin, session_id, shell_command, original_command):
     )
 
 
-def main():
-    event = load_event()
+def translated_repo_path(path_value, repo_dir, view_path):
+    if not isinstance(path_value, str) or not path_value.strip():
+        return "", False
+    candidate = os.path.abspath(path_value)
+    if is_subpath(candidate, view_path):
+        if not safe_existing_ancestor(candidate, view_path):
+            return candidate, False
+        return candidate, True
+    if not is_subpath(candidate, repo_dir):
+        return candidate, False
+    if not safe_existing_ancestor(candidate, repo_dir):
+        return candidate, False
+    return os.path.join(view_path, rel_to_root(candidate, repo_dir)), True
+
+
+def translated_directory_path(path_value, repo_dir, view_path, cwd):
+    if isinstance(path_value, str) and path_value.strip():
+        return translated_repo_path(path_value, repo_dir, view_path)
+    cwd_abs = os.path.abspath(cwd)
+    if is_subpath(cwd_abs, repo_dir):
+        return os.path.join(view_path, rel_to_root(cwd_abs, repo_dir)), True
+    return path_value, False
+
+
+def rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, cwd):
+    updated_input = dict(tool_input)
+    if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
+        rewritten_path, managed = translated_repo_path(tool_input.get("file_path"), repo_dir, view_path)
+        if managed:
+            updated_input["file_path"] = rewritten_path
+        return updated_input, managed
+    if tool_name in {"Glob", "Grep"}:
+        rewritten_path, managed = translated_directory_path(tool_input.get("path"), repo_dir, view_path, cwd)
+        if managed:
+            updated_input["path"] = rewritten_path
+        return updated_input, managed
+    return updated_input, False
+
+
+def managed_write_target(tool_name, tool_input, repo_dir, view_path):
+    if tool_name not in WRITE_FILE_TOOLS:
+        return False
+    _, managed = translated_repo_path(tool_input.get("file_path"), repo_dir, view_path)
+    return managed
+
+
+def persona_not_found_reason():
+    return "persona binary not found; configure the plugin PERSONA_BIN option or set PERSONA_WRAP_PERSONA_BIN."
+
+
+def handle_pretooluse(event):
     tool_name = event.get("tool_name")
-
-    if tool_name in {"Edit", "MultiEdit", "Write"}:
-        emit_pretooluse(
-            "deny",
-            "persona-claude blocks direct file writes; use Bash so persona can export changes back into the session patch.",
-        )
-        return 0
-
-    if tool_name != "Bash":
-        return 0
-
     tool_input = event.get("tool_input", {})
-    command = tool_input.get("command", "")
     cwd = event.get("cwd") or os.getcwd()
     session_id = event.get("session_id", "")
 
-    if not isinstance(command, str) or not command.strip():
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        if not isinstance(command, str) or not command.strip():
+            return 0
+        if should_bypass(command):
+            return 0
+
+        repo_dir = repo_root(cwd)
+        if not repo_dir:
+            return 0
+
+        persona_bin = resolve_persona_bin()
+        if not persona_bin:
+            emit_pretooluse("deny", persona_not_found_reason())
+            return 0
+
+        updated_input = dict(tool_input)
+        shell_command = selected_shell(event, tool_input)
+        updated_input["command"] = wrapped_command(persona_bin, session_id, shell_command, command)
+        emit_pretooluse("allow", "Run the Bash command through persona.", updated_input)
         return 0
-    if should_bypass(command):
+
+    if tool_name not in FILE_TOOLS:
         return 0
 
     repo_dir = repo_root(cwd)
@@ -212,16 +338,69 @@ def main():
 
     persona_bin = resolve_persona_bin()
     if not persona_bin:
-        emit_pretooluse(
-            "deny",
-            "persona binary not found; configure the plugin PERSONA_BIN option or set PERSONA_WRAP_PERSONA_BIN.",
-        )
+        emit_pretooluse("deny", persona_not_found_reason())
         return 0
 
-    updated_input = dict(tool_input)
-    shell_command = selected_shell(event, tool_input)
-    updated_input["command"] = wrapped_command(persona_bin, session_id, shell_command, command)
-    emit_pretooluse("allow", "Run the Bash command through persona.", updated_input)
+    try:
+        info = daemon_session_info(persona_bin, session_id, cwd)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as err:
+        emit_pretooluse("deny", f"persona daemon session lookup failed: {subprocess_error_text(err)}")
+        return 0
+
+    view_path = info.get("view_path", "")
+    updated_input, managed = rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, cwd)
+    if tool_name in WRITE_FILE_TOOLS and not managed:
+        emit_pretooluse(
+            "deny",
+            "persona-claude only permits direct file writes for paths inside the current repository or its daemon-backed view.",
+        )
+        return 0
+    if managed:
+        emit_pretooluse("allow", "Route the file tool through persona's daemon-backed view.", updated_input)
+    return 0
+
+
+def handle_posttooluse(event):
+    tool_name = event.get("tool_name")
+    if tool_name not in WRITE_FILE_TOOLS:
+        return 0
+
+    cwd = event.get("cwd") or os.getcwd()
+    session_id = event.get("session_id", "")
+    repo_dir = repo_root(cwd)
+    if not repo_dir:
+        return 0
+
+    persona_bin = resolve_persona_bin()
+    if not persona_bin:
+        print(persona_not_found_reason(), file=sys.stderr)
+        return 1
+
+    try:
+        info = daemon_session_info(persona_bin, session_id, cwd)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as err:
+        print(f"persona daemon session lookup failed: {subprocess_error_text(err)}", file=sys.stderr)
+        return 1
+
+    if not managed_write_target(tool_name, event.get("tool_input", {}), repo_dir, info.get("view_path", "")):
+        return 0
+
+    try:
+        daemon_flush(persona_bin, session_id, cwd)
+    except (OSError, subprocess.SubprocessError) as err:
+        print(f"persona daemon flush failed: {subprocess_error_text(err)}", file=sys.stderr)
+        return 1
+    emit_posttooluse("persona flushed the daemon-backed file-tool change into the session patch.")
+    return 0
+
+
+def main():
+    event = load_event()
+    hook_name = event.get("hook_event_name")
+    if hook_name == "PreToolUse":
+        return handle_pretooluse(event)
+    if hook_name == "PostToolUse":
+        return handle_posttooluse(event)
     return 0
 
 
