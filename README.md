@@ -94,8 +94,8 @@ persona --patch /tmp/state.patch -- cat new.txt
 - `persona doctor`: print capability/mount diagnostics, trusted `setcap` path, OverlayFS availability, and `unshare -m true` preflight hints.
 - `persona activate`: grant `cap_sys_admin` to the persona binary by default. Use `--binary PATH` to target a different persona executable, and add `--allow-dac-override` only when patch writes must bypass DAC checks.
 - `persona daemon exec --session-key <key> -- <command...>`: create or reuse a daemon-backed overlay session, run the command inside its stable view, and flush back into that session's patch file.
-- `persona daemon info --session-key <key> --json`: ensure a daemon session exists and print its stable `view_path` / `patch_path` for tool integrations.
-- `persona daemon list --json`: list daemon sessions for the current repository, including busy / last-used metadata.
+- `persona daemon info --session-key <key> --json`: ensure a daemon session exists and print its current `view_path` / `patch_path` plus dirty / flush / recovery metadata for tool integrations.
+- `persona daemon list --json`: list daemon sessions for the current repository, including busy / dirty state, created / last-used / last-flushed timestamps, and flush / recovery counters.
 - `persona daemon flush --session-key <key> [--min-age <duration>]`: write the current daemon view back into that session's patch file without ending the session, optionally skipping very recent flushes.
 - `persona daemon prune --idle-for <duration>`: end idle daemon sessions for the current repository.
 - `persona daemon end --session-key <key>`: flush the daemon session and remove its overlay view.
@@ -124,6 +124,8 @@ persona daemon end --session-key claude-chat-123
 
 `persona daemon exec` and `persona daemon info` accept the same `--base-mode`, `--base-ref`, `--allow-dirty`, `--ignored-mode`, `--ignored-max`, and `--apply-mode` knobs as the one-shot CLI. Reusing the same session key with different daemon option values is rejected until you run `persona daemon end` for that key.
 `persona daemon flush` accepts `--min-age` when you want to coalesce repeated write-backs instead of exporting after every write.
+If the background daemon exits or restarts, the next `persona daemon info`, `list`, `flush`, `prune`, or `end` call recreates persisted sessions from metadata under `<gitdir>/persona/daemon/state/` and resumes from the same patch file. Recovery keeps the patch path stable, but the recreated daemon `view_path` may change across daemon restarts.
+`persona daemon info --json` and `persona daemon list --json` report `dirty`, `created_*`, `last_used_*`, `last_flushed_*`, `flush_count`, `flush_skipped`, and `recovered_count` so plugin integrations can inspect daemon session health.
 For long-lived manual daemon sessions where the base should stay frozen even if the checkout changes outside the session, prefer `--base-mode worktree`.
 
 ## Options

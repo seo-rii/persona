@@ -13,6 +13,19 @@ import (
 	"persona/internal/model"
 )
 
+type daemonExportApplyGitOps struct {
+	exportGitOps
+}
+
+func (g *daemonExportApplyGitOps) ApplyPatchReader(_ context.Context, _ model.ApplyMode, _ string, _ string, patchData io.Reader) error {
+	_, _ = io.Copy(io.Discard, patchData)
+	return nil
+}
+
+func (g *daemonExportApplyGitOps) ApplyPatchFromReader(ctx context.Context, mode model.ApplyMode, workTree, gitDir string, patchData io.Reader) error {
+	return g.ApplyPatchReader(ctx, mode, workTree, gitDir, patchData)
+}
+
 func TestNewRootCmdExposesDaemonSurface(t *testing.T) {
 	cmd := newRootCmd()
 	for _, args := range [][]string{
@@ -129,8 +142,148 @@ func TestDaemonStateListSessionsSortsKeysAndReportsBusyMetadata(t *testing.T) {
 	if sessions[0].LastUsedUnix == 0 || sessions[0].LastUsedRFC3339 == "" {
 		t.Fatalf("expected last-used metadata, got %#v", sessions[0])
 	}
+	if sessions[0].CreatedUnix == 0 || sessions[0].CreatedRFC3339 == "" {
+		t.Fatalf("expected created metadata, got %#v", sessions[0])
+	}
+	if !sessions[0].Dirty {
+		t.Fatalf("expected busy session to report dirty state, got %#v", sessions[0])
+	}
 	if sessions[1].Busy {
 		t.Fatalf("expected chat-b to be idle, got %#v", sessions[1])
+	}
+}
+
+func TestDaemonStateFlushReportsObservabilityCounters(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	now := time.Unix(1700000000, 0)
+	g := &exportGitOps{tracked: []byte("first\n")}
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return g
+	})
+	state.deps.now = func() time.Time { return now }
+	cfg := daemonTestConfig()
+
+	if _, err := state.ensureSession(context.Background(), "chat-a", cfg); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	if err := state.flushSession(context.Background(), "chat-a", 0); err != nil {
+		t.Fatalf("initial flush: %v", err)
+	}
+	now = now.Add(30 * time.Second)
+	g.tracked = []byte("second\n")
+	if err := state.flushSession(context.Background(), "chat-a", time.Hour); err != nil {
+		t.Fatalf("min-age flush: %v", err)
+	}
+
+	sessions, err := state.listSessions(context.Background())
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	got := sessions[0]
+	if got.FlushCount != 1 || got.FlushSkipped != 1 {
+		t.Fatalf("expected flush observability counters after skip, got %#v", got)
+	}
+	if got.Dirty {
+		t.Fatalf("expected skipped idle flush to keep session clean, got %#v", got)
+	}
+	if got.LastFlushedUnix == 0 || got.LastFlushedRFC3339 == "" {
+		t.Fatalf("expected last-flushed metadata, got %#v", got)
+	}
+}
+
+func TestDaemonStateRestoresPersistedSessionsAfterRestart(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	now := time.Unix(1700000000, 0)
+	g := &daemonExportApplyGitOps{exportGitOps: exportGitOps{tracked: []byte("diff --git a/file.txt b/file.txt\n")}}
+	state1 := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return g
+	})
+	state1.deps.now = func() time.Time { return now }
+	cfg := daemonTestConfig()
+
+	info1, leaseID, err := state1.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg)
+	if err != nil {
+		t.Fatalf("acquire exec: %v", err)
+	}
+	now = now.Add(time.Minute)
+	if err := state1.releaseExec(context.Background(), "chat-a", leaseID); err != nil {
+		t.Fatalf("release exec: %v", err)
+	}
+	state1.closeAll()
+
+	state2 := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return g
+	})
+	state2.deps.now = func() time.Time { return now.Add(time.Minute) }
+
+	sessions, err := state2.listSessions(context.Background())
+	if err != nil {
+		t.Fatalf("list restored sessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 restored session, got %d", len(sessions))
+	}
+	got := sessions[0]
+	if got.SessionKey != "chat-a" {
+		t.Fatalf("unexpected restored session key: %#v", got)
+	}
+	if got.PatchPath != info1.PatchPath {
+		t.Fatalf("expected patch path to survive restart, got %q want %q", got.PatchPath, info1.PatchPath)
+	}
+	if got.ViewPath == info1.ViewPath {
+		t.Fatalf("expected recovered session to get a fresh view path after restart, got %q", got.ViewPath)
+	}
+	if got.RecoveredCount != 1 {
+		t.Fatalf("expected recovered count to increment, got %#v", got)
+	}
+	if got.FlushCount != 1 || got.LastFlushedUnix == 0 {
+		t.Fatalf("expected restored flush metadata, got %#v", got)
+	}
+}
+
+func TestDaemonStateRestorePreservesOptionMismatchChecks(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state1 := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &daemonExportApplyGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	if _, err := state1.ensureSession(context.Background(), "chat-a", cfg); err != nil {
+		t.Fatalf("ensure chat-a: %v", err)
+	}
+	state1.closeAll()
+
+	state2 := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &daemonExportApplyGitOps{}
+	})
+	cfg.ApplyMode = model.ApplyReject
+	if _, err := state2.ensureSession(context.Background(), "chat-a", cfg); err == nil || !strings.Contains(err.Error(), "different options") {
+		t.Fatalf("expected options mismatch after restart, got %v", err)
+	}
+}
+
+func TestDaemonStateEndRemovesPersistedMetadata(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &exportGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	if _, err := state.ensureSession(context.Background(), "chat-a", cfg); err != nil {
+		t.Fatalf("ensure chat-a: %v", err)
+	}
+	metaPath := daemonSessionMetaPath(gitDir, "chat-a")
+	if _, err := os.Stat(metaPath); err != nil {
+		t.Fatalf("expected metadata file, got %v", err)
+	}
+	if _, err := state.endSession(context.Background(), "chat-a"); err != nil {
+		t.Fatalf("end chat-a: %v", err)
+	}
+	if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
+		t.Fatalf("expected metadata removal, got %v", err)
 	}
 }
 
