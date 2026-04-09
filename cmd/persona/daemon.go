@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -56,29 +57,36 @@ type daemonSessionConfig struct {
 }
 
 type daemonRequest struct {
-	Method     string              `json:"method"`
-	RepoRoot   string              `json:"repo_root,omitempty"`
-	GitDir     string              `json:"git_dir,omitempty"`
-	SessionKey string              `json:"session_key,omitempty"`
-	LeaseID    string              `json:"lease_id,omitempty"`
-	OwnerPID   int                 `json:"owner_pid,omitempty"`
-	Config     daemonSessionConfig `json:"config"`
+	Method         string              `json:"method"`
+	RepoRoot       string              `json:"repo_root,omitempty"`
+	GitDir         string              `json:"git_dir,omitempty"`
+	SessionKey     string              `json:"session_key,omitempty"`
+	LeaseID        string              `json:"lease_id,omitempty"`
+	OwnerPID       int                 `json:"owner_pid,omitempty"`
+	IdleForSeconds int64               `json:"idle_for_seconds,omitempty"`
+	Config         daemonSessionConfig `json:"config"`
 }
 
 type daemonResponse struct {
-	Error   string             `json:"error,omitempty"`
-	Code    int                `json:"code,omitempty"`
-	Session *daemonSessionInfo `json:"session,omitempty"`
-	LeaseID string             `json:"lease_id,omitempty"`
-	Ended   bool               `json:"ended,omitempty"`
+	Error    string              `json:"error,omitempty"`
+	Code     int                 `json:"code,omitempty"`
+	Session  *daemonSessionInfo  `json:"session,omitempty"`
+	Sessions []daemonSessionInfo `json:"sessions,omitempty"`
+	Pruned   []string            `json:"pruned,omitempty"`
+	LeaseID  string              `json:"lease_id,omitempty"`
+	Ended    bool                `json:"ended,omitempty"`
 }
 
 type daemonSessionInfo struct {
-	SessionKey string `json:"session_key"`
-	RepoRoot   string `json:"repo_root"`
-	GitDir     string `json:"git_dir"`
-	ViewPath   string `json:"view_path"`
-	PatchPath  string `json:"patch_path"`
+	SessionKey      string `json:"session_key"`
+	RepoRoot        string `json:"repo_root"`
+	GitDir          string `json:"git_dir"`
+	ViewPath        string `json:"view_path"`
+	PatchPath       string `json:"patch_path"`
+	Busy            bool   `json:"busy"`
+	BusyOwnerPID    int    `json:"busy_owner_pid,omitempty"`
+	LastUsedUnix    int64  `json:"last_used_unix"`
+	LastUsedRFC3339 string `json:"last_used_rfc3339"`
 }
 
 type daemonDeps struct {
@@ -172,6 +180,36 @@ func addDaemonCommands(root *cobra.Command) {
 	bindDaemonSessionFlags(infoCmd, &infoFlags)
 	infoCmd.Flags().BoolVar(&infoJSON, "json", false, "print daemon session info as JSON")
 
+	var listJSON bool
+	listCmd := &cobra.Command{
+		Use:           "list",
+		Short:         "List daemon sessions for the current repository",
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sessions, err := runDaemonList(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if listJSON {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(sessions)
+			}
+			for _, sess := range sessions {
+				fmt.Fprintf(
+					cmd.OutOrStdout(),
+					"session_key=%s busy=%t last_used=%s view_path=%s patch_path=%s\n",
+					sess.SessionKey,
+					sess.Busy,
+					sess.LastUsedRFC3339,
+					sess.ViewPath,
+					sess.PatchPath,
+				)
+			}
+			return nil
+		},
+	}
+	listCmd.Flags().BoolVar(&listJSON, "json", false, "print daemon sessions as JSON")
+
 	var flushSessionKey string
 	flushCmd := &cobra.Command{
 		Use:           "flush --session-key <key>",
@@ -184,6 +222,39 @@ func addDaemonCommands(root *cobra.Command) {
 	}
 	flushCmd.Flags().StringVar(&flushSessionKey, "session-key", "", "external session key, such as a Claude chat session id")
 	_ = flushCmd.MarkFlagRequired("session-key")
+
+	var pruneIdleFor string
+	var pruneJSON bool
+	pruneCmd := &cobra.Command{
+		Use:           "prune --idle-for <duration>",
+		Short:         "End idle daemon sessions for the current repository",
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			idleFor, err := time.ParseDuration(strings.TrimSpace(pruneIdleFor))
+			if err != nil {
+				return &model.PersonaError{Code: model.ExitEnv, Op: "parse prune duration", Err: err}
+			}
+			if idleFor < 0 {
+				return &model.PersonaError{Code: model.ExitEnv, Op: "parse prune duration", Err: fmt.Errorf("idle-for must be >= 0")}
+			}
+			pruned, err := runDaemonPrune(cmd.Context(), idleFor)
+			if err != nil {
+				return err
+			}
+			if pruneJSON {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"pruned": pruned})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "pruned=%d\n", len(pruned))
+			for _, key := range pruned {
+				fmt.Fprintln(cmd.OutOrStdout(), key)
+			}
+			return nil
+		},
+	}
+	pruneCmd.Flags().StringVar(&pruneIdleFor, "idle-for", "", "prune sessions idle for at least this duration (for example 30m or 24h)")
+	pruneCmd.Flags().BoolVar(&pruneJSON, "json", false, "print pruned session keys as JSON")
+	_ = pruneCmd.MarkFlagRequired("idle-for")
 
 	var endSessionKey string
 	endCmd := &cobra.Command{
@@ -215,7 +286,7 @@ func addDaemonCommands(root *cobra.Command) {
 	serveCmd.Flags().StringVar(&serveGitDir, "git-dir", "", "git dir for the daemon server")
 	serveCmd.Flags().StringVar(&serveSocket, "socket", "", "unix socket path for the daemon server")
 
-	daemonCmd.AddCommand(execCmd, infoCmd, flushCmd, endCmd, serveCmd)
+	daemonCmd.AddCommand(execCmd, infoCmd, listCmd, flushCmd, pruneCmd, endCmd, serveCmd)
 	root.AddCommand(daemonCmd)
 }
 
@@ -350,6 +421,30 @@ func runDaemonFlush(ctx context.Context, sessionKey string) error {
 	return client.flush(ctx, sessionKey)
 }
 
+func runDaemonList(ctx context.Context) ([]daemonSessionInfo, error) {
+	repoRoot, gitDir, _, err := daemonRepoContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	client, err := newDaemonClient(ctx, repoRoot, gitDir)
+	if err != nil {
+		return nil, err
+	}
+	return client.list(ctx)
+}
+
+func runDaemonPrune(ctx context.Context, idleFor time.Duration) ([]string, error) {
+	repoRoot, gitDir, _, err := daemonRepoContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	client, err := newDaemonClient(ctx, repoRoot, gitDir)
+	if err != nil {
+		return nil, err
+	}
+	return client.prune(ctx, idleFor)
+}
+
 func daemonRepoContext(ctx context.Context) (string, string, string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -455,6 +550,13 @@ func (s *daemonState) handleRequest(req daemonRequest) daemonResponse {
 	case "ensure":
 		info, err := s.ensureSession(context.Background(), key, req.Config)
 		return daemonResponseForInfo(info, err)
+	case "list":
+		sessions, err := s.listSessions(context.Background())
+		resp := daemonResponseForInfo(nil, err)
+		if err == nil {
+			resp.Sessions = sessions
+		}
+		return resp
 	case "acquire_exec":
 		info, leaseID, err := s.acquireExec(context.Background(), key, req.OwnerPID, req.Config)
 		resp := daemonResponseForInfo(info, err)
@@ -468,6 +570,13 @@ func (s *daemonState) handleRequest(req daemonRequest) daemonResponse {
 	case "flush":
 		err := s.flushSession(context.Background(), key)
 		return daemonResponseForInfo(nil, err)
+	case "prune":
+		pruned, err := s.pruneSessions(context.Background(), time.Duration(req.IdleForSeconds)*time.Second)
+		resp := daemonResponseForInfo(nil, err)
+		if err == nil {
+			resp.Pruned = pruned
+		}
+		return resp
 	case "end":
 		ended, err := s.endSession(context.Background(), key)
 		resp := daemonResponseForInfo(nil, err)
@@ -492,6 +601,17 @@ func daemonResponseForInfo(info *daemonSessionInfo, err error) daemonResponse {
 	return resp
 }
 
+func daemonSessionSnapshot(sess *daemonSession) daemonSessionInfo {
+	info := sess.info
+	info.Busy = sess.busy
+	info.BusyOwnerPID = sess.busyOwnerPID
+	info.LastUsedUnix = sess.lastUsed.Unix()
+	if !sess.lastUsed.IsZero() {
+		info.LastUsedRFC3339 = sess.lastUsed.UTC().Format(time.RFC3339)
+	}
+	return info
+}
+
 func (s *daemonState) ensureSession(ctx context.Context, sessionKey string, cfg daemonSessionConfig) (*daemonSessionInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -499,7 +619,7 @@ func (s *daemonState) ensureSession(ctx context.Context, sessionKey string, cfg 
 	if err != nil {
 		return nil, err
 	}
-	info := sess.info
+	info := daemonSessionSnapshot(sess)
 	return &info, nil
 }
 
@@ -532,8 +652,27 @@ func (s *daemonState) acquireExec(ctx context.Context, sessionKey string, ownerP
 	sess.busyOwnerPID = ownerPID
 	sess.busyLease = leaseID
 	sess.lastUsed = s.deps.now()
-	info := sess.info
+	info := daemonSessionSnapshot(sess)
 	return &info, leaseID, nil
+}
+
+func (s *daemonState) listSessions(ctx context.Context) ([]daemonSessionInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0, len(s.sessions))
+	for key := range s.sessions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	sessions := make([]daemonSessionInfo, 0, len(keys))
+	for _, key := range keys {
+		sess := s.sessions[key]
+		if err := s.recoverBusyLocked(ctx, sess); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, daemonSessionSnapshot(sess))
+	}
+	return sessions, nil
 }
 
 func (s *daemonState) releaseExec(ctx context.Context, sessionKey, leaseID string) error {
@@ -556,27 +695,9 @@ func (s *daemonState) endSession(ctx context.Context, sessionKey string) (bool, 
 	if sess == nil {
 		return false, nil
 	}
-	if err := s.recoverBusyLocked(ctx, sess); err != nil {
+	if err := s.endSessionLocked(ctx, sessionKey, sess); err != nil {
 		return false, err
 	}
-	if sess.busy {
-		return false, model.Wrap(model.ExitEnv, "end daemon session", fmt.Errorf("session %q is still busy in pid %d", sessionKey, sess.busyOwnerPID))
-	}
-	var currentIgnored []string
-	if sess.config.IgnoredMax != 0 {
-		var err error
-		currentIgnored, err = listIgnoredCandidatesChecked(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.config.IgnoredMax)
-		if err != nil {
-			return false, model.Wrap(model.ExitEnv, "list ignored files", err)
-		}
-	}
-	if err := s.writeSessionPatch(ctx, sess, currentIgnored); err != nil {
-		return false, err
-	}
-	if err := sess.cleanup.Run(); err != nil {
-		return false, model.Wrap(model.ExitEnv, "cleanup daemon session", err)
-	}
-	delete(s.sessions, sessionKey)
 	return true, nil
 }
 
@@ -587,25 +708,37 @@ func (s *daemonState) flushSession(ctx context.Context, sessionKey string) error
 	if sess == nil {
 		return nil
 	}
-	if err := s.recoverBusyLocked(ctx, sess); err != nil {
-		return err
+	return s.flushSessionLocked(ctx, sessionKey, sess, "flush daemon session")
+}
+
+func (s *daemonState) pruneSessions(ctx context.Context, idleFor time.Duration) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0, len(s.sessions))
+	for key := range s.sessions {
+		keys = append(keys, key)
 	}
-	if sess.busy {
-		return model.Wrap(model.ExitEnv, "flush daemon session", fmt.Errorf("session %q is still busy in pid %d", sessionKey, sess.busyOwnerPID))
-	}
-	var currentIgnored []string
-	if sess.config.IgnoredMax != 0 {
-		var err error
-		currentIgnored, err = listIgnoredCandidatesChecked(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.config.IgnoredMax)
-		if err != nil {
-			return model.Wrap(model.ExitEnv, "list ignored files", err)
+	sort.Strings(keys)
+	now := s.deps.now()
+	pruned := make([]string, 0)
+	for _, key := range keys {
+		sess := s.sessions[key]
+		lastUsed := sess.lastUsed
+		if err := s.recoverBusyLocked(ctx, sess); err != nil {
+			return nil, err
 		}
+		if sess.busy {
+			continue
+		}
+		if now.Sub(lastUsed) < idleFor {
+			continue
+		}
+		if err := s.endSessionLocked(ctx, key, sess); err != nil {
+			return nil, err
+		}
+		pruned = append(pruned, key)
 	}
-	if err := s.writeSessionPatch(ctx, sess, currentIgnored); err != nil {
-		return err
-	}
-	sess.lastUsed = s.deps.now()
-	return nil
+	return pruned, nil
 }
 
 func (s *daemonState) closeAll() {
@@ -741,6 +874,39 @@ func (s *daemonState) recoverBusyLocked(ctx context.Context, sess *daemonSession
 		return nil
 	}
 	return s.finishBusyLocked(ctx, sess)
+}
+
+func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string, sess *daemonSession, op string) error {
+	if err := s.recoverBusyLocked(ctx, sess); err != nil {
+		return err
+	}
+	if sess.busy {
+		return model.Wrap(model.ExitEnv, op, fmt.Errorf("session %q is still busy in pid %d", sessionKey, sess.busyOwnerPID))
+	}
+	var currentIgnored []string
+	if sess.config.IgnoredMax != 0 {
+		var err error
+		currentIgnored, err = listIgnoredCandidatesChecked(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.config.IgnoredMax)
+		if err != nil {
+			return model.Wrap(model.ExitEnv, "list ignored files", err)
+		}
+	}
+	if err := s.writeSessionPatch(ctx, sess, currentIgnored); err != nil {
+		return err
+	}
+	sess.lastUsed = s.deps.now()
+	return nil
+}
+
+func (s *daemonState) endSessionLocked(ctx context.Context, sessionKey string, sess *daemonSession) error {
+	if err := s.flushSessionLocked(ctx, sessionKey, sess, "end daemon session"); err != nil {
+		return err
+	}
+	if err := sess.cleanup.Run(); err != nil {
+		return model.Wrap(model.ExitEnv, "cleanup daemon session", err)
+	}
+	delete(s.sessions, sessionKey)
+	return nil
 }
 
 func (s *daemonState) finishBusyLocked(ctx context.Context, sess *daemonSession) error {
@@ -965,6 +1131,14 @@ func (c *daemonClient) ensure(ctx context.Context, sessionKey string, cfg daemon
 	return resp.Session, nil
 }
 
+func (c *daemonClient) list(ctx context.Context) ([]daemonSessionInfo, error) {
+	resp, err := c.call(ctx, daemonRequest{Method: "list"})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Sessions, nil
+}
+
 func (c *daemonClient) acquireExec(ctx context.Context, sessionKey string, cfg daemonSessionConfig) (*daemonResponse, error) {
 	return c.call(ctx, daemonRequest{
 		Method:     "acquire_exec",
@@ -997,4 +1171,15 @@ func (c *daemonClient) flush(ctx context.Context, sessionKey string) error {
 		SessionKey: sessionKey,
 	})
 	return err
+}
+
+func (c *daemonClient) prune(ctx context.Context, idleFor time.Duration) ([]string, error) {
+	resp, err := c.call(ctx, daemonRequest{
+		Method:         "prune",
+		IdleForSeconds: int64(idleFor / time.Second),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Pruned, nil
 }

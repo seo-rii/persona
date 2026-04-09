@@ -12,6 +12,7 @@ Operating rules:
 - Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` are redirected into the daemon-backed view, and successful write tools flush back into the session patch.
 - Prefer repository paths in prompts and planning even if Claude tool output shows an internal daemon `view_path`.
 - Remember that the same Claude chat keeps reusing one daemon session key, while parallel chats stay isolated in separate patches/views.
+- When you need to inspect or clean up old sessions, use `persona daemon list --json` and `persona daemon prune --idle-for <duration>`.
 - Do not point Claude file tools at `.git` or daemon state paths. Those are blocked on purpose; use Git-aware tooling or explicit `persona daemon` commands instead.
 - Keep Git-oriented Bash commands minimal. Commands that resolve to `git`, `gh`, `persona`, or `claude` are intentionally bypassed instead of wrapped because persona hides `.git` from child commands.
 - Use Bash for build, test, and bulk edit flows that should persist through the session patch.

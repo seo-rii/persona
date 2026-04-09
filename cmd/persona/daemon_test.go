@@ -19,7 +19,9 @@ func TestNewRootCmdExposesDaemonSurface(t *testing.T) {
 		{"daemon"},
 		{"daemon", "exec"},
 		{"daemon", "info"},
+		{"daemon", "list"},
 		{"daemon", "flush"},
+		{"daemon", "prune"},
 		{"daemon", "end"},
 	} {
 		found, _, err := cmd.Find(args)
@@ -94,6 +96,41 @@ func TestDaemonStateRejectsOptionMismatchForExistingKey(t *testing.T) {
 	cfg.ApplyMode = model.ApplyReject
 	if _, err := state.ensureSession(context.Background(), "chat-a", cfg); err == nil || !strings.Contains(err.Error(), "different options") {
 		t.Fatalf("expected options mismatch, got %v", err)
+	}
+}
+
+func TestDaemonStateListSessionsSortsKeysAndReportsBusyMetadata(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &exportGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	if _, err := state.ensureSession(context.Background(), "chat-b", cfg); err != nil {
+		t.Fatalf("ensure chat-b: %v", err)
+	}
+	if _, _, err := state.acquireExec(context.Background(), "chat-a", os.Getpid(), cfg); err != nil {
+		t.Fatalf("acquire chat-a: %v", err)
+	}
+
+	sessions, err := state.listSessions(context.Background())
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessions))
+	}
+	if sessions[0].SessionKey != "chat-a" || sessions[1].SessionKey != "chat-b" {
+		t.Fatalf("expected sorted session keys, got %#v", sessions)
+	}
+	if !sessions[0].Busy || sessions[0].BusyOwnerPID != os.Getpid() {
+		t.Fatalf("expected busy metadata on chat-a, got %#v", sessions[0])
+	}
+	if sessions[0].LastUsedUnix == 0 || sessions[0].LastUsedRFC3339 == "" {
+		t.Fatalf("expected last-used metadata, got %#v", sessions[0])
+	}
+	if sessions[1].Busy {
+		t.Fatalf("expected chat-b to be idle, got %#v", sessions[1])
 	}
 }
 
@@ -305,6 +342,75 @@ func TestDaemonStateFlushRejectsBusyLiveSession(t *testing.T) {
 	}
 	if err := state.flushSession(context.Background(), "chat-a"); err == nil || !strings.Contains(err.Error(), "still busy") {
 		t.Fatalf("expected busy flush rejection, got %v", err)
+	}
+}
+
+func TestDaemonStatePruneRemovesOnlyIdleNonBusySessions(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &exportGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	if _, err := state.ensureSession(context.Background(), "chat-a", cfg); err != nil {
+		t.Fatalf("ensure chat-a: %v", err)
+	}
+	if _, err := state.ensureSession(context.Background(), "chat-b", cfg); err != nil {
+		t.Fatalf("ensure chat-b: %v", err)
+	}
+	if _, _, err := state.acquireExec(context.Background(), "chat-c", os.Getpid(), cfg); err != nil {
+		t.Fatalf("acquire chat-c: %v", err)
+	}
+	baseNow := state.deps.now()
+	state.sessions["chat-a"].lastUsed = baseNow.Add(-2 * time.Hour)
+	state.sessions["chat-b"].lastUsed = baseNow.Add(-10 * time.Minute)
+	state.sessions["chat-c"].lastUsed = baseNow.Add(-3 * time.Hour)
+
+	pruned, err := state.pruneSessions(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("prune sessions: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0] != "chat-a" {
+		t.Fatalf("expected only chat-a to be pruned, got %#v", pruned)
+	}
+	if _, ok := state.sessions["chat-a"]; ok {
+		t.Fatal("expected chat-a to be removed")
+	}
+	if _, ok := state.sessions["chat-b"]; !ok {
+		t.Fatal("expected chat-b to remain")
+	}
+	if _, ok := state.sessions["chat-c"]; !ok {
+		t.Fatal("expected busy chat-c to remain")
+	}
+}
+
+func TestDaemonStatePruneRecoversStaleBusySessionsBeforeRemovingThem(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	g := &exportGitOps{tracked: []byte("diff --git a/stale.txt b/stale.txt\n")}
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return g
+	})
+	cfg := daemonTestConfig()
+
+	info, _, err := state.acquireExec(context.Background(), "chat-a", -1, cfg)
+	if err != nil {
+		t.Fatalf("acquire stale chat-a: %v", err)
+	}
+	state.sessions["chat-a"].lastUsed = state.deps.now().Add(-2 * time.Hour)
+
+	pruned, err := state.pruneSessions(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("prune sessions: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0] != "chat-a" {
+		t.Fatalf("expected stale chat-a to be pruned, got %#v", pruned)
+	}
+	patchData, err := os.ReadFile(info.PatchPath)
+	if err != nil {
+		t.Fatalf("read pruned patch: %v", err)
+	}
+	if string(patchData) != string(g.tracked) {
+		t.Fatalf("expected stale recovery flush before prune, got %q", patchData)
 	}
 }
 

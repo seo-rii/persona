@@ -47,7 +47,9 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 - A single Claude chat reuses the same `session_id`, so repeated wrapped Bash calls keep writing back into the same daemon session patch.
 - Parallel chats in the same Claude Code instance get different `session_id` values, which keeps their patches and views isolated.
 - To inspect the stable view or patch path manually, run `persona daemon info --session-key <claude-session-id> --json`.
+- To inspect every daemon session for the current repository, run `persona daemon list --json`.
 - To persist daemon-backed file-tool changes on demand, run `persona daemon flush --session-key <claude-session-id>`.
+- To remove stale sessions in bulk, run `persona daemon prune --idle-for 24h`.
 - To discard or fully close a session, run `persona daemon end --session-key <claude-session-id>`.
 - If you want to reuse a session key with different daemon options, you must end the old session first.
 

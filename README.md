@@ -93,7 +93,9 @@ persona --patch /tmp/state.patch -- cat new.txt
 - `persona activate`: grant `cap_sys_admin` to the persona binary by default. Use `--binary PATH` to target a different persona executable, and add `--allow-dac-override` only when patch writes must bypass DAC checks.
 - `persona daemon exec --session-key <key> -- <command...>`: create or reuse a daemon-backed overlay session, run the command inside its stable view, and flush back into that session's patch file.
 - `persona daemon info --session-key <key> --json`: ensure a daemon session exists and print its stable `view_path` / `patch_path` for tool integrations.
+- `persona daemon list --json`: list daemon sessions for the current repository, including busy / last-used metadata.
 - `persona daemon flush --session-key <key>`: write the current daemon view back into that session's patch file without ending the session.
+- `persona daemon prune --idle-for <duration>`: end idle daemon sessions for the current repository.
 - `persona daemon end --session-key <key>`: flush the daemon session and remove its overlay view.
 - `persona version`: print the current persona CLI version.
 - Run `persona version` or `persona --version` to see the current CLI version instead of relying on README text.
@@ -111,8 +113,10 @@ Daemon example:
 
 ```
 persona daemon info --session-key claude-chat-123 --json
+persona daemon list --json
 persona daemon exec --session-key claude-chat-123 -- sh -lc 'printf hello > note.txt'
 persona daemon flush --session-key claude-chat-123
+persona daemon prune --idle-for 24h
 persona daemon end --session-key claude-chat-123
 ```
 

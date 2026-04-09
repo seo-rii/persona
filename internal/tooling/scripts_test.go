@@ -512,7 +512,9 @@ func TestReadmeDocumentsDaemonHelpSurface(t *testing.T) {
 		"Usage:",
 		"exec",
 		"info",
+		"list",
 		"flush",
+		"prune",
 		"end",
 	} {
 		if !strings.Contains(help, want) {
@@ -522,7 +524,9 @@ func TestReadmeDocumentsDaemonHelpSurface(t *testing.T) {
 	for _, want := range []string{
 		"`persona daemon exec --session-key <key> -- <command...>`",
 		"`persona daemon info --session-key <key> --json`",
+		"`persona daemon list --json`",
 		"`persona daemon flush --session-key <key>`",
+		"`persona daemon prune --idle-for <duration>`",
 		"`persona daemon end --session-key <key>`",
 		"`--base-mode worktree`",
 		"same session key with different daemon option values is rejected",
