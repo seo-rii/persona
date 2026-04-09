@@ -41,13 +41,15 @@ What the plugin does:
 
 - `PreToolUse` on `Bash` rewrites eligible shell commands to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
 - Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` calls are rewritten into the daemon session's stable `view_path`.
+- Managed `Edit`, `MultiEdit`, and `Write` calls mark the daemon session dirty before the tool runs, then flush after success so `daemon list/info` can show pending-vs-flushed state accurately.
 - Successful `Edit`, `MultiEdit`, and `Write` calls trigger `persona daemon flush --session-key <claude-session-id>` so file-tool edits are written back into the patch.
+- `SessionEnd` runs `persona daemon end --session-key <claude-session-id>` so finished Claude chats clean up their daemon-backed views automatically.
 - The first wrapped Bash call lazily starts a per-repo background daemon under `<gitdir>/persona/daemon/`.
 - Each Claude chat session key maps to its own daemon-backed patch/view pair, so concurrent chats in the same Claude instance stay isolated from each other.
 - The plugin ships a `persona-worker` agent, and `settings.json` sets `"agent": "persona-worker"` so the main thread prefers Bash-based editing.
 - Repo-scoped write tools are allowed; writes outside the current repository are denied because they cannot be backed by persona's patch store.
-- Claude file tools are also denied for `.git` and daemon state paths, even when they fall inside the repository tree.
-- Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
+- Claude file tools are also denied for `.git` and daemon state paths, even when they fall inside the repository tree; the deny message points Claude toward Git-aware commands or explicit `persona daemon` subcommands.
+- Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped, and the hook now explains that `.git` is masked from persona child commands.
 - The wrapper uses the selected shell from the hook payload when available, then falls back to the hook process `SHELL`, and only then to `bash`.
 
 Recommended setup:

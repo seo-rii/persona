@@ -90,6 +90,10 @@ func TestPersonaClaudePluginHooksWrapBashAndRouteFileTools(t *testing.T) {
 	if !ok || len(postToolUse) != 1 {
 		t.Fatalf("expected one PostToolUse handler, got %#v", hooks["PostToolUse"])
 	}
+	sessionEnd, ok := hooks["SessionEnd"].([]any)
+	if !ok || len(sessionEnd) != 1 {
+		t.Fatalf("expected one SessionEnd handler, got %#v", hooks["SessionEnd"])
+	}
 
 	matchers := map[string]bool{}
 	for _, raw := range preToolUse {
@@ -120,6 +124,15 @@ func TestPersonaClaudePluginHooksWrapBashAndRouteFileTools(t *testing.T) {
 	postEntry := postToolUse[0].(map[string]any)
 	if got, want := postEntry["matcher"], "Read|Edit|MultiEdit|Write|Glob|Grep"; got != want {
 		t.Fatalf("unexpected PostToolUse matcher: got %v want %q", got, want)
+	}
+	endEntry := sessionEnd[0].(map[string]any)
+	endHooks, ok := endEntry["hooks"].([]any)
+	if !ok || len(endHooks) != 1 {
+		t.Fatalf("unexpected SessionEnd hooks: %#v", endEntry["hooks"])
+	}
+	endHandler := endHooks[0].(map[string]any)
+	if got, want := endHandler["command"], "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap"; got != want {
+		t.Fatalf("unexpected SessionEnd handler command: got %v want %q", got, want)
 	}
 }
 
@@ -187,14 +200,14 @@ func TestPersonaWrapForwardsConfiguredDaemonOptions(t *testing.T) {
 			"shell":   "/bin/zsh",
 		},
 	}, map[string]string{
-		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN":             personaStub,
-		"CLAUDE_PLUGIN_OPTION_DAEMON_BASE_MODE":        "worktree",
-		"CLAUDE_PLUGIN_OPTION_DAEMON_BASE_REF":         "HEAD~1",
-		"CLAUDE_PLUGIN_OPTION_DAEMON_ALLOW_DIRTY":      "true",
-		"CLAUDE_PLUGIN_OPTION_DAEMON_IGNORED_MODE":     "readonly",
-		"CLAUDE_PLUGIN_OPTION_DAEMON_IGNORED_MAX":      "50",
-		"CLAUDE_PLUGIN_OPTION_DAEMON_APPLY_MODE":       "reject",
-		"PERSONA_TEST_LOG":                             logPath,
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN":         personaStub,
+		"CLAUDE_PLUGIN_OPTION_DAEMON_BASE_MODE":    "worktree",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_BASE_REF":     "HEAD~1",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_ALLOW_DIRTY":  "true",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_IGNORED_MODE": "readonly",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_IGNORED_MAX":  "50",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_APPLY_MODE":   "reject",
+		"PERSONA_TEST_LOG":                         logPath,
 	})
 
 	var response map[string]any
@@ -232,8 +245,17 @@ func TestPersonaWrapBypassesGitCommands(t *testing.T) {
 		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": "/opt/persona",
 		"CLAUDE_PROJECT_DIR":               repoRoot,
 	})
-	if len(bytes.TrimSpace(output)) != 0 {
-		t.Fatalf("expected git command to bypass persona wrapping, got %s", output)
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
+	}
+	hookOutput := response["hookSpecificOutput"].(map[string]any)
+	if got, want := hookOutput["permissionDecision"], "allow"; got != want {
+		t.Fatalf("unexpected permission decision: got %v want %q", got, want)
+	}
+	reason := hookOutput["permissionDecisionReason"].(string)
+	if !strings.Contains(reason, "Git-aware shell commands") || !strings.Contains(reason, ".git") {
+		t.Fatalf("unexpected bypass reason: %q", reason)
 	}
 }
 
@@ -336,6 +358,9 @@ func TestPersonaWrapRewritesWriteToolsIntoDaemonView(t *testing.T) {
 	if !strings.Contains(string(logData), "daemon info --session-key session-123 --json") {
 		t.Fatalf("expected daemon info lookup, got log:\n%s", logData)
 	}
+	if !strings.Contains(string(logData), "daemon mark-dirty --session-key session-123") {
+		t.Fatalf("expected daemon dirty-mark call, got log:\n%s", logData)
+	}
 }
 
 func TestPersonaWrapForwardsDaemonOptionsToSessionLookup(t *testing.T) {
@@ -433,7 +458,7 @@ func TestPersonaWrapDeniesGitPathsForFileTools(t *testing.T) {
 		t.Fatalf("unexpected permission decision: got %v want %q", got, want)
 	}
 	reason := hookOutput["permissionDecisionReason"].(string)
-	if !strings.Contains(reason, ".git") || !strings.Contains(reason, "daemon state") {
+	if !strings.Contains(reason, ".git paths") || !strings.Contains(reason, "git status") {
 		t.Fatalf("unexpected deny reason: %q", reason)
 	}
 }
@@ -466,6 +491,10 @@ func TestPersonaWrapDeniesExternalDaemonPatchPaths(t *testing.T) {
 	hookOutput := response["hookSpecificOutput"].(map[string]any)
 	if got, want := hookOutput["permissionDecision"], "deny"; got != want {
 		t.Fatalf("unexpected permission decision: got %v want %q", got, want)
+	}
+	reason := hookOutput["permissionDecisionReason"].(string)
+	if !strings.Contains(reason, "daemon state paths") || !strings.Contains(reason, "persona daemon info") {
+		t.Fatalf("unexpected daemon-state deny reason: %q", reason)
 	}
 }
 
@@ -600,10 +629,10 @@ func TestPersonaWrapForwardsFlushMinAgeOption(t *testing.T) {
 			"content":   "hello",
 		},
 	}, map[string]string{
-		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN":          personaStub,
-		"CLAUDE_PLUGIN_OPTION_FLUSH_MIN_AGE":        "1s",
-		"PERSONA_TEST_VIEW_PATH":                    viewPath,
-		"PERSONA_TEST_LOG":                          logPath,
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN":   personaStub,
+		"CLAUDE_PLUGIN_OPTION_FLUSH_MIN_AGE": "1s",
+		"PERSONA_TEST_VIEW_PATH":             viewPath,
+		"PERSONA_TEST_LOG":                   logPath,
 	})
 
 	var response map[string]any
@@ -696,6 +725,35 @@ func TestPersonaWrapAddsPathContextForManagedReadPostToolUse(t *testing.T) {
 	}
 }
 
+func TestPersonaWrapEndsDaemonSessionOnSessionEnd(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	logPath := filepath.Join(t.TempDir(), "persona.log")
+	personaStub := writePersonaDaemonStub(t, viewPath, logPath)
+
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "SessionEnd",
+		"reason":          "exit",
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub,
+		"PERSONA_TEST_VIEW_PATH":           viewPath,
+		"PERSONA_TEST_LOG":                 logPath,
+	})
+
+	if len(bytes.TrimSpace(output)) != 0 {
+		t.Fatalf("expected SessionEnd hook to stay silent, got %s", output)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read persona stub log: %v", err)
+	}
+	if !strings.Contains(string(logData), "daemon end --session-key session-123") {
+		t.Fatalf("expected daemon end call on SessionEnd, got log:\n%s", logData)
+	}
+}
+
 func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 	repoRoot := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
@@ -718,10 +776,12 @@ func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 		"`FLUSH_RETRY_FOR`",
 		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
 		"`persona daemon flush --session-key <claude-session-id>`",
+		"`SessionEnd` runs `persona daemon end --session-key <claude-session-id>`",
 		"`persona daemon list --json`",
 		"`persona daemon prune --idle-for <duration>`",
 		"writes outside the current repository are denied",
-		"`.git` and daemon state paths",
+		"deny message points Claude toward Git-aware commands or explicit `persona daemon` subcommands",
+		"hook now explains that `.git` is masked",
 		"`--base-mode worktree`",
 		"Codex does not currently support the same transparent Bash rewrite flow",
 	} {
@@ -752,14 +812,16 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 		"`FLUSH_MIN_AGE`",
 		"`FLUSH_RETRY_FOR`",
 		"`persona daemon end --session-key <claude-session-id>`",
+		"`SessionEnd` runs `persona daemon end --session-key <claude-session-id>`",
 		"`tool_input.shell` when Claude exposes it",
 		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
-		"`.git` and daemon state paths",
+		"deny reason tells Claude whether it should switch to Git-aware commands or `persona daemon` commands",
 		"`--base-mode worktree`",
 		"tool responses may still show internal daemon `view_path` paths",
 		"Treat matching paths under",
 		"Writes outside the current repository are denied",
 		"Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed",
+		"mark the daemon session dirty before the tool runs",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("plugin README missing %q:\n%s", want, text)
@@ -783,9 +845,10 @@ func TestPersonaWorkerAgentDocumentsDaemonWorkflow(t *testing.T) {
 		"`DAEMON_*`",
 		"`FLUSH_MIN_AGE`",
 		"`persona daemon end --session-key <claude-session-id>`",
+		"plugin runs `persona daemon end --session-key <claude-session-id>` automatically",
 		"internal daemon `view_path`",
 		"Treat it as repository path",
-		"`.git` or daemon state paths",
+		"deny reason tells you whether to switch to Git-aware tooling or explicit `persona daemon` commands",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("persona-worker doc missing %q:\n%s", want, text)

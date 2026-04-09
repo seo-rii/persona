@@ -107,12 +107,12 @@ def classify_tokens(tokens):
     return token
 
 
-def should_bypass(command):
+def bypass_reason(command):
     bypass_regex = os.getenv("PERSONA_WRAP_BYPASS_REGEX", "").strip()
     if bypass_regex:
         try:
             if re.search(bypass_regex, command):
-                return True
+                return "Bypass persona because the command matches the configured PERSONA_WRAP_BYPASS_REGEX rule."
         except re.error:
             pass
 
@@ -120,7 +120,13 @@ def should_bypass(command):
     if not prefixes:
         prefixes = list(DEFAULT_BYPASS_PREFIXES)
     primary = classify_tokens(tokenize(command))
-    return primary in prefixes
+    if primary not in prefixes:
+        return ""
+    if primary in {"git", "gh"}:
+        return "Bypass persona for Git-aware shell commands because persona masks .git from child commands."
+    if primary in {"persona", "claude"}:
+        return "Bypass persona for direct persona or claude shell commands to avoid recursive wrapping."
+    return f"Bypass persona because the command resolves to {primary}, which is configured to skip wrapping."
 
 
 def split_csv(raw):
@@ -172,18 +178,24 @@ def protected_path_reason(path_value, repo_dir, view_path, git_dir, patch_path):
         return ""
     candidate = os.path.abspath(path_value)
     daemon_root = os.path.join(git_dir, "persona", "daemon") if git_dir else ""
-    protected_roots = [
+    for root in [
         os.path.join(repo_dir, ".git") if repo_dir else "",
         os.path.join(view_path, ".git") if view_path else "",
+    ]:
+        if root and is_subpath(candidate, os.path.abspath(root)):
+            return (
+                "persona-claude blocks Claude file tools from .git paths because persona masks .git inside overlay views; "
+                "use git-aware commands such as git status, git diff, or git rev-parse instead."
+            )
+    for root in [
         daemon_root,
         patch_path,
         patch_path + ".lock" if patch_path else "",
-    ]
-    for root in protected_roots:
+    ]:
         if root and is_subpath(candidate, os.path.abspath(root)):
             return (
-                "persona-claude blocks Claude file tools from .git and daemon state paths; "
-                "use Git-aware tools or explicit persona daemon commands instead."
+                "persona-claude blocks Claude file tools from daemon state paths; "
+                "use persona daemon info, list, flush, or end instead."
             )
     return ""
 
@@ -286,6 +298,28 @@ def daemon_flush(persona_bin, session_id, min_age, cwd):
         args.extend(["--min-age", min_age])
     subprocess.run(
         args,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+    )
+
+
+def daemon_mark_dirty(persona_bin, session_id, cwd):
+    subprocess.run(
+        [persona_bin, "daemon", "mark-dirty", "--session-key", session_id or "session"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+    )
+
+
+def daemon_end(persona_bin, session_id, cwd):
+    subprocess.run(
+        [persona_bin, "daemon", "end", "--session-key", session_id or "session"],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -437,7 +471,9 @@ def handle_pretooluse(event):
         command = tool_input.get("command", "")
         if not isinstance(command, str) or not command.strip():
             return 0
-        if should_bypass(command):
+        bypass = bypass_reason(command)
+        if bypass:
+            emit_pretooluse("allow", bypass)
             return 0
 
         repo_dir = repo_root(cwd)
@@ -501,6 +537,12 @@ def handle_pretooluse(event):
         )
         return 0
     if managed:
+        if tool_name in WRITE_FILE_TOOLS:
+            try:
+                daemon_mark_dirty(persona_bin, session_id, cwd)
+            except (OSError, subprocess.SubprocessError) as err:
+                emit_pretooluse("deny", f"persona daemon dirty-mark failed: {subprocess_error_text(err)}")
+                return 0
         emit_pretooluse("allow", "Route the file tool through persona's daemon-backed view.", updated_input)
     return 0
 
@@ -581,6 +623,22 @@ def handle_posttooluse(event):
     return 0
 
 
+def handle_session_end(event):
+    cwd = event.get("cwd") or os.getcwd()
+    session_id = event.get("session_id", "")
+    if not repo_root(cwd):
+        return 0
+
+    persona_bin = resolve_persona_bin()
+    if not persona_bin:
+        return 0
+    try:
+        daemon_end(persona_bin, session_id, cwd)
+    except (OSError, subprocess.SubprocessError) as err:
+        print(f"persona daemon end failed during SessionEnd: {subprocess_error_text(err)}", file=sys.stderr)
+    return 0
+
+
 def main():
     event = load_event()
     hook_name = event.get("hook_event_name")
@@ -588,6 +646,8 @@ def main():
         return handle_pretooluse(event)
     if hook_name == "PostToolUse":
         return handle_posttooluse(event)
+    if hook_name == "SessionEnd":
+        return handle_session_end(event)
     return 0
 
 

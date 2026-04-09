@@ -44,12 +44,14 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 
 - `PreToolUse` on `Bash` runs `bin/persona-wrap`, which rewrites eligible Bash calls to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
 - `PreToolUse` on `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` rewrites repo-scoped paths into the daemon session's stable `view_path`.
+- Managed `Edit`, `MultiEdit`, and `Write` calls mark the daemon session dirty before the tool runs.
 - `PostToolUse` on `Edit`, `MultiEdit`, and `Write` runs `persona daemon flush --session-key <claude-session-id>` so file-tool mutations land in the session patch.
+- `SessionEnd` runs `persona daemon end --session-key <claude-session-id>` so finished Claude chats release their daemon-backed views.
 - The first wrapped Bash call lazily starts a per-repo daemon under `<gitdir>/persona/daemon/` and reuses it for later sessions in that repository.
 - Each Claude chat session key maps to its own daemon-backed patch/view pair.
 - Repo-scoped write tools are allowed, but writes outside the current repository are denied because they cannot be backed by persona's patch store.
-- `.git` and daemon state paths are denied even for read-only file tools so Claude cannot poke at masked Git metadata or session patch internals.
-- Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
+- `.git` and daemon state paths are denied even for read-only file tools so Claude cannot poke at masked Git metadata or session patch internals; the deny reason tells Claude whether it should switch to Git-aware commands or `persona daemon` commands.
+- Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped, and the bypass reason explains that persona hides `.git` from child commands.
 - The wrapper uses `tool_input.shell` when Claude exposes it, otherwise falls back to `event.shell`, then the hook process `SHELL`, and finally `bash`.
 
 ## Session lifecycle
@@ -61,6 +63,7 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 - To persist daemon-backed file-tool changes on demand, run `persona daemon flush --session-key <claude-session-id>`.
 - To remove stale sessions in bulk, run `persona daemon prune --idle-for 24h`.
 - To discard or fully close a session, run `persona daemon end --session-key <claude-session-id>`.
+- Normal Claude chat shutdown also triggers `persona daemon end --session-key <claude-session-id>` through the plugin's `SessionEnd` hook.
 - If you want to reuse a session key with different daemon options, you must end the old session first.
 
 ## Optional environment overrides

@@ -194,6 +194,45 @@ func TestDaemonStateFlushReportsObservabilityCounters(t *testing.T) {
 	}
 }
 
+func TestDaemonStateMarkDirtyPersistsDirtyFlag(t *testing.T) {
+	repoRoot, gitDir := daemonTestRepo(t)
+	state := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &daemonExportApplyGitOps{}
+	})
+	cfg := daemonTestConfig()
+
+	if _, err := state.ensureSession(context.Background(), "chat-a", cfg); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	if err := state.flushSession(context.Background(), "chat-a", 0); err != nil {
+		t.Fatalf("flush session: %v", err)
+	}
+	if err := state.markDirtySession(context.Background(), "chat-a"); err != nil {
+		t.Fatalf("mark dirty: %v", err)
+	}
+	if !state.sessions["chat-a"].dirty {
+		t.Fatal("expected in-memory dirty flag after mark-dirty")
+	}
+
+	state.closeAll()
+	state2 := newTestDaemonState(t, repoRoot, gitDir, func() model.GitOps {
+		return &daemonExportApplyGitOps{}
+	})
+	sessions, err := state2.listSessions(context.Background())
+	if err != nil {
+		t.Fatalf("list sessions after restart: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 restored session, got %d", len(sessions))
+	}
+	if sessions[0].Dirty {
+		t.Fatalf("expected recovered session to restart from patch-backed clean state, got %#v", sessions[0])
+	}
+	if sessions[0].RecoveredCount != 1 {
+		t.Fatalf("expected recovered count after dirty restart, got %#v", sessions[0])
+	}
+}
+
 func TestDaemonStateRestoresPersistedSessionsAfterRestart(t *testing.T) {
 	repoRoot, gitDir := daemonTestRepo(t)
 	now := time.Unix(1700000000, 0)

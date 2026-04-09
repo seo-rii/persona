@@ -280,6 +280,20 @@ func addDaemonCommands(root *cobra.Command) {
 	flushCmd.Flags().StringVar(&flushMinAge, "min-age", "0s", "skip the flush when the last successful daemon flush is newer than this duration")
 	_ = flushCmd.MarkFlagRequired("session-key")
 
+	var markDirtySessionKey string
+	markDirtyCmd := &cobra.Command{
+		Use:           "mark-dirty --session-key <key>",
+		Short:         "Mark a daemon session as having pending mutations",
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		Hidden:        true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDaemonMarkDirty(cmd.Context(), strings.TrimSpace(markDirtySessionKey))
+		},
+	}
+	markDirtyCmd.Flags().StringVar(&markDirtySessionKey, "session-key", "", "external session key, such as a Claude chat session id")
+	_ = markDirtyCmd.MarkFlagRequired("session-key")
+
 	var pruneIdleFor string
 	var pruneJSON bool
 	pruneCmd := &cobra.Command{
@@ -343,7 +357,7 @@ func addDaemonCommands(root *cobra.Command) {
 	serveCmd.Flags().StringVar(&serveGitDir, "git-dir", "", "git dir for the daemon server")
 	serveCmd.Flags().StringVar(&serveSocket, "socket", "", "unix socket path for the daemon server")
 
-	daemonCmd.AddCommand(execCmd, infoCmd, listCmd, flushCmd, pruneCmd, endCmd, serveCmd)
+	daemonCmd.AddCommand(execCmd, infoCmd, listCmd, flushCmd, markDirtyCmd, pruneCmd, endCmd, serveCmd)
 	root.AddCommand(daemonCmd)
 }
 
@@ -476,6 +490,18 @@ func runDaemonFlush(ctx context.Context, sessionKey string, minAge time.Duration
 		return err
 	}
 	return client.flush(ctx, sessionKey, minAge)
+}
+
+func runDaemonMarkDirty(ctx context.Context, sessionKey string) error {
+	repoRoot, gitDir, _, err := daemonRepoContext(ctx)
+	if err != nil {
+		return err
+	}
+	client, err := newDaemonClient(ctx, repoRoot, gitDir)
+	if err != nil {
+		return err
+	}
+	return client.markDirty(ctx, sessionKey)
 }
 
 func runDaemonList(ctx context.Context) ([]daemonSessionInfo, error) {
@@ -626,6 +652,9 @@ func (s *daemonState) handleRequest(req daemonRequest) daemonResponse {
 		return daemonResponseForInfo(nil, err)
 	case "flush":
 		err := s.flushSession(context.Background(), key, time.Duration(req.MinAgeNanos))
+		return daemonResponseForInfo(nil, err)
+	case "mark_dirty":
+		err := s.markDirtySession(context.Background(), key)
 		return daemonResponseForInfo(nil, err)
 	case "prune":
 		pruned, err := s.pruneSessions(context.Background(), time.Duration(req.IdleForSeconds)*time.Second)
@@ -859,6 +888,21 @@ func (s *daemonState) flushSession(ctx context.Context, sessionKey string, minAg
 		return nil
 	}
 	return s.flushSessionLocked(ctx, sessionKey, sess, "flush daemon session", minAge)
+}
+
+func (s *daemonState) markDirtySession(ctx context.Context, sessionKey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.lookupSessionLocked(ctx, sessionKey)
+	if err != nil {
+		return err
+	}
+	if sess == nil {
+		return model.Wrap(model.ExitEnv, "mark dirty daemon session", fmt.Errorf("session %q not found", sessionKey))
+	}
+	sess.dirty = true
+	sess.lastUsed = s.deps.now()
+	return s.persistSessionLocked(sess)
 }
 
 func (s *daemonState) pruneSessions(ctx context.Context, idleFor time.Duration) ([]string, error) {
@@ -1500,6 +1544,14 @@ func (c *daemonClient) flush(ctx context.Context, sessionKey string, minAge time
 		Method:      "flush",
 		SessionKey:  sessionKey,
 		MinAgeNanos: int64(minAge),
+	})
+	return err
+}
+
+func (c *daemonClient) markDirty(ctx context.Context, sessionKey string) error {
+	_, err := c.call(ctx, daemonRequest{
+		Method:     "mark_dirty",
+		SessionKey: sessionKey,
 	})
 	return err
 }

@@ -37,6 +37,18 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap",
+            "timeout": 2,
+            "statusMessage": "Cleaning up persona daemon session"
+          }
+        ]
+      }
     ]
   }
 }
