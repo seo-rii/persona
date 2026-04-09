@@ -40,16 +40,32 @@ When Claude Code enables the plugin, set `PERSONA_BIN` to the built persona bina
 What the plugin does:
 
 - `PreToolUse` on `Bash` rewrites eligible shell commands to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
+- The first wrapped Bash call lazily starts a per-repo background daemon under `<gitdir>/persona/daemon/`.
 - Each Claude chat session key maps to its own daemon-backed patch/view pair, so concurrent chats in the same Claude instance stay isolated from each other.
 - The plugin ships a `persona-worker` agent, and `settings.json` sets `"agent": "persona-worker"` so the main thread prefers Bash-based editing.
 - `Edit`, `MultiEdit`, and `Write` are denied so mutations stay inside the persona-backed Bash path.
 - Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped.
 - The wrapper uses the selected shell from the hook payload when available, then falls back to the hook process `SHELL`, and only then to `bash`.
 
+Recommended setup:
+
+1. Build persona and confirm the host can run it.
+
+   ```
+   ./build.sh
+   ./bin/persona doctor
+   ```
+
+2. If you want capability-based execution, run `sudo ./bin/persona activate` once for that binary.
+3. Start Claude Code with `claude --plugin-dir ./persona-claude-plugin`.
+4. Point plugin config `PERSONA_BIN` at the built persona binary.
+
 Important limits:
 
 - Native Claude Code file tools do not see persona's overlay view. Use Bash reads (`cat`, `sed -n`, `rg`) for files that were changed through persona in the same session.
 - `persona daemon` now provides stable per-session view paths, but the shipped plugin still only rewrites Bash. Native Claude file tools are not redirected into that view yet.
+- The automatic wrapper uses daemon defaults. If you need advanced daemon options such as `--base-mode worktree`, run `persona daemon ...` commands explicitly.
+- Git-oriented shell commands are intentionally bypassed, so they do not run inside the persona overlay view.
 - Codex does not currently support the same transparent Bash rewrite flow via plugins, so this repository only ships the Claude Code integration today.
 
 ## Usage
@@ -96,6 +112,7 @@ persona daemon end --session-key claude-chat-123
 ```
 
 `persona daemon exec` and `persona daemon info` accept the same `--base-mode`, `--base-ref`, `--allow-dirty`, `--ignored-mode`, `--ignored-max`, and `--apply-mode` knobs as the one-shot CLI. Reusing the same session key with different daemon option values is rejected until you run `persona daemon end` for that key.
+For long-lived manual daemon sessions where the base should stay frozen even if the checkout changes outside the session, prefer `--base-mode worktree`.
 
 ## Options
 

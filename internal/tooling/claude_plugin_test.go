@@ -254,9 +254,13 @@ func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 		"## Claude Code Plugin",
 		"claude --plugin-dir ./persona-claude-plugin",
 		"`persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`",
+		"lazily starts a per-repo background daemon",
+		"./build.sh",
+		"./bin/persona doctor",
 		"selected shell",
 		"`settings.json` sets `\"agent\": \"persona-worker\"`",
 		"`Edit`, `MultiEdit`, and `Write` are denied",
+		"`--base-mode worktree`",
 		"Codex does not currently support the same transparent Bash rewrite flow",
 	} {
 		if !strings.Contains(text, want) {
@@ -275,14 +279,37 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 	for _, want := range []string{
 		"claude --plugin-dir ./persona-claude-plugin",
 		"`persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`",
+		"lazily starts a per-repo daemon",
 		"Each Claude chat session key maps to its own daemon-backed patch/view pair.",
+		"`persona daemon info --session-key <claude-session-id> --json`",
+		"`persona daemon end --session-key <claude-session-id>`",
 		"`tool_input.shell` when Claude exposes it",
 		"`Edit`, `MultiEdit`, and `Write` are denied",
+		"`--base-mode worktree`",
 		"`Read` observes the checkout on disk",
 		"Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("plugin README missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestPersonaWorkerAgentDocumentsDaemonWorkflow(t *testing.T) {
+	repoRoot := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "persona-claude-plugin", "agents", "persona-worker.md"))
+	if err != nil {
+		t.Fatalf("read persona-worker agent doc: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"`persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`",
+		"parallel chats stay isolated",
+		"`persona daemon end --session-key <claude-session-id>`",
+		"Native `Read` sees the checkout on disk",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("persona-worker doc missing %q:\n%s", want, text)
 		}
 	}
 }

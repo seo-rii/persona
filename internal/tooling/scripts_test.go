@@ -522,6 +522,8 @@ func TestReadmeDocumentsDaemonHelpSurface(t *testing.T) {
 		"`persona daemon exec --session-key <key> -- <command...>`",
 		"`persona daemon info --session-key <key> --json`",
 		"`persona daemon end --session-key <key>`",
+		"`--base-mode worktree`",
+		"same session key with different daemon option values is rejected",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README missing daemon guidance %q:\n%s", want, readme)
