@@ -44,6 +44,23 @@ func TestPersonaClaudePluginManifestDeclaresExpectedPaths(t *testing.T) {
 	if !strings.Contains(description, "persona binary") {
 		t.Fatalf("expected persona binary description, got %q", description)
 	}
+	for _, key := range []string{
+		"DAEMON_BASE_MODE",
+		"DAEMON_BASE_REF",
+		"DAEMON_ALLOW_DIRTY",
+		"DAEMON_IGNORED_MODE",
+		"DAEMON_IGNORED_MAX",
+		"DAEMON_APPLY_MODE",
+	} {
+		entry, ok := userConfig[key].(map[string]any)
+		if !ok {
+			t.Fatalf("expected %s userConfig entry, got %#v", key, userConfig[key])
+		}
+		description, _ := entry["description"].(string)
+		if !strings.Contains(strings.ToLower(description), "daemon") {
+			t.Fatalf("expected %s description to mention daemon, got %q", key, description)
+		}
+	}
 }
 
 func TestPersonaClaudePluginHooksWrapBashAndRouteFileTools(t *testing.T) {
@@ -150,6 +167,51 @@ func TestPersonaWrapRewritesBashCommandsAndPreservesInput(t *testing.T) {
 	}
 	if !strings.Contains(command, " -- /bin/zsh -lc 'npm test'") {
 		t.Fatalf("expected wrapped command to run original payload through selected shell, got %q", command)
+	}
+}
+
+func TestPersonaWrapForwardsConfiguredDaemonOptions(t *testing.T) {
+	repoRoot := repoRoot(t)
+	logPath := filepath.Join(t.TempDir(), "persona.log")
+	personaStub := writePersonaDaemonStub(t, filepath.Join(t.TempDir(), "view"), logPath)
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Bash",
+		"tool_input": map[string]any{
+			"command": "npm test",
+			"shell":   "/bin/zsh",
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN":             personaStub,
+		"CLAUDE_PLUGIN_OPTION_DAEMON_BASE_MODE":        "worktree",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_BASE_REF":         "HEAD~1",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_ALLOW_DIRTY":      "true",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_IGNORED_MODE":     "readonly",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_IGNORED_MAX":      "50",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_APPLY_MODE":       "reject",
+		"PERSONA_TEST_LOG":                             logPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
+	}
+	command := response["hookSpecificOutput"].(map[string]any)["updatedInput"].(map[string]any)["command"].(string)
+	for _, want := range []string{
+		"--base-mode worktree",
+		"--allow-dirty",
+		"--ignored-mode readonly",
+		"--ignored-max 50",
+		"--apply-mode reject",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("expected wrapped command to include %q, got %q", want, command)
+		}
+	}
+	if !strings.Contains(command, "--base-ref") || !strings.Contains(command, "HEAD~1") {
+		t.Fatalf("expected wrapped command to include base-ref override, got %q", command)
 	}
 }
 
@@ -270,6 +332,44 @@ func TestPersonaWrapRewritesWriteToolsIntoDaemonView(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "daemon info --session-key session-123 --json") {
 		t.Fatalf("expected daemon info lookup, got log:\n%s", logData)
+	}
+}
+
+func TestPersonaWrapForwardsDaemonOptionsToSessionLookup(t *testing.T) {
+	repoRoot := repoRoot(t)
+	viewPath := filepath.Join(t.TempDir(), "view")
+	logPath := filepath.Join(t.TempDir(), "persona.log")
+	personaStub := writePersonaDaemonStub(t, viewPath, logPath)
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id":      "session-123",
+		"cwd":             repoRoot,
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Read",
+		"tool_input": map[string]any{
+			"file_path": filepath.Join(repoRoot, "README.md"),
+		},
+	}, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN":         personaStub,
+		"CLAUDE_PLUGIN_OPTION_DAEMON_BASE_MODE":    "worktree",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_BASE_REF":     "HEAD~1",
+		"CLAUDE_PLUGIN_OPTION_DAEMON_IGNORED_MODE": "readonly",
+		"PERSONA_TEST_VIEW_PATH":                   viewPath,
+		"PERSONA_TEST_LOG":                         logPath,
+	})
+
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("unmarshal wrapper response: %v\n%s", err, output)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read persona stub log: %v", err)
+	}
+	logText := string(logData)
+	for _, want := range []string{"daemon info --session-key session-123", "--base-mode worktree", "--base-ref HEAD~1", "--ignored-mode readonly"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("expected daemon info log to include %q, got log:\n%s", want, logText)
+		}
 	}
 }
 
@@ -494,6 +594,8 @@ func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 		"./bin/persona doctor",
 		"selected shell",
 		"`settings.json` sets `\"agent\": \"persona-worker\"`",
+		"`DAEMON_BASE_MODE`",
+		"`DAEMON_APPLY_MODE`",
 		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
 		"`persona daemon flush --session-key <claude-session-id>`",
 		"`persona daemon list --json`",
@@ -525,6 +627,8 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 		"`persona daemon list --json`",
 		"`persona daemon flush --session-key <claude-session-id>`",
 		"`persona daemon prune --idle-for 24h`",
+		"`DAEMON_BASE_MODE`",
+		"`DAEMON_ALLOW_DIRTY`",
 		"`persona daemon end --session-key <claude-session-id>`",
 		"`tool_input.shell` when Claude exposes it",
 		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
@@ -553,6 +657,7 @@ func TestPersonaWorkerAgentDocumentsDaemonWorkflow(t *testing.T) {
 		"parallel chats stay isolated",
 		"`persona daemon list --json`",
 		"`persona daemon prune --idle-for <duration>`",
+		"`DAEMON_*`",
 		"`persona daemon end --session-key <claude-session-id>`",
 		"internal daemon `view_path`",
 		"`.git` or daemon state paths",

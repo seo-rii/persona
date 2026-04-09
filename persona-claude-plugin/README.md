@@ -27,6 +27,13 @@ persona-claude-plugin/
    - `persona` if the binary is already on `PATH`
    - an absolute path such as `/abs/path/to/persona`
    - a project-relative path such as `./bin/persona`
+4. Optional plugin settings can override daemon defaults for every wrapped session:
+   - `DAEMON_BASE_MODE`
+   - `DAEMON_BASE_REF`
+   - `DAEMON_ALLOW_DIRTY`
+   - `DAEMON_IGNORED_MODE`
+   - `DAEMON_IGNORED_MAX`
+   - `DAEMON_APPLY_MODE`
 
 The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 
@@ -58,6 +65,7 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 - `PERSONA_WRAP_PERSONA_BIN` overrides the configured persona binary path.
 - `PERSONA_WRAP_BYPASS_PREFIXES` replaces the default bypass prefix list (`git,gh,persona,claude`) with a comma-separated list.
 - `PERSONA_WRAP_BYPASS_REGEX` bypasses wrapping when the raw Bash command matches the regex.
+- Claude plugin options `DAEMON_BASE_MODE`, `DAEMON_BASE_REF`, `DAEMON_ALLOW_DIRTY`, `DAEMON_IGNORED_MODE`, `DAEMON_IGNORED_MAX`, and `DAEMON_APPLY_MODE` are forwarded to both `persona daemon exec` and `persona daemon info`.
 
 ## Limits
 

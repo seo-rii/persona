@@ -211,9 +211,36 @@ def resolve_persona_bin():
     return ""
 
 
-def daemon_session_info(persona_bin, session_id, cwd):
+def plugin_option(name):
+    return os.getenv(f"CLAUDE_PLUGIN_OPTION_{name}", "").strip()
+
+
+def daemon_option_args():
+    args = []
+    if plugin_option("DAEMON_BASE_MODE"):
+        args.extend(["--base-mode", plugin_option("DAEMON_BASE_MODE")])
+    if plugin_option("DAEMON_BASE_REF"):
+        args.extend(["--base-ref", plugin_option("DAEMON_BASE_REF")])
+    allow_dirty = plugin_option("DAEMON_ALLOW_DIRTY").lower()
+    if allow_dirty:
+        if allow_dirty in {"1", "true", "yes", "on"}:
+            args.append("--allow-dirty")
+        elif allow_dirty not in {"0", "false", "no", "off"}:
+            raise ValueError("DAEMON_ALLOW_DIRTY must be one of true/false/1/0/yes/no/on/off")
+    if plugin_option("DAEMON_IGNORED_MODE"):
+        args.extend(["--ignored-mode", plugin_option("DAEMON_IGNORED_MODE")])
+    if plugin_option("DAEMON_IGNORED_MAX"):
+        raw = plugin_option("DAEMON_IGNORED_MAX")
+        int(raw)
+        args.extend(["--ignored-max", raw])
+    if plugin_option("DAEMON_APPLY_MODE"):
+        args.extend(["--apply-mode", plugin_option("DAEMON_APPLY_MODE")])
+    return args
+
+
+def daemon_session_info(persona_bin, session_id, daemon_args, cwd):
     completed = subprocess.run(
-        [persona_bin, "daemon", "info", "--session-key", session_id or "session", "--json"],
+        [persona_bin, "daemon", "info", "--session-key", session_id or "session", *daemon_args, "--json"],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -264,10 +291,13 @@ def shell_args(shell_command):
     return ["-c"]
 
 
-def wrapped_command(persona_bin, session_id, shell_command, original_command):
+def wrapped_command(persona_bin, session_id, daemon_args, shell_command, original_command):
     shell_argv = " ".join(shlex.quote(arg) for arg in [shell_command, *shell_args(shell_command)])
+    daemon_argv = " ".join(shlex.quote(arg) for arg in daemon_args)
+    if daemon_argv:
+        daemon_argv = " " + daemon_argv
     return (
-        f"{shlex.quote(persona_bin)} daemon exec --session-key {shlex.quote(session_id or 'session')} -- "
+        f"{shlex.quote(persona_bin)} daemon exec --session-key {shlex.quote(session_id or 'session')}{daemon_argv} -- "
         f"{shell_argv} {shlex.quote(original_command)}"
     )
 
@@ -354,9 +384,15 @@ def handle_pretooluse(event):
             emit_pretooluse("deny", persona_not_found_reason())
             return 0
 
+        try:
+            daemon_args = daemon_option_args()
+        except ValueError as err:
+            emit_pretooluse("deny", f"invalid persona daemon plugin option: {err}")
+            return 0
+
         updated_input = dict(tool_input)
         shell_command = selected_shell(event, tool_input)
-        updated_input["command"] = wrapped_command(persona_bin, session_id, shell_command, command)
+        updated_input["command"] = wrapped_command(persona_bin, session_id, daemon_args, shell_command, command)
         emit_pretooluse("allow", "Run the Bash command through persona.", updated_input)
         return 0
 
@@ -373,7 +409,13 @@ def handle_pretooluse(event):
         return 0
 
     try:
-        info = daemon_session_info(persona_bin, session_id, cwd)
+        daemon_args = daemon_option_args()
+    except ValueError as err:
+        emit_pretooluse("deny", f"invalid persona daemon plugin option: {err}")
+        return 0
+
+    try:
+        info = daemon_session_info(persona_bin, session_id, daemon_args, cwd)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as err:
         emit_pretooluse("deny", f"persona daemon session lookup failed: {subprocess_error_text(err)}")
         return 0
@@ -415,7 +457,13 @@ def handle_posttooluse(event):
         return 1
 
     try:
-        info = daemon_session_info(persona_bin, session_id, cwd)
+        daemon_args = daemon_option_args()
+    except ValueError as err:
+        print(f"invalid persona daemon plugin option: {err}", file=sys.stderr)
+        return 1
+
+    try:
+        info = daemon_session_info(persona_bin, session_id, daemon_args, cwd)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as err:
         print(f"persona daemon session lookup failed: {subprocess_error_text(err)}", file=sys.stderr)
         return 1

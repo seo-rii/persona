@@ -14,6 +14,30 @@
     "PERSONA_BIN": {
       "description": "Command name or path for the persona binary (for example persona or /abs/path/to/persona).",
       "sensitive": false
+    },
+    "DAEMON_BASE_MODE": {
+      "description": "Optional daemon base mode override for wrapped sessions (repo or worktree).",
+      "sensitive": false
+    },
+    "DAEMON_BASE_REF": {
+      "description": "Optional daemon base ref override when using worktree mode.",
+      "sensitive": false
+    },
+    "DAEMON_ALLOW_DIRTY": {
+      "description": "Optional boolean override for daemon allow-dirty behavior.",
+      "sensitive": false
+    },
+    "DAEMON_IGNORED_MODE": {
+      "description": "Optional daemon ignored mode override (transparent, readonly, or masked).",
+      "sensitive": false
+    },
+    "DAEMON_IGNORED_MAX": {
+      "description": "Optional daemon ignored-max override for wrapped sessions.",
+      "sensitive": false
+    },
+    "DAEMON_APPLY_MODE": {
+      "description": "Optional daemon apply mode override (strict or reject).",
+      "sensitive": false
     }
   }
 }

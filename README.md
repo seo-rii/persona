@@ -62,6 +62,7 @@ Recommended setup:
 2. If you want capability-based execution, run `sudo ./bin/persona activate` once for that binary.
 3. Start Claude Code with `claude --plugin-dir ./persona-claude-plugin`.
 4. Point plugin config `PERSONA_BIN` at the built persona binary.
+5. If the default daemon settings are not enough, set plugin options such as `DAEMON_BASE_MODE`, `DAEMON_BASE_REF`, `DAEMON_ALLOW_DIRTY`, `DAEMON_IGNORED_MODE`, `DAEMON_IGNORED_MAX`, and `DAEMON_APPLY_MODE`.
 
 Important limits:
 
