@@ -17,6 +17,18 @@ import (
 )
 
 func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *session.Session, patchInRepo bool, patchRel string, cleanup *cleanupStack, retErr *error) (basePath string, err error) {
+	baseRef := opts.BaseRef
+	if resolver, ok := g.(interface {
+		ResolveBase(context.Context, string) (string, error)
+	}); ok {
+		if opts.BaseMode == model.BaseRepo {
+			baseRef = "HEAD"
+		}
+		baseRef, err = resolver.ResolveBase(ctx, baseRef)
+		if err != nil {
+			return "", model.Wrap(model.ExitRepo, "resolve session base", err)
+		}
+	}
 	switch opts.BaseMode {
 	case model.BaseRepo:
 		if !opts.AllowDirty {
@@ -31,11 +43,17 @@ func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *
 		}
 		return g.RepoRootPath(), nil
 	case model.BaseWorktree:
-		if err := g.WorktreeAddDetach(ctx, sess.BaseWT, opts.BaseRef); err != nil {
+		if err := g.WorktreeAddDetach(ctx, sess.BaseWT, baseRef); err != nil {
 			return "", model.Wrap(model.ExitRepo, "git worktree add", err)
 		}
 		pushKeepSessionCleanup(cleanup, retErr, opts, func() error {
-			return g.WorktreeRemoveForce(context.Background(), sess.BaseWT)
+			root := sess.Root
+			if root == "" {
+				root = sess.BaseWT
+			}
+			return cleanupUnmounted(root, func() error {
+				return g.WorktreeRemoveForce(context.Background(), sess.BaseWT)
+			})
 		})
 		return sess.BaseWT, nil
 	default:
@@ -59,7 +77,9 @@ func setupMountTargetEnv(targetPath, gitDir, basePath string, sess *session.Sess
 	if err != nil {
 		return nil, model.Wrap(model.ExitEnv, "create external session dir", err)
 	}
-	cleanup.Push(func() error { return os.RemoveAll(extRoot) })
+	cleanup.Push(func() error {
+		return cleanupUnmounted(extRoot, func() error { return os.RemoveAll(extRoot) })
+	})
 
 	env := &mountEnv{
 		emptyDir:     filepath.Join(extRoot, "empty", "dirs"),
@@ -110,6 +130,29 @@ func setupMountTargetEnv(targetPath, gitDir, basePath string, sess *session.Sess
 	log.Debug("overlay mounted", "target", targetPath, "base", basePath)
 
 	return env, nil
+}
+
+// A prior unmount failure must never turn recursive cleanup into deletion of
+// a bind mount's source. Check the live namespace immediately before removal.
+func cleanupUnmounted(root string, remove func() error) error {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err == nil {
+		root = resolved
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("resolve cleanup root %s: %w", root, err)
+	}
+	mounted, err := session.HasMounts(root)
+	if err != nil {
+		return fmt.Errorf("check cleanup mounts for %s: %w", root, err)
+	}
+	if mounted {
+		return fmt.Errorf("refusing cleanup while mounts remain under %s", root)
+	}
+	return remove()
 }
 
 func planGitDirMount(gitDir, mountRoot string) (string, string, error) {
@@ -214,13 +257,12 @@ func maskIgnoredFiles(ctx context.Context, g model.GitOps, repoRoot, gitDirForOp
 				}
 				return targets, ignored, fmt.Errorf("bind mount ignored readonly %s: %w", path, err)
 			}
+			// The bind already exists even if its readonly remount fails. Retain
+			// it in the cleanup list before attempting the next syscall.
+			targets = append(targets, target)
 			if err := mount.RemountRO(target); err != nil {
-				if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOENT) {
-					continue
-				}
 				return targets, ignored, fmt.Errorf("remount ignored readonly %s: %w", path, err)
 			}
-			targets = append(targets, target)
 		case model.IgnoredMasked:
 			info, err := os.Lstat(target)
 			if err != nil {

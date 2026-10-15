@@ -98,12 +98,18 @@ func runWithDeps(ctx context.Context, opts model.Options, deps runDeps) (retErr 
 	cleanup := &cleanupStack{}
 	cleanup.Push(func() error { return patchStore.Close() })
 
-	lock, err := patchStore.Lock()
+	lock, err := patchStore.LockContext(ctx)
 	if err != nil {
 		return model.Wrap(model.ExitWrite, "lock patch", err), 0
 	}
 	cleanup.Push(func() error { return lock.Unlock() })
 	var sess *session.Session
+	threadLocked := false
+	defer func() {
+		if threadLocked {
+			runtime.UnlockOSThread()
+		}
+	}()
 	defer func() {
 		if err := cleanup.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -132,7 +138,7 @@ func runWithDeps(ctx context.Context, opts model.Options, deps runDeps) (retErr 
 		return err, 0
 	}
 	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	threadLocked = true
 	if err := mount.UnshareMountNS(); err != nil {
 		reportPermissionHint("unshare mount namespace", err)
 		return model.Wrap(model.ExitEnv, "unshare mount namespace", err), 0
@@ -161,10 +167,10 @@ func runWithDeps(ctx context.Context, opts model.Options, deps runDeps) (retErr 
 	}
 
 	ignoredMasks, initialIgnored, err := maskIgnoredFiles(ctx, g, repoRoot, menv.gitDirForOps, menv.emptyFile, menv.emptyDir, opts, mount, log)
+	maskTargets = append(maskTargets, ignoredMasks...)
 	if err != nil {
 		return model.Wrap(model.ExitEnv, "mask ignored files", err), 0
 	}
-	maskTargets = append(maskTargets, ignoredMasks...)
 
 	for _, patchMaskPath := range commandMaskPaths {
 		if err := maskPathWithBacking(mount, patchMaskPath, model.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
