@@ -94,3 +94,59 @@ func TestCreateRejectsSymlinkedSessionParent(t *testing.T) {
 		t.Fatalf("expected no session data outside gitDir, got %d entries", len(entries))
 	}
 }
+
+func TestSessionRemovalRequiresOwnedDirectChild(t *testing.T) {
+	gitDir := filepath.Join(t.TempDir(), ".git")
+	s, err := Create(gitDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	sentinel := filepath.Join(outside, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(filepath.Dir(s.Root), "alias")
+	if err := os.Symlink(outside, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{"/", gitDir, filepath.Dir(s.Root), filepath.Dir(filepath.Dir(s.Root)), outside, alias, filepath.Join(s.Root, "upper")} {
+		forged := &Session{Root: root, gitDir: gitDir}
+		if err := forged.RemoveAll(); err == nil {
+			t.Fatalf("accepted unsafe root %q", root)
+		}
+		if data, err := os.ReadFile(sentinel); err != nil || string(data) != "keep" {
+			t.Fatalf("outside sentinel lost: %q %v", data, err)
+		}
+	}
+	if _, err := Open(gitDir, s.Root); err != nil {
+		t.Fatalf("valid session rejected: %v", err)
+	}
+	if err := s.RemoveAll(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionMarkerAndExclusiveCreation(t *testing.T) {
+	gitDir := filepath.Join(t.TempDir(), ".git")
+	first, err := Create(gitDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Create(gitDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Root == second.Root {
+		t.Fatal("reused session directory")
+	}
+	if err := os.WriteFile(filepath.Join(first.Root, ownerFile), []byte("forged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.RemoveAll(); err == nil {
+		t.Fatal("removed session with mismatched marker")
+	}
+	if err := second.RemoveAll(); err != nil {
+		t.Fatal(err)
+	}
+}
