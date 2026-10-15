@@ -1,118 +1,112 @@
 #!/usr/bin/env python3
 
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
-import time
+import tempfile
 
 
 DEFAULT_BYPASS_PREFIXES = ("git", "gh", "persona", "claude")
 READ_ONLY_FILE_TOOLS = {"Read", "Glob", "Grep"}
 WRITE_FILE_TOOLS = {"Edit", "MultiEdit", "Write"}
 FILE_TOOLS = READ_ONLY_FILE_TOOLS | WRITE_FILE_TOOLS
-SHELL_NAMES = {"bash", "sh", "zsh", "fish"}
-ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 DURATION_RE = re.compile(r"(?i)^([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)$")
 
 
 def load_event():
-    try:
-        return json.load(sys.stdin)
-    except json.JSONDecodeError:
-        return {}
+    event = json.load(sys.stdin)
+    if not isinstance(event, dict):
+        raise ValueError("persona hook input must be a JSON object")
+    return event
 
 
-def emit_pretooluse(decision, reason=None, updated_input=None):
+def emit_pretooluse(decision=None, reason=None, updated_input=None):
     payload = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
         }
     }
-    if reason:
+    if decision:
+        payload["hookSpecificOutput"]["permissionDecision"] = decision
+    if reason and decision:
         payload["hookSpecificOutput"]["permissionDecisionReason"] = reason
+    elif reason:
+        payload["hookSpecificOutput"]["additionalContext"] = reason
     if updated_input is not None:
         payload["hookSpecificOutput"]["updatedInput"] = updated_input
     json.dump(payload, sys.stdout)
 
 
-def emit_posttooluse(additional_context=None):
-    payload = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
-    if additional_context:
+def emit_posttooluse(additional_context=None, hook_name="PostToolUse", warning=False):
+    payload = {"hookSpecificOutput": {"hookEventName": hook_name}}
+    if additional_context and hook_name != "PermissionDenied":
         payload["hookSpecificOutput"]["additionalContext"] = additional_context
+    if warning:
+        payload["systemMessage"] = additional_context
     json.dump(payload, sys.stdout)
 
 
 def tokenize(command):
     try:
-        return shlex.split(command, posix=True)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
     except ValueError:
         return []
 
 
 def classify_tokens(tokens):
-    if not tokens:
-        return None
-
-    index = 0
-    while index < len(tokens) and ASSIGNMENT_RE.fullmatch(tokens[index]):
-        index += 1
-    if index >= len(tokens):
-        return None
-
-    token = os.path.basename(tokens[index])
-
-    if token == "env":
-        index += 1
-        while index < len(tokens):
-            current = tokens[index]
-            if current == "--":
-                index += 1
-                break
-            if current.startswith("-") or ASSIGNMENT_RE.fullmatch(current):
-                index += 1
-                continue
-            break
-        return classify_tokens(tokens[index:])
-
-    if token in {"command", "builtin", "time", "noglob"}:
-        return classify_tokens(tokens[index + 1 :])
-
-    if token == "sudo":
-        index += 1
-        while index < len(tokens):
-            current = tokens[index]
-            if current == "--":
-                index += 1
-                break
-            if current.startswith("-"):
-                index += 1
-                continue
-            break
-        return classify_tokens(tokens[index:])
-
-    if token in SHELL_NAMES:
-        for shell_index in range(index + 1, len(tokens) - 1):
-            flag = tokens[shell_index]
-            if flag == "--":
-                break
-            if flag.startswith("-") and "c" in flag[1:]:
-                return classify_tokens(tokenize(tokens[shell_index + 1]))
-        return token
-
-    return token
+    # Only the literal executable qualifies. Wrappers such as env, sudo and
+    # nested shells stay inside persona; interpreting their options is unsafe.
+    return os.path.basename(tokens[0]) if tokens else None
 
 
-def bypass_reason(command):
+def is_simple_shell_command(command):
+    # This deliberately recognizes a small literal subset, not shell syntax.
+    # Quoted/escaped punctuation is data; active expansions and operators are
+    # never permitted to take the original-checkout bypass.
+    quote = ""
+    escaped = False
+    for char in command:
+        if escaped:
+            if char == "\n":
+                return False
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = ""
+            elif char in "$`":
+                return False
+            continue
+        if char in "'\"":
+            quote = char
+        elif char in ";&|<>(){}$`#*?[]~\n\r":
+            return False
+    return not quote and not escaped and bool(tokenize(command))
+
+
+def bypass_decision(command):
+    matched_regex = False
     bypass_regex = os.getenv("PERSONA_WRAP_BYPASS_REGEX", "").strip()
     if bypass_regex:
         try:
             if re.search(bypass_regex, command):
-                return "Bypass persona because the command matches the configured PERSONA_WRAP_BYPASS_REGEX rule."
+                matched_regex = True
         except re.error:
             pass
 
@@ -120,13 +114,20 @@ def bypass_reason(command):
     if not prefixes:
         prefixes = list(DEFAULT_BYPASS_PREFIXES)
     primary = classify_tokens(tokenize(command))
-    if primary not in prefixes:
-        return ""
+    if primary not in prefixes and not matched_regex:
+        return "", ""
+    if not is_simple_shell_command(command):
+        return "", (
+            "persona-claude cannot bypass a shell command containing operators, redirection, or expansion. "
+            "Run the Git/persona/Claude command separately from commands that edit files."
+        )
+    if matched_regex:
+        return "Bypass persona for a single literal command matching PERSONA_WRAP_BYPASS_REGEX.", ""
     if primary in {"git", "gh"}:
-        return "Bypass persona for Git-aware shell commands because persona masks .git from child commands."
+        return "Bypass persona for Git-aware shell commands because persona masks .git from child commands.", ""
     if primary in {"persona", "claude"}:
-        return "Bypass persona for direct persona or claude shell commands to avoid recursive wrapping."
-    return f"Bypass persona because the command resolves to {primary}, which is configured to skip wrapping."
+        return "Bypass persona for direct persona or claude shell commands to avoid recursive wrapping.", ""
+    return f"Bypass persona for the single literal command {primary}, configured to skip wrapping.", ""
 
 
 def split_csv(raw):
@@ -139,12 +140,15 @@ def repo_root(cwd):
             ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
             check=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             timeout=2,
+            env={**{key: value for key, value in os.environ.items() if not key.startswith("GIT_")}, "LC_ALL": "C"},
         )
-    except (OSError, subprocess.SubprocessError):
-        return ""
+    except subprocess.CalledProcessError as err:
+        if err.returncode == 128 and "not a git repository" in (err.stderr or ""):
+            return ""
+        raise
     return completed.stdout.strip()
 
 
@@ -177,26 +181,34 @@ def protected_path_reason(path_value, repo_dir, view_path, git_dir, patch_path):
     if not isinstance(path_value, str) or not path_value.strip():
         return ""
     candidate = os.path.abspath(path_value)
+    candidates = {candidate, os.path.realpath(candidate)}
     daemon_root = os.path.join(git_dir, "persona", "daemon") if git_dir else ""
-    for root in [
-        os.path.join(repo_dir, ".git") if repo_dir else "",
-        os.path.join(view_path, ".git") if view_path else "",
+    git_reason = (
+        "persona-claude blocks Claude file tools from .git paths because persona masks .git inside overlay views; "
+        "use git-aware commands such as git status, git diff, or git rev-parse instead."
+    )
+    daemon_reason = (
+        "persona-claude blocks Claude file tools from daemon state paths; "
+        "use persona daemon info, list, flush, or end instead."
+    )
+    view_roots = {os.path.abspath(view_path), os.path.realpath(view_path)} if view_path else set()
+    for root, reason, contains_view in [
+        (os.path.join(view_path, ".git") if view_path else "", git_reason, False),
+        (daemon_root, daemon_reason, True),
+        (lease_directory_path(), daemon_reason, False),
+        (patch_path, daemon_reason, False),
+        (patch_path + ".lock" if patch_path else "", daemon_reason, False),
+        (os.path.join(repo_dir, ".git") if repo_dir else "", git_reason, True),
+        (git_dir, git_reason, True),
     ]:
-        if root and is_subpath(candidate, os.path.abspath(root)):
-            return (
-                "persona-claude blocks Claude file tools from .git paths because persona masks .git inside overlay views; "
-                "use git-aware commands such as git status, git diff, or git rev-parse instead."
+        if root and any(
+            is_subpath(item, root_path) and not (
+                contains_view and any(is_subpath(item, view_root) for view_root in view_roots)
             )
-    for root in [
-        daemon_root,
-        patch_path,
-        patch_path + ".lock" if patch_path else "",
-    ]:
-        if root and is_subpath(candidate, os.path.abspath(root)):
-            return (
-                "persona-claude blocks Claude file tools from daemon state paths; "
-                "use persona daemon info, list, flush, or end instead."
-            )
+            for item in candidates
+            for root_path in {os.path.abspath(root), os.path.realpath(root)}
+        ):
+            return reason
     return ""
 
 
@@ -245,9 +257,7 @@ def parse_duration_seconds(raw, option_name):
 
 
 def daemon_option_args():
-    args = []
-    if plugin_option("DAEMON_BASE_MODE"):
-        args.extend(["--base-mode", plugin_option("DAEMON_BASE_MODE")])
+    args = ["--base-mode", plugin_option("DAEMON_BASE_MODE") or "worktree"]
     if plugin_option("DAEMON_BASE_REF"):
         args.extend(["--base-ref", plugin_option("DAEMON_BASE_REF")])
     allow_dirty = plugin_option("DAEMON_ALLOW_DIRTY").lower()
@@ -267,65 +277,45 @@ def daemon_option_args():
     return args
 
 
-def flush_behavior():
-    min_age = plugin_option("FLUSH_MIN_AGE")
-    if min_age:
-        parse_duration_seconds(min_age, "FLUSH_MIN_AGE")
-    retry_for_raw = plugin_option("FLUSH_RETRY_FOR") or "2s"
-    retry_for = parse_duration_seconds(retry_for_raw, "FLUSH_RETRY_FOR")
-    retry_interval_raw = plugin_option("FLUSH_RETRY_INTERVAL_MS") or "150"
-    retry_interval_ms = int(retry_interval_raw)
-    if retry_interval_ms <= 0:
-        raise ValueError("FLUSH_RETRY_INTERVAL_MS must be > 0")
-    return min_age, retry_for, retry_interval_ms / 1000.0
-
-
-def daemon_session_info(persona_bin, session_id, daemon_args, cwd):
-    completed = subprocess.run(
-        [persona_bin, "daemon", "info", "--session-key", session_id or "session", *daemon_args, "--json"],
+def daemon_call(args, cwd):
+    timeout = parse_duration_seconds(os.getenv("PERSONA_WRAP_DAEMON_TIMEOUT", "30s"), "PERSONA_WRAP_DAEMON_TIMEOUT")
+    if timeout <= 0:
+        raise ValueError("PERSONA_WRAP_DAEMON_TIMEOUT must be positive")
+    return subprocess.run(
+        args,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         cwd=cwd,
-    )
-    return json.loads(completed.stdout)
-
-
-def daemon_flush(persona_bin, session_id, min_age, cwd):
-    args = [persona_bin, "daemon", "flush", "--session-key", session_id or "session"]
-    if min_age:
-        args.extend(["--min-age", min_age])
-    subprocess.run(
-        args,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
+        timeout=timeout,
     )
 
 
-def daemon_mark_dirty(persona_bin, session_id, cwd):
-    subprocess.run(
-        [persona_bin, "daemon", "mark-dirty", "--session-key", session_id or "session"],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
+def daemon_acquire(persona_bin, session_id, daemon_args, cwd):
+    completed = daemon_call(
+        [persona_bin, "daemon", "acquire", "--session-key", session_id, *daemon_args,
+         "--owner-pid", str(lease_owner_pid()), "--json"], cwd
+    )
+    response = json.loads(completed.stdout)
+    info = response.get("session")
+    lease_id = response.get("lease_id")
+    if not isinstance(info, dict) or not isinstance(lease_id, str) or not lease_id:
+        raise ValueError("daemon acquire returned no session or lease identity")
+    if not isinstance(info.get("view_generation"), int) or info["view_generation"] <= 0:
+        raise ValueError("daemon acquire returned no view generation")
+    return info, lease_id
+
+
+def daemon_release(persona_bin, session_id, lease_id, generation, cwd):
+    return daemon_call(
+        [persona_bin, "daemon", "release", "--session-key", session_id,
+         "--lease-id", lease_id, "--view-generation", str(generation)], cwd
     )
 
 
 def daemon_end(persona_bin, session_id, cwd):
-    subprocess.run(
-        [persona_bin, "daemon", "end", "--session-key", session_id or "session"],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
-    )
+    daemon_call([persona_bin, "daemon", "end", "--session-key", session_id], cwd)
 
 
 def subprocess_error_text(err):
@@ -364,39 +354,38 @@ def wrapped_command(persona_bin, session_id, daemon_args, shell_command, origina
     if daemon_argv:
         daemon_argv = " " + daemon_argv
     return (
-        f"{shlex.quote(persona_bin)} daemon exec --session-key {shlex.quote(session_id or 'session')}{daemon_argv} -- "
+        f"{shlex.quote(persona_bin)} daemon exec --session-key {shlex.quote(session_id)}{daemon_argv} -- "
         f"{shell_argv} {shlex.quote(original_command)}"
     )
 
 
-def translated_repo_path(path_value, repo_dir, view_path, git_dir, patch_path):
+def translated_repo_path(path_value, repo_dir, view_path, git_dir, patch_path, cwd=None):
     if not isinstance(path_value, str) or not path_value.strip():
         return "", False, ""
-    candidate = os.path.abspath(path_value)
+    candidate = os.path.abspath(os.path.join(cwd or os.getcwd(), path_value))
     denied_reason = protected_path_reason(candidate, repo_dir, view_path, git_dir, patch_path)
     if denied_reason:
         return candidate, False, denied_reason
     if is_subpath(candidate, view_path):
-        if not safe_existing_ancestor(candidate, view_path):
-            return candidate, False, ""
-        return candidate, True, ""
-    if not is_subpath(candidate, repo_dir):
+        translated = candidate
+    elif is_subpath(candidate, repo_dir):
+        if not safe_existing_ancestor(candidate, repo_dir):
+            return candidate, False, "persona-claude refuses a repository path that resolves outside the repository."
+        translated = os.path.join(view_path, rel_to_root(candidate, repo_dir))
+    else:
         return candidate, False, ""
-    if not safe_existing_ancestor(candidate, repo_dir):
-        return candidate, False, ""
-    return os.path.join(view_path, rel_to_root(candidate, repo_dir)), True, ""
+    denied_reason = protected_path_reason(translated, repo_dir, view_path, git_dir, patch_path)
+    if denied_reason:
+        return translated, False, denied_reason
+    if not safe_existing_ancestor(translated, view_path):
+        return translated, False, "persona-claude refuses a view path or symlink that resolves outside the daemon-backed view."
+    return translated, True, ""
 
 
 def translated_directory_path(path_value, repo_dir, view_path, git_dir, patch_path, cwd):
     if isinstance(path_value, str) and path_value.strip():
-        return translated_repo_path(path_value, repo_dir, view_path, git_dir, patch_path)
-    cwd_abs = os.path.abspath(cwd)
-    denied_reason = protected_path_reason(cwd_abs, repo_dir, view_path, git_dir, patch_path)
-    if denied_reason:
-        return cwd_abs, False, denied_reason
-    if is_subpath(cwd_abs, repo_dir):
-        return os.path.join(view_path, rel_to_root(cwd_abs, repo_dir)), True, ""
-    return path_value, False, ""
+        return translated_repo_path(path_value, repo_dir, view_path, git_dir, patch_path, cwd)
+    return translated_repo_path(os.path.abspath(cwd), repo_dir, view_path, git_dir, patch_path, cwd)
 
 
 def repo_path_for_view(path_value, repo_dir, view_path):
@@ -412,7 +401,7 @@ def rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, git_dir,
     updated_input = dict(tool_input)
     if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
         rewritten_path, managed, denied_reason = translated_repo_path(
-            tool_input.get("file_path"), repo_dir, view_path, git_dir, patch_path
+            tool_input.get("file_path"), repo_dir, view_path, git_dir, patch_path, cwd
         )
         if managed:
             updated_input["file_path"] = rewritten_path
@@ -425,13 +414,6 @@ def rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, git_dir,
             updated_input["path"] = rewritten_path
         return updated_input, managed, denied_reason
     return updated_input, False, ""
-
-
-def managed_write_target(tool_name, tool_input, repo_dir, view_path, git_dir, patch_path):
-    if tool_name not in WRITE_FILE_TOOLS:
-        return False
-    _, managed, _ = translated_repo_path(tool_input.get("file_path"), repo_dir, view_path, git_dir, patch_path)
-    return managed
 
 
 def managed_tool_context(tool_name, tool_input, repo_dir, view_path, cwd):
@@ -461,23 +443,139 @@ def persona_not_found_reason():
     return "persona binary not found; configure the plugin PERSONA_BIN option or set PERSONA_WRAP_PERSONA_BIN."
 
 
+def session_identity(event):
+    session_id = event.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("persona-claude requires a nonempty Claude session_id; refusing to share a fallback session")
+    return session_id
+
+
+def lease_owner_pid():
+    configured = os.getenv("PERSONA_WRAP_OWNER_PID", "").strip()
+    if configured:
+        owner = int(configured)
+        if owner <= 1 or owner == os.getpid():
+            raise ValueError("PERSONA_WRAP_OWNER_PID must identify a live long-lived Claude owner process")
+        os.kill(owner, 0)
+        return owner
+    owner = os.getppid()
+    visited = set()
+    while owner > 1 and owner not in visited:
+        visited.add(owner)
+        with open(f"/proc/{owner}/cmdline", "rb") as process:
+            argv = process.read(65536).split(b"\0")
+        executable = os.path.basename(os.fsdecode(argv[0]))
+        node_cli = (
+            executable in {"node", "nodejs", "bun"} and len(argv) > 1
+            and "claude-code" in os.fsdecode(argv[1]).split(os.sep)
+            and os.path.basename(os.fsdecode(argv[1])) == "cli.js"
+        )
+        if executable == "claude" or node_cli:
+            os.kill(owner, 0)
+            return owner
+        with open(f"/proc/{owner}/stat", encoding="utf-8") as process:
+            # comm may itself contain spaces and parentheses.
+            fields = process.read(65536).rsplit(")", 1)[1].split()
+        owner = int(fields[1])
+    raise ValueError("persona-claude could not find a live Claude ancestor for the file-tool lease")
+
+
+def lease_record_name(event, repo_dir):
+    tool_id = event.get("tool_use_id")
+    if not isinstance(tool_id, str) or not tool_id.strip():
+        raise ValueError("persona-claude requires tool_use_id to track the file-tool lease")
+    identity = json.dumps([os.path.realpath(repo_dir), session_identity(event), tool_id], ensure_ascii=True)
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest() + ".json"
+
+
+def lease_directory_path():
+    directory = os.getenv("PERSONA_WRAP_LEASE_DIR", "").strip()
+    if not directory:
+        directory = os.path.join(tempfile.gettempdir(), f"persona-claude-{os.getuid()}")
+    return directory
+
+
+def open_lease_directory():
+    directory = lease_directory_path()
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    info = os.fstat(fd)
+    if info.st_uid != os.getuid() or info.st_mode & 0o077:
+        os.close(fd)
+        raise ValueError("persona hook lease directory must be owned by the current user with mode 0700")
+    return fd
+
+
+def save_lease_record(event, repo_dir, record):
+    name = lease_record_name(event, repo_dir)
+    directory = open_lease_directory()
+    try:
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=directory)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(record, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def read_lease_record(event, repo_dir):
+    name = lease_record_name(event, repo_dir)
+    directory = open_lease_directory()
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 65536:
+                raise ValueError("invalid persona hook lease record")
+            record = json.load(stream)
+        if not isinstance(record, dict) or record.get("session_id") != session_identity(event) or record.get("tool_name") != event.get("tool_name"):
+            raise ValueError("persona hook lease record identity mismatch")
+        return record
+    finally:
+        os.close(directory)
+
+
+def remove_lease_record(event, repo_dir):
+    directory = open_lease_directory()
+    try:
+        os.unlink(lease_record_name(event, repo_dir), dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def handle_pretooluse(event):
     tool_name = event.get("tool_name")
     tool_input = event.get("tool_input", {})
     cwd = event.get("cwd") or os.getcwd()
-    session_id = event.get("session_id", "")
+    repo_dir = repo_root(cwd)
+    if not repo_dir or tool_name not in FILE_TOOLS | {"Bash"}:
+        return 0
+    try:
+        session_id = session_identity(event)
+    except ValueError as err:
+        emit_pretooluse("deny", str(err))
+        return 0
 
     if tool_name == "Bash":
         command = tool_input.get("command", "")
         if not isinstance(command, str) or not command.strip():
             return 0
-        bypass = bypass_reason(command)
-        if bypass:
-            emit_pretooluse("allow", bypass)
+        bypass, denied_reason = bypass_decision(command)
+        if denied_reason:
+            emit_pretooluse("deny", denied_reason)
             return 0
-
-        repo_dir = repo_root(cwd)
-        if not repo_dir:
+        if bypass:
+            emit_pretooluse(reason=bypass)
             return 0
 
         persona_bin = resolve_persona_bin()
@@ -494,14 +592,10 @@ def handle_pretooluse(event):
         updated_input = dict(tool_input)
         shell_command = selected_shell(event, tool_input)
         updated_input["command"] = wrapped_command(persona_bin, session_id, daemon_args, shell_command, command)
-        emit_pretooluse("allow", "Run the Bash command through persona.", updated_input)
+        emit_pretooluse(reason="Run the Bash command through persona; Claude's normal permission policy still applies.", updated_input=updated_input)
         return 0
 
     if tool_name not in FILE_TOOLS:
-        return 0
-
-    repo_dir = repo_root(cwd)
-    if not repo_dir:
         return 0
 
     persona_bin = resolve_persona_bin()
@@ -511,14 +605,15 @@ def handle_pretooluse(event):
 
     try:
         daemon_args = daemon_option_args()
+        lease_record_name(event, repo_dir)
     except ValueError as err:
         emit_pretooluse("deny", f"invalid persona daemon plugin option: {err}")
         return 0
 
     try:
-        info = daemon_session_info(persona_bin, session_id, daemon_args, cwd)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as err:
-        emit_pretooluse("deny", f"persona daemon session lookup failed: {subprocess_error_text(err)}")
+        info, lease_id = daemon_acquire(persona_bin, session_id, daemon_args, cwd)
+    except (OSError, subprocess.SubprocessError, ValueError) as err:
+        emit_pretooluse("deny", f"persona daemon lease acquisition failed: {subprocess_error_text(err)}")
         return 0
 
     view_path = info.get("view_path", "")
@@ -527,23 +622,35 @@ def handle_pretooluse(event):
     updated_input, managed, denied_reason = rewrite_file_tool_input(
         tool_name, tool_input, repo_dir, view_path, git_dir, patch_path, cwd
     )
-    if denied_reason:
-        emit_pretooluse("deny", denied_reason)
-        return 0
     if tool_name in WRITE_FILE_TOOLS and not managed:
-        emit_pretooluse(
-            "deny",
-            "persona-claude only permits direct file writes for paths inside the current repository or its daemon-backed view.",
+        denied_reason = denied_reason or (
+            "persona-claude only permits direct file writes for paths inside the current repository or its daemon-backed view."
         )
+    try:
+        save_lease_record(event, repo_dir, {"session_id": session_id, "tool_name": tool_name,
+                                         "lease_id": lease_id, "session": info,
+                                         "context": managed_tool_context(tool_name, updated_input, repo_dir, view_path, cwd)})
+    except (OSError, ValueError) as err:
+        reason = f"persona could not record the file-tool lease: {subprocess_error_text(err)}"
+        try:
+            daemon_release(persona_bin, session_id, lease_id, info["view_generation"], cwd)
+        except (OSError, subprocess.SubprocessError, ValueError) as release_err:
+            reason += f"; lease cleanup failed: {subprocess_error_text(release_err)}"
+        emit_pretooluse("deny", reason)
         return 0
-    if managed:
-        if tool_name in WRITE_FILE_TOOLS:
-            try:
-                daemon_mark_dirty(persona_bin, session_id, cwd)
-            except (OSError, subprocess.SubprocessError) as err:
-                emit_pretooluse("deny", f"persona daemon dirty-mark failed: {subprocess_error_text(err)}")
-                return 0
-        emit_pretooluse("allow", "Route the file tool through persona's daemon-backed view.", updated_input)
+    if denied_reason or not managed:
+        try:
+            daemon_release(persona_bin, session_id, lease_id, info["view_generation"], cwd)
+            remove_lease_record(event, repo_dir)
+        except (OSError, subprocess.SubprocessError, ValueError) as err:
+            denied_reason = (denied_reason or "File tool routing failed.") + (
+                f" Lease cleanup failed: {subprocess_error_text(err)}; the lease record is retained for retry."
+            )
+        if denied_reason:
+            emit_pretooluse("deny", denied_reason)
+        return 0
+    emit_pretooluse(reason="Route the file tool through persona's leased daemon-backed view; Claude's normal permission policy still applies.",
+                    updated_input=updated_input)
     return 0
 
 
@@ -553,79 +660,50 @@ def handle_posttooluse(event):
         return 0
 
     cwd = event.get("cwd") or os.getcwd()
-    session_id = event.get("session_id", "")
     repo_dir = repo_root(cwd)
     if not repo_dir:
         return 0
-
-    persona_bin = resolve_persona_bin()
-    if not persona_bin:
-        print(persona_not_found_reason(), file=sys.stderr)
-        return 1
-
+    hook_name = event.get("hook_event_name", "PostToolUse")
+    saved = False
     try:
-        daemon_args = daemon_option_args()
-    except ValueError as err:
-        print(f"invalid persona daemon plugin option: {err}", file=sys.stderr)
-        return 1
-
-    try:
-        flush_min_age, flush_retry_for, flush_retry_interval = flush_behavior()
-    except ValueError as err:
-        print(f"invalid persona flush plugin option: {err}", file=sys.stderr)
-        return 1
-
-    try:
-        info = daemon_session_info(persona_bin, session_id, daemon_args, cwd)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as err:
-        print(f"persona daemon session lookup failed: {subprocess_error_text(err)}", file=sys.stderr)
-        return 1
-
-    managed_context = managed_tool_context(tool_name, event.get("tool_input", {}), repo_dir, info.get("view_path", ""), cwd)
-
-    if tool_name not in WRITE_FILE_TOOLS:
-        if managed_context:
-            emit_posttooluse(managed_context)
+        session_id = session_identity(event)
+        record = read_lease_record(event, repo_dir)
+        if record is None:
+            if tool_name in WRITE_FILE_TOOLS and hook_name != "PermissionDenied":
+                raise ValueError("file-tool lease record is missing; the change has not been confirmed saved")
+            return 0
+        persona_bin = resolve_persona_bin()
+        if not persona_bin:
+            raise ValueError(persona_not_found_reason())
+        # Release uses the generation acquired before the tool ran. Never look
+        # up a replacement view after a daemon restart and flush that instead.
+        daemon_release(persona_bin, session_id, record["lease_id"], record["session"]["view_generation"], cwd)
+        saved = True
+        remove_lease_record(event, repo_dir)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as err:
+        if saved:
+            message = (
+                f"persona durably flushed the patch, but could not finish local lease-record cleanup: {subprocess_error_text(err)}. "
+                "Inspect the remaining record and daemon state before retrying that tool-use ID."
+            )
+        else:
+            message = (
+                f"persona has NOT confirmed this file-tool change saved: {subprocess_error_text(err)}. "
+                "Keep any remaining lease record for recovery. Do not end, prune, or discard this session; "
+                "inspect persona daemon info/list and resolve the recorded release before continuing."
+            )
+        emit_posttooluse(message, hook_name, warning=True)
         return 0
-
-    if not managed_write_target(
-        tool_name,
-        event.get("tool_input", {}),
-        repo_dir,
-        info.get("view_path", ""),
-        info.get("git_dir", ""),
-        info.get("patch_path", ""),
-    ):
-        return 0
-
-    deadline = time.monotonic() + flush_retry_for
-    while True:
-        try:
-            daemon_flush(persona_bin, session_id, flush_min_age, cwd)
-            break
-        except (OSError, subprocess.SubprocessError) as err:
-            err_text = subprocess_error_text(err)
-            if "still busy" in err_text and time.monotonic() < deadline:
-                time.sleep(flush_retry_interval)
-                continue
-            print(f"persona daemon flush failed: {err_text}", file=sys.stderr)
-            return 1
-    if managed_context:
-        suffix = " persona flushed the daemon-backed file-tool change into the session patch."
-        if flush_min_age:
-            suffix = " persona flushed or deferred the daemon-backed file-tool change according to FLUSH_MIN_AGE."
-        emit_posttooluse(managed_context + suffix)
-        return 0
-    if flush_min_age:
-        emit_posttooluse("persona flushed or deferred the daemon-backed file-tool change according to FLUSH_MIN_AGE.")
-        return 0
-    emit_posttooluse("persona flushed the daemon-backed file-tool change into the session patch.")
+    context = record.get("context", "")
+    suffix = "persona released the file-tool lease and durably flushed the session patch."
+    if hook_name == "PostToolUseFailure":
+        suffix += " The tool reported failure; any partial file changes were included in that flush."
+    emit_posttooluse((context + " " + suffix).strip(), hook_name)
     return 0
 
 
 def handle_session_end(event):
     cwd = event.get("cwd") or os.getcwd()
-    session_id = event.get("session_id", "")
     if not repo_root(cwd):
         return 0
 
@@ -633,21 +711,35 @@ def handle_session_end(event):
     if not persona_bin:
         return 0
     try:
+        session_id = session_identity(event)
         daemon_end(persona_bin, session_id, cwd)
-    except (OSError, subprocess.SubprocessError) as err:
+    except (OSError, subprocess.SubprocessError, ValueError) as err:
         print(f"persona daemon end failed during SessionEnd: {subprocess_error_text(err)}", file=sys.stderr)
     return 0
 
 
 def main():
-    event = load_event()
+    try:
+        event = load_event()
+    except (ValueError, OSError) as err:
+        print(f"persona hook input failed: {err}", file=sys.stderr)
+        return 2
     hook_name = event.get("hook_event_name")
-    if hook_name == "PreToolUse":
-        return handle_pretooluse(event)
-    if hook_name == "PostToolUse":
-        return handle_posttooluse(event)
-    if hook_name == "SessionEnd":
-        return handle_session_end(event)
+    try:
+        if hook_name == "PreToolUse":
+            return handle_pretooluse(event)
+        if hook_name in {"PostToolUse", "PostToolUseFailure", "PermissionDenied"}:
+            return handle_posttooluse(event)
+        if hook_name == "SessionEnd":
+            return handle_session_end(event)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError) as err:
+        reason = f"persona hook preparation failed: {subprocess_error_text(err)}"
+        if hook_name == "PreToolUse":
+            emit_pretooluse("deny", reason)
+        elif hook_name in {"PostToolUse", "PostToolUseFailure", "PermissionDenied"}:
+            emit_posttooluse(reason + "; saving is unconfirmed. Preserve the view and lease record for recovery.", hook_name, warning=True)
+        else:
+            print(reason, file=sys.stderr)
     return 0
 
 

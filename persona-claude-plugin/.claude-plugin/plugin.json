@@ -16,7 +16,7 @@
       "sensitive": false
     },
     "DAEMON_BASE_MODE": {
-      "description": "Optional daemon base mode override for wrapped sessions (repo or worktree).",
+      "description": "Optional daemon base mode override for wrapped sessions (worktree by default; repo only when explicitly selected).",
       "sensitive": false
     },
     "DAEMON_BASE_REF": {
@@ -40,15 +40,15 @@
       "sensitive": false
     },
     "FLUSH_MIN_AGE": {
-      "description": "Optional duration override to coalesce daemon flushes after write tools (for example 500ms or 2s).",
+      "description": "Legacy daemon flush option; file-tool leases always flush durably on release and do not skip saving.",
       "sensitive": false
     },
     "FLUSH_RETRY_FOR": {
-      "description": "Optional duration override for retrying daemon flushes when a session is temporarily busy.",
+      "description": "Legacy daemon flush retry option; file-tool leases now release and flush atomically.",
       "sensitive": false
     },
     "FLUSH_RETRY_INTERVAL_MS": {
-      "description": "Optional millisecond interval between daemon flush retries.",
+      "description": "Legacy daemon flush retry option; file-tool leases now release and flush atomically.",
       "sensitive": false
     }
   }

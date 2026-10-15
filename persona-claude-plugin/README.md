@@ -1,6 +1,6 @@
 # persona Claude Code plugin
 
-This directory is a local Claude Code plugin root. It is intended for `claude --plugin-dir ./persona-claude-plugin` sessions where Bash should run through persona's daemon-backed overlay view.
+This directory is a local Claude Code plugin root. It requires Claude Code v2.1.295 or later so `onFailure: "block"` can stop a tool when its preparation hook crashes, times out, or returns invalid output. It is intended for `claude --plugin-dir ./persona-claude-plugin` sessions where Bash should run through persona's daemon-backed overlay view.
 
 ## Layout
 
@@ -44,14 +44,16 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 
 - `PreToolUse` on `Bash` runs `bin/persona-wrap`, which rewrites eligible Bash calls to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
 - `PreToolUse` on `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` rewrites repo-scoped paths into the daemon session's stable `view_path`.
-- Managed `Edit`, `MultiEdit`, and `Write` calls mark the daemon session dirty before the tool runs.
-- `PostToolUse` on `Edit`, `MultiEdit`, and `Write` runs `persona daemon flush --session-key <claude-session-id>` so file-tool mutations land in the session patch.
+- Managed file tools acquire a mutation lease before the tool runs, including read/search tools so ignored-file masks and cleanup use the same boundary as Bash. The daemon marks the session dirty when acquiring that lease.
+- `PostToolUse` and `PostToolUseFailure` release the recorded lease with its `view_generation`; release durably flushes the patch, including partial writes from a failed tool. The `PermissionDenied` hook also releases leases for denials that Claude reports through that event.
+- Routing and bypass decisions do not return `permissionDecision: allow`; Claude's usual permission rules and prompts still apply.
 - `SessionEnd` runs `persona daemon end --session-key <claude-session-id>` so finished Claude chats release their daemon-backed views.
 - The first wrapped Bash call lazily starts a per-repo daemon under `<gitdir>/persona/daemon/` and reuses it for later sessions in that repository.
 - Each Claude chat session key maps to its own daemon-backed patch/view pair.
 - Repo-scoped write tools are allowed, but writes outside the current repository are denied because they cannot be backed by persona's patch store.
 - `.git` and daemon state paths are denied even for read-only file tools so Claude cannot poke at masked Git metadata or session patch internals; the deny reason tells Claude whether it should switch to Git-aware commands or `persona daemon` commands.
-- Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped, and the bypass reason explains that persona hides `.git` from child commands.
+- Single literal commands for `git`, `gh`, `persona`, or `claude` may bypass persona, and the bypass context explains that persona hides `.git` from child commands. Shell operators, redirection, active expansions, command substitution, and heredocs are rejected on this bypass path. Split Git inspection and file mutation into separate calls. Quoted literal punctuation is allowed; wrappers such as `env`, `sudo`, and nested shells run wholly through persona.
+- Missing `session_id` or file-tool `tool_use_id` is rejected instead of sharing a fallback session. Repository discovery removes inherited `GIT_*` variables, matching the CLI.
 - The wrapper uses `tool_input.shell` when Claude exposes it, otherwise falls back to `event.shell`, then the hook process `SHELL`, and finally `bash`.
 
 ## Session lifecycle
@@ -62,7 +64,7 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 - To inspect every daemon session for the current repository, run `persona daemon list --json`.
 - To persist daemon-backed file-tool changes on demand, run `persona daemon flush --session-key <claude-session-id>`.
 - To remove stale sessions in bulk, run `persona daemon prune --idle-for 24h`.
-- To discard or fully close a session, run `persona daemon end --session-key <claude-session-id>`.
+- To flush and fully close a session, run `persona daemon end --session-key <claude-session-id>`. Closing a busy or recovery-required session is refused to preserve its state.
 - Normal Claude chat shutdown also triggers `persona daemon end --session-key <claude-session-id>` through the plugin's `SessionEnd` hook.
 - If you want to reuse a session key with different daemon options, you must end the old session first.
 
@@ -70,19 +72,24 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 
 - `PERSONA_WRAP_PERSONA_BIN` overrides the configured persona binary path.
 - `PERSONA_WRAP_BYPASS_PREFIXES` replaces the default bypass prefix list (`git,gh,persona,claude`) with a comma-separated list.
-- `PERSONA_WRAP_BYPASS_REGEX` bypasses wrapping when the raw Bash command matches the regex.
-- Claude plugin options `DAEMON_BASE_MODE`, `DAEMON_BASE_REF`, `DAEMON_ALLOW_DIRTY`, `DAEMON_IGNORED_MODE`, `DAEMON_IGNORED_MAX`, and `DAEMON_APPLY_MODE` are forwarded to both `persona daemon exec` and `persona daemon info`.
-- `FLUSH_MIN_AGE` forwards to `persona daemon flush --min-age <duration>` so repeated write-tool flushes can be coalesced.
-- `FLUSH_RETRY_FOR` and `FLUSH_RETRY_INTERVAL_MS` control how long the wrapper retries `persona daemon flush` when a concurrent shell command temporarily keeps the session busy.
+- `PERSONA_WRAP_BYPASS_REGEX` selects additional bypass candidates. Matching commands must still be a single literal shell command; it cannot authorize compound commands.
+- `PERSONA_WRAP_DAEMON_TIMEOUT` bounds each daemon subprocess (default `30s`); hooks allow `40s` so timeout errors can be reported.
+- `PERSONA_WRAP_LEASE_DIR` selects a private lease-record directory (default `${TMPDIR:-/tmp}/persona-claude-<uid>`, current-user ownership and mode `0700` required). Each record has mode `0600` and a name derived from repository identity, session ID, and tool-use ID.
+- `PERSONA_WRAP_OWNER_PID` optionally identifies a live, long-lived Claude owner process for nonstandard launchers. Normally the hook discovers the Claude ancestor through `/proc`; it never uses the short-lived hook process as lease owner.
+- Claude plugin options `DAEMON_BASE_MODE`, `DAEMON_BASE_REF`, `DAEMON_ALLOW_DIRTY`, `DAEMON_IGNORED_MODE`, `DAEMON_IGNORED_MAX`, and `DAEMON_APPLY_MODE` are forwarded to both `persona daemon exec` and `persona daemon acquire`. `DAEMON_BASE_MODE` defaults to `worktree`, which pins a detached immutable base; `repo` must be selected explicitly.
+- `FLUSH_MIN_AGE`, `FLUSH_RETRY_FOR`, and `FLUSH_RETRY_INTERVAL_MS` remain accepted configuration names for compatibility, but file-tool leases always flush immediately on release. No skipped flush is presented as a scheduled or deferred save. Use explicit daemon commands to request other flush policies.
 
 ## Limits
 
 - Repo-scoped file tools are redirected into persona's daemon view, but tool responses may still show internal daemon `view_path` paths because Claude sees the rewritten absolute path.
 - After managed file-tool calls, the hook adds mapping context such as `Treat matching paths under <view_path> as repository paths under <repo_root>`, which helps Claude reason about those internal paths even though the tool output itself is unchanged.
-- The automatic wrapper uses daemon defaults. If you need `--base-mode worktree` or other daemon flags, run `persona daemon ...` commands manually.
-- Git-oriented shell commands are bypassed instead of wrapped, so they do not see the persona overlay view.
+- The automatic wrapper defaults to `--base-mode worktree`. Set the `DAEMON_*` plugin options or use explicit daemon commands for other session settings.
+- Bypassed Git-oriented shell commands see the original checkout. Git aliases, hooks, external commands, and direct `persona`/`claude` invocations can have side effects; bypass is explicit convenience for trusted commands, not a security sandbox.
 - Writes outside the current repository are denied instead of being sent through persona.
 - The wrapper no-ops outside git repositories because persona requires a repo.
+- The hook checks the translated view target, existing ancestors, and realpath aliases before allowing a file tool, including aliases into `.git` or daemon state. A hook cannot pin the later file open: another process can swap a symlink after the check. File-tool rewriting therefore protects against static escaping paths, not hostile concurrent filesystem changes. Stronger guarantees require an open-time broker or directory-FD based file tool.
+- A lease stays busy while a permission prompt is pending. According to the [Claude hooks reference](https://code.claude.com/docs/en/hooks#permissiondenied), `PermissionDenied` only covers auto-mode denials; manual refusal and matching deny rules may not produce a release event. Such a lease remains busy rather than risking concurrent edits. Inspect the private record and run `persona daemon release --session-key <session_id> --lease-id <lease_id> --view-generation <view_generation>` only after confirming that tool is no longer running.
+- Release failures are reported to both the user (`systemMessage`) and Claude (`additionalContext` for post-tool hooks). The record remains available for retry; do not end/prune/discard the session while its save is unconfirmed. A restart never causes the hook to flush a replacement generation as though it were the old tool's view.
 - persona itself still requires Linux, OverlayFS, mount namespaces, and the relevant capabilities.
 
 ## Codex note

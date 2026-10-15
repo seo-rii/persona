@@ -7,9 +7,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap",
-            "timeout": 30,
-            "statusMessage": "Preparing persona-backed shell command"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap\"",
+            "timeout": 40,
+            "statusMessage": "Preparing persona-backed shell command",
+            "onFailure": "block"
           }
         ]
       },
@@ -18,9 +19,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap",
-            "timeout": 10,
-            "statusMessage": "Routing file tools through persona view"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap\"",
+            "timeout": 40,
+            "statusMessage": "Routing file tools through persona view",
+            "onFailure": "block"
           }
         ]
       }
@@ -31,8 +33,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap",
-            "timeout": 10,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap\"",
+            "timeout": 40,
             "statusMessage": "Flushing persona-backed file changes"
           }
         ]
@@ -43,9 +45,35 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap",
-            "timeout": 2,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap\"",
+            "timeout": 40,
             "statusMessage": "Cleaning up persona daemon session"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Read|Edit|MultiEdit|Write|Glob|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap\"",
+            "timeout": 40,
+            "statusMessage": "Saving partial persona-backed file changes"
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "Read|Edit|MultiEdit|Write|Glob|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/persona-wrap\"",
+            "timeout": 40,
+            "statusMessage": "Releasing denied persona file-tool lease"
           }
         ]
       }
