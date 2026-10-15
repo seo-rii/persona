@@ -1,6 +1,6 @@
 # persona
 
-`persona` is a CLI that treats a single patch file as a persistent state store. Run a command in an overlay Git view backed by a patch file. It runs a command inside a Git repository view where the patch is already applied (OverlayFS + mount namespace), then exports changes back into the same patch file (HEAD-based) atomically.
+`persona` is a CLI that treats a single patch file as a persistent state store. Run a command in an overlay Git view backed by a patch file. It runs a command inside a Git repository view where the patch is already applied (OverlayFS + mount namespace), then exports changes back into the same patch file (relative to an immutable base OID) atomically.
 
 ## Requirements
 
@@ -41,15 +41,14 @@ What the plugin does:
 
 - `PreToolUse` on `Bash` rewrites eligible shell commands to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
 - Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` calls are rewritten into the daemon session's stable `view_path`.
-- Managed `Edit`, `MultiEdit`, and `Write` calls mark the daemon session dirty before the tool runs, then flush after success so `daemon list/info` can show pending-vs-flushed state accurately.
-- Successful `Edit`, `MultiEdit`, and `Write` calls trigger `persona daemon flush --session-key <claude-session-id>` so file-tool edits are written back into the patch.
+- Managed file tools use `persona daemon acquire` and `persona daemon release` for the same exclusive mutation lease as Bash, with a `view_generation` tied to their view. `PostToolUse`, `PostToolUseFailure`, and `PermissionDenied` hooks release the lease and durably save any changes. A failed save retains recovery state and reports an unsaved-change message to both the user and Claude.
 - `SessionEnd` runs `persona daemon end --session-key <claude-session-id>` so finished Claude chats clean up their daemon-backed views automatically.
 - The first wrapped Bash call lazily starts a per-repo background daemon under `<gitdir>/persona/daemon/`.
 - Each Claude chat session key maps to its own daemon-backed patch/view pair, so concurrent chats in the same Claude instance stay isolated from each other.
 - The plugin ships a `persona-worker` agent, and `settings.json` sets `"agent": "persona-worker"` so the main thread prefers Bash-based editing.
 - Repo-scoped write tools are allowed; writes outside the current repository are denied because they cannot be backed by persona's patch store.
 - Claude file tools are also denied for `.git` and daemon state paths, even when they fall inside the repository tree; the deny message points Claude toward Git-aware commands or explicit `persona daemon` subcommands.
-- Commands that resolve to `git`, `gh`, `persona`, or `claude` are bypassed instead of wrapped, and the hook now explains that `.git` is masked from persona child commands.
+- A single literal command for `git`, `gh`, `persona`, or `claude` may bypass wrapping. Compound commands, redirects, substitutions, and heredocs cannot use this bypass; split Git-aware operations into separate tool calls. Wrappers such as `env`, `sudo`, and nested shells remain inside persona. The hook explains that `.git` is masked from persona child commands. Rewriting or bypassing a command does not emit `permissionDecision: allow`; normal tool permission checks remain in force.
 - The wrapper uses the selected shell from the hook payload when available, then falls back to the hook process `SHELL`, and only then to `bash`.
 
 Recommended setup:
@@ -70,10 +69,10 @@ Important limits:
 
 - Repo-scoped Claude file tools now run inside persona's stable daemon view, but their tool responses may still show internal daemon `view_path` absolute paths because Claude sees the rewritten input path.
 - The plugin adds path-mapping context after managed file-tool calls so Claude can relate internal daemon paths back to repository paths, but the underlying tool output still uses the executed absolute path.
-- The automatic wrapper uses daemon defaults. If you need advanced daemon options such as `--base-mode worktree`, run `persona daemon ...` commands explicitly.
-- Git-oriented shell commands are intentionally bypassed, so they do not run inside the persona overlay view.
+- Daemon sessions and the plugin default to `--base-mode worktree`, with a frozen base commit. Uncommitted, untracked, and ignored files from the original checkout are not copied into this worktree. Explicit `repo` mode uses the original checkout as a mutable lower layer and requires that it remain unchanged for the entire session.
+- A permitted single Git-aware bypass runs against the original repository and may change it. Use it deliberately; session changes are otherwise saved in the patch.
 - Writes outside the current repository are denied instead of being sent through persona.
-- Codex does not currently support the same transparent Bash rewrite flow via plugins, so this repository only ships the Claude Code integration today.
+- File-tool path checks reject symlink targets outside the view and aliases of protected state. These hook checks cannot eliminate symlink replacement races between the hook and the external tool opening the file. A tool permission refusal that fires no post hook leaves the lease busy until explicit release or owner termination; see the plugin README.
 
 ## Usage
 
@@ -101,6 +100,9 @@ persona --patch /tmp/state.patch -- cat new.txt
 - `persona daemon flush --session-key <key> [--min-age <duration>]`: write the current daemon view back into that session's patch file without ending the session, optionally skipping very recent flushes.
 - `persona daemon prune --idle-for <duration>`: end idle daemon sessions for the current repository.
 - `persona daemon end --session-key <key>`: flush the daemon session and remove its overlay view.
+- `persona daemon acquire --session-key <key> --owner-pid <pid> --json`: obtain an exclusive file-tool lease. Keep its `lease_id` and `view_generation`.
+- `persona daemon release --session-key <key> --lease-id <id> --view-generation <n>`: release that lease and durably save the view.
+- `persona daemon recover --session-key <key> --dry-run`: inspect preserved metadata without changing files or mounts. Omit `--dry-run` to validate ownership, refuse live owners, unmount stale session mounts without lazy detach, and reopen a preserved worktree upper layer.
 - `persona version`: print the current persona CLI version.
 - Run `persona version` or `persona --version` to see the current CLI version instead of relying on README text.
 
@@ -125,10 +127,12 @@ persona daemon end --session-key claude-chat-123
 ```
 
 `persona daemon exec` and `persona daemon info` accept the same `--base-mode`, `--base-ref`, `--allow-dirty`, `--ignored-mode`, `--ignored-max`, and `--apply-mode` knobs as the one-shot CLI. Reusing the same session key with different daemon option values is rejected until you run `persona daemon end` for that key.
-`persona daemon flush` accepts `--min-age` when you want to coalesce repeated write-backs instead of exporting after every write.
-If the background daemon exits or restarts, the next `persona daemon info`, `list`, `flush`, `prune`, or `end` call recreates persisted sessions from metadata under `<gitdir>/persona/daemon/state/` and resumes from the same patch file. Recovery keeps the patch path stable, but the recreated daemon `view_path` may change across daemon restarts.
+`persona daemon flush` accepts `--min-age` to skip a recent write-back. A skip does not schedule a future save; dirty data is still unsaved. Lease release and normal shutdown save without this skip.
+If the background daemon exits or restarts, the next `persona daemon info`, `list`, `flush`, `prune`, or `end` call recreates persisted sessions from metadata under `<gitdir>/persona/daemon/state/` and resumes from the same patch file and saved base OID. Dirty sessions retain their upper layer and report `recovery_required` when ownership, mounts, a live writer, or a mutable repo-mode lower layer prevents safe restoration. Legacy metadata without a base OID is preserved for manual inspection. Recovery keeps the patch path stable, but the recreated daemon `view_path` may change across daemon restarts.
 `persona daemon info --json` and `persona daemon list --json` report `dirty`, `created_*`, `last_used_*`, `last_flushed_*`, `flush_count`, `flush_skipped`, and `recovered_count` so plugin integrations can inspect daemon session health.
-For long-lived manual daemon sessions where the base should stay frozen even if the checkout changes outside the session, prefer `--base-mode worktree`.
+The daemon defaults to `--base-mode worktree`. Session info also exposes `base_oid`, `view_generation`, mutation `generation`, `last_durable_generation`, `state`, `last_error`, and `recovery_root`. A normal SIGTERM/SIGINT blocks new operations, drains requests, and saves idle dirty sessions. A live lease or failed save preserves the upper layer, base worktree, and recovery metadata; it is never silently marked clean. SIGKILL recovery guarantees the last successfully saved patch, and retains newer upper-layer data for recovery. After an unclean exit, stale roots and external mount backing remain tracked and block automatic recreation; `recover --dry-run` reports them and explicit `recover` checks ownership and unmounts them before reopening. A changed temporary-directory configuration may require manual inspection of the old external backing.
+
+Daemon RPCs have a 30-second maximum duration, cancel work on client disconnect, and use per-session locks. The socket uses a short private directory under `/tmp`; protocol ping/pong checks the repository identity. A lifetime lock prevents a second server from unlinking an active socket. Background daemon diagnostics are appended to `<gitdir>/persona/daemon/daemon.log` (mode 0600).
 
 ## Options
 
@@ -161,13 +165,32 @@ Session/logging:
 - `.git` is always masked in the view.
 - If the patch file is inside the repo, it is masked in the view and excluded from export.
 - Patch locking uses a sibling `<patch>.lock` file. Persona unlocks and closes it after the run, but does not remove the lock file; if the patch lives inside the repo, the lock path is also masked in the view and excluded from export.
-- Export is always based on `HEAD`.
+- A run resolves its base to an immutable OID before apply/export; worktree mode uses `--base-ref`, while repo mode freezes its starting HEAD. Daemon metadata keeps that OID across restart even when refs move. A per-patch `.base.json` sidecar and `refs/persona/bases/<key-hash>` retain the base across `end`, later reuse, and Git GC; retain them for as long as the patch is needed. Reusing a key with a different base requires a new key. Reusing a standalone patch requires the same base commit.
+- Unborn repo mode uses the empty tree and includes staged files. Worktree mode requires a committed base.
+- Saved patches fix diff color, prefixes, context, full indexes, and binary representation independently of user display settings. textconv and external diff programs are disabled. The original Git index is never used as the session index.
+- Changed files with content-transform attributes (`filter`, `text`, `eol`, `ident`, or `working-tree-encoding`) are explicitly rejected because Git conversion can lose working-file bytes. Unchanged files may remain. Git submodule worktree contents are not preserved by ordinary file patches.
 - Ignored untracked files are excluded from export by default.
 - If ignored processing is enabled and the ignored path set changes during the run in either direction, export fails.
 - Special files (FIFO/device/socket) are skipped with a warning.
-- Patch write-back uses an atomic rename inside the patch directory.
+- Patch write-back uses an atomic rename and file/directory fsync inside the patch directory. Existing owner/group and permission bits are preserved. Metadata is also fsynced before success is returned. Patch input is a single bounded regular-file snapshot used for both validation and apply. Internal patch/lock/temp file descriptors are close-on-exec.
 - Patch files and exported diffs are capped at 16 MiB; larger inputs fail explicitly instead of relying on scanner or memory pressure side effects.
 - If persona cannot preserve the existing patch file owner/group during atomic write-back, it fails instead of silently changing ownership.
+
+## Isolation and preservation contract
+
+Persona separates ordinary cooperative repository work; it is not a security sandbox for hostile processes. Saved file state includes contents, deletion, symlink targets, and the executable bit. Git patches do not retain ownership, timestamps, extended attributes, empty directories, ignored-file contents, or submodule worktree contents.
+
+| Operation | Scope |
+| --- | --- |
+| Relative paths and original repo absolute paths in `daemon exec` | A private child mount namespace recursively maps the view over the original repo, preserving nested masks. |
+| File tools | Exclusive lease, generation check, and target/ancestor symlink checks; external-tool open-time races remain possible. |
+| Explicit original Git/CLI bypass | Runs on the original repository with normal tool permissions. |
+| Paths outside the repository, external symlinks, network, other processes | Ordinary OS access applies; shell commands can write outside patch coverage. |
+| Root/capability execution | Mount capability is required; it does not make arbitrary commands safe. |
+| Escaped descendants (`setsid`) | Process-group cleanup cannot guarantee termination of every detached descendant. |
+| Ignored files | All managed tools use the same lease masking policy. They are excluded from saved file state; `.gitignore` changes that alter the ignored path set fail export. |
+
+Use `recover --dry-run` before recovery of an uncertain session. A failed save keeps the existing durable patch and preserves unsaved data; keep the reported recovery root until its contents have been reviewed. Automatic recovery does not delete directories named by metadata. Explicit recovery removes only validated, unmounted clean session roots and owned external temporary backing; a dirty upper layer remains intact. Restoring a dirty worktree requires that its recorded base worktree has also been retained; dirty repo-mode sessions need manual recovery because their mutable lower cannot be verified.
 
 ## Implementation Notes (Spec Deltas)
 
