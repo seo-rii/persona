@@ -711,7 +711,7 @@ func TestCIWorkflowUsesDocumentedTestEntrypoints(t *testing.T) {
 		"name: ci",
 		"fast:",
 		"test:",
-		"go test -race ./cmd/... ./internal/...",
+		"go test -race -shuffle=on -count=3 ./cmd/... ./internal/...",
 		"bash ./test.sh",
 	} {
 		if !strings.Contains(text, want) {
