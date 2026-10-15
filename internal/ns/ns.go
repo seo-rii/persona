@@ -52,6 +52,15 @@ func BindMount(src, dst string) error {
 	return nil
 }
 
+// BindMountRecursive preserves nested .git, ignored-file, and patch masks when
+// a daemon view is mapped over the original repository in a child namespace.
+func BindMountRecursive(src, dst string) error {
+	if err := mountFn(src, dst, "", uintptr(unix.MS_BIND|unix.MS_REC), ""); err != nil {
+		return fmt.Errorf("recursive bind mount %s -> %s: %w", src, dst, err)
+	}
+	return nil
+}
+
 func RemountRO(target string) error {
 	if err := mountFn("", target, "", uintptr(unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY), ""); err != nil {
 		return fmt.Errorf("remount ro %s: %w", target, err)

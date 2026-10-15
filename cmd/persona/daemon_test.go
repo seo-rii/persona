@@ -1418,7 +1418,12 @@ func TestDaemonStateEndRejectsBusyLiveSession(t *testing.T) {
 }
 
 func TestDaemonClientMethodsRoundTripRequestsAndErrors(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	sockDir, err := os.MkdirTemp("", "rpc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	socketPath := filepath.Join(sockDir, "daemon.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen unix socket: %v", err)

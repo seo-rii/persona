@@ -80,6 +80,25 @@ func TestBindMountCreatesPlaceholderForFile(t *testing.T) {
 	}
 }
 
+func TestRecursiveBindPreservesNestedMounts(t *testing.T) {
+	previous := mountFn
+	t.Cleanup(func() { mountFn = previous })
+	var flags uintptr
+	mountFn = func(source, target, fstype string, got uintptr, data string) error {
+		if source != "/view" || target != "/repo" {
+			t.Fatalf("unexpected mapping %s -> %s", source, target)
+		}
+		flags = got
+		return nil
+	}
+	if err := BindMountRecursive("/view", "/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if flags != uintptr(unix.MS_BIND|unix.MS_REC) {
+		t.Fatalf("nested masks omitted: flags=%d", flags)
+	}
+}
+
 func TestBindMountCreatesTargetDirForDirectory(t *testing.T) {
 	origMountFn := mountFn
 	t.Cleanup(func() {

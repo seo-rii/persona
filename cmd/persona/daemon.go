@@ -33,8 +33,10 @@ import (
 )
 
 const (
-	daemonSocketFile = "persona.sock"
-	daemonLaunchLock = "launch.lock"
+	daemonSocketFile     = "persona.sock"
+	daemonLaunchLock     = "launch.lock"
+	daemonProtocol       = 2
+	daemonRequestTimeout = 30 * time.Second
 )
 
 type daemonFlagValues struct {
@@ -64,7 +66,11 @@ type daemonRequest struct {
 	LeaseID        string              `json:"lease_id,omitempty"`
 	OwnerPID       int                 `json:"owner_pid,omitempty"`
 	IdleForSeconds int64               `json:"idle_for_seconds,omitempty"`
+	IdleForNanos   int64               `json:"idle_for_nanos,omitempty"`
 	MinAgeNanos    int64               `json:"min_age_nanos,omitempty"`
+	ViewGeneration uint64              `json:"view_generation,omitempty"`
+	DeadlineNanos  int64               `json:"deadline_nanos,omitempty"`
+	DryRun         bool                `json:"dry_run,omitempty"`
 	Config         daemonSessionConfig `json:"config"`
 }
 
@@ -76,32 +82,44 @@ type daemonResponse struct {
 	Pruned   []string            `json:"pruned,omitempty"`
 	LeaseID  string              `json:"lease_id,omitempty"`
 	Ended    bool                `json:"ended,omitempty"`
+	Version  int                 `json:"version,omitempty"`
+	RepoRoot string              `json:"repo_root,omitempty"`
+	GitDir   string              `json:"git_dir,omitempty"`
 }
 
 type daemonSessionInfo struct {
-	SessionKey         string `json:"session_key"`
-	RepoRoot           string `json:"repo_root"`
-	GitDir             string `json:"git_dir"`
-	ViewPath           string `json:"view_path"`
-	PatchPath          string `json:"patch_path"`
-	Dirty              bool   `json:"dirty"`
-	Busy               bool   `json:"busy"`
-	BusyOwnerPID       int    `json:"busy_owner_pid,omitempty"`
-	CreatedUnix        int64  `json:"created_unix"`
-	CreatedRFC3339     string `json:"created_rfc3339"`
-	LastUsedUnix       int64  `json:"last_used_unix"`
-	LastUsedRFC3339    string `json:"last_used_rfc3339"`
-	LastFlushedUnix    int64  `json:"last_flushed_unix"`
-	LastFlushedRFC3339 string `json:"last_flushed_rfc3339"`
-	FlushCount         int    `json:"flush_count"`
-	FlushSkipped       int    `json:"flush_skipped"`
-	RecoveredCount     int    `json:"recovered_count"`
+	SessionKey            string `json:"session_key"`
+	RepoRoot              string `json:"repo_root"`
+	GitDir                string `json:"git_dir"`
+	ViewPath              string `json:"view_path"`
+	PatchPath             string `json:"patch_path"`
+	Dirty                 bool   `json:"dirty"`
+	Busy                  bool   `json:"busy"`
+	BusyOwnerPID          int    `json:"busy_owner_pid,omitempty"`
+	CreatedUnix           int64  `json:"created_unix"`
+	CreatedRFC3339        string `json:"created_rfc3339"`
+	LastUsedUnix          int64  `json:"last_used_unix"`
+	LastUsedRFC3339       string `json:"last_used_rfc3339"`
+	LastFlushedUnix       int64  `json:"last_flushed_unix"`
+	LastFlushedRFC3339    string `json:"last_flushed_rfc3339"`
+	FlushCount            int    `json:"flush_count"`
+	FlushSkipped          int    `json:"flush_skipped"`
+	RecoveredCount        int    `json:"recovered_count"`
+	ViewGeneration        uint64 `json:"view_generation"`
+	Generation            uint64 `json:"generation"`
+	LastDurableGeneration uint64 `json:"last_durable_generation"`
+	BaseOID               string `json:"base_oid"`
+	State                 string `json:"state"`
+	LastError             string `json:"last_error,omitempty"`
+	RecoveryRoot          string `json:"recovery_root,omitempty"`
+	ExternalRoot          string `json:"external_root,omitempty"`
 }
 
 type daemonDeps struct {
-	newGit   func(string, string, bool) model.GitOps
-	newMount func() model.NSOps
-	now      func() time.Time
+	newGit    func(string, string, bool) model.GitOps
+	newMount  func() model.NSOps
+	now       func() time.Time
+	writeMeta func(string, daemonSessionMeta) error
 }
 
 type daemonState struct {
@@ -111,47 +129,67 @@ type daemonState struct {
 	deps     daemonDeps
 	log      *slog.Logger
 	sessions map[string]*daemonSession
+	gates    map[string]chan struct{}
+	cached   map[string]daemonSessionInfo
+	closing  bool
 }
 
 type daemonSession struct {
-	key            string
-	config         daemonSessionConfig
-	info           daemonSessionInfo
-	metaPath       string
-	store          *patchio.PatchStore
-	lock           *patchio.PatchLock
-	sess           *session.Session
-	cleanup        *cleanupStack
-	g              model.GitOps
-	mount          model.NSOps
-	menv           *mountEnv
-	patchInRepo    bool
-	patchRel       string
-	ignoredMasks   []string
-	initialIgnored []string
-	busy           bool
-	busyOwnerPID   int
-	busyLease      string
-	createdAt      time.Time
-	lastUsed       time.Time
-	lastFlushed    time.Time
-	flushCount     int
-	flushSkipped   int
-	recoveredCount int
-	dirty          bool
+	key                   string
+	config                daemonSessionConfig
+	info                  daemonSessionInfo
+	metaPath              string
+	store                 *patchio.PatchStore
+	lock                  *patchio.PatchLock
+	sess                  *session.Session
+	cleanup               *cleanupStack
+	g                     model.GitOps
+	mount                 model.NSOps
+	menv                  *mountEnv
+	patchInRepo           bool
+	patchRel              string
+	ignoredMasks          []string
+	initialIgnored        []string
+	busy                  bool
+	busyOwnerPID          int
+	busyLease             string
+	createdAt             time.Time
+	lastUsed              time.Time
+	lastFlushed           time.Time
+	flushCount            int
+	flushSkipped          int
+	recoveredCount        int
+	dirty                 bool
+	baseOID               string
+	generation            uint64
+	lastDurableGeneration uint64
+	viewGeneration        uint64
+	lastError             string
+	busyOwnerStart        string
+	closed                bool
+	preserve              *bool
 }
 
 type daemonSessionMeta struct {
-	SessionKey      string              `json:"session_key"`
-	Config          daemonSessionConfig `json:"config"`
-	SessionRoot     string              `json:"session_root"`
-	CreatedUnix     int64               `json:"created_unix"`
-	LastUsedUnix    int64               `json:"last_used_unix"`
-	LastFlushedUnix int64               `json:"last_flushed_unix"`
-	FlushCount      int                 `json:"flush_count"`
-	FlushSkipped    int                 `json:"flush_skipped"`
-	RecoveredCount  int                 `json:"recovered_count"`
-	Dirty           bool                `json:"dirty"`
+	SessionKey            string              `json:"session_key"`
+	Config                daemonSessionConfig `json:"config"`
+	SessionRoot           string              `json:"session_root"`
+	CreatedUnix           int64               `json:"created_unix"`
+	LastUsedUnix          int64               `json:"last_used_unix"`
+	LastFlushedUnix       int64               `json:"last_flushed_unix"`
+	FlushCount            int                 `json:"flush_count"`
+	FlushSkipped          int                 `json:"flush_skipped"`
+	RecoveredCount        int                 `json:"recovered_count"`
+	Dirty                 bool                `json:"dirty"`
+	BaseOID               string              `json:"base_oid,omitempty"`
+	Generation            uint64              `json:"generation,omitempty"`
+	LastDurableGeneration uint64              `json:"last_durable_generation,omitempty"`
+	ViewGeneration        uint64              `json:"view_generation,omitempty"`
+	LastError             string              `json:"last_error,omitempty"`
+	BusyOwnerPID          int                 `json:"busy_owner_pid,omitempty"`
+	BusyOwnerStart        string              `json:"busy_owner_start,omitempty"`
+	InitialIgnored        []string            `json:"initial_ignored,omitempty"`
+	ExternalRoot          string              `json:"external_root,omitempty"`
 }
 
 func addDaemonCommands(root *cobra.Command) {
@@ -357,13 +395,14 @@ func addDaemonCommands(root *cobra.Command) {
 	serveCmd.Flags().StringVar(&serveGitDir, "git-dir", "", "git dir for the daemon server")
 	serveCmd.Flags().StringVar(&serveSocket, "socket", "", "unix socket path for the daemon server")
 
+	addDaemonLeaseCommands(daemonCmd)
 	daemonCmd.AddCommand(execCmd, infoCmd, listCmd, flushCmd, markDirtyCmd, pruneCmd, endCmd, serveCmd)
 	root.AddCommand(daemonCmd)
 }
 
 func bindDaemonSessionFlags(cmd *cobra.Command, values *daemonFlagValues) {
 	cmd.Flags().StringVar(&values.sessionKey, "session-key", "", "external session key, such as a Claude chat session id")
-	cmd.Flags().StringVar(&values.baseMode, "base-mode", string(model.BaseRepo), "base mode: repo | worktree")
+	cmd.Flags().StringVar(&values.baseMode, "base-mode", string(model.BaseWorktree), "base mode: repo | worktree")
 	cmd.Flags().StringVar(&values.baseRef, "base-ref", "HEAD", "base ref for worktree mode")
 	cmd.Flags().BoolVar(&values.allowDirty, "allow-dirty", false, "allow dirty repo in repo base mode")
 	cmd.Flags().StringVar(&values.ignoredMode, "ignored-mode", string(model.IgnoredTransparent), "ignored mode: transparent | readonly | masked")
@@ -446,7 +485,14 @@ func runDaemonExec(ctx context.Context, sessionKey string, cfg daemonSessionConf
 	if err != nil {
 		return err
 	}
-	childCode := runCommand(resp.Session.ViewPath, cwdRel, args)
+	exe, exeErr := os.Executable()
+	if exeErr != nil {
+		_ = client.releaseExec(context.Background(), sessionKey, resp.LeaseID)
+		return exeErr
+	}
+	helperArgs := []string{exe, "daemon", "exec-view", "--repo-root", repoRoot, "--view-path", resp.Session.ViewPath, "--cwd-rel", cwdRel, "--"}
+	helperArgs = append(helperArgs, args...)
+	childCode := runCommand(repoRoot, cwdRel, helperArgs)
 	if err := client.releaseExec(context.Background(), sessionKey, resp.LeaseID); err != nil {
 		return err
 	}
@@ -563,8 +609,28 @@ func runDaemonServe(parent context.Context, repoRoot, gitDir, socketPath string)
 	if _, err := ensureDaemonDir(gitDir); err != nil {
 		return err
 	}
+	runtimeDir := filepath.Dir(socketPath)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(runtimeDir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("daemon socket directory must be private: %s", runtimeDir)
+	}
+	life, err := os.OpenFile(filepath.Join(gitDir, "persona", "daemon", "serve.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer life.Close()
+	if err := unix.Flock(int(life.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return fmt.Errorf("daemon already running: %w", err)
+	}
+	defer unix.Flock(int(life.Fd()), unix.LOCK_UN)
 	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return model.Wrap(model.ExitEnv, "remove stale daemon socket", err)
+		return err
 	}
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -612,16 +678,30 @@ func signalNotifyContext(parent context.Context, signals ...os.Signal) (context.
 
 func (s *daemonState) serveConn(conn net.Conn) {
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(daemonRequestTimeout))
 	var req daemonRequest
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, 64<<10)).Decode(&req); err != nil {
 		_ = json.NewEncoder(conn).Encode(daemonResponse{Error: err.Error(), Code: int(model.ExitEnv)})
 		return
 	}
-	resp := s.handleRequest(req)
+	deadline := time.Now().Add(daemonRequestTimeout)
+	if req.DeadlineNanos > 0 && time.Unix(0, req.DeadlineNanos).Before(deadline) {
+		deadline = time.Unix(0, req.DeadlineNanos)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	// The request occupies one connection. EOF means the caller has gone away.
+	go func() { var b [1]byte; _, _ = conn.Read(b[:]); cancel() }()
+	resp := s.handleRequestContext(ctx, req)
 	_ = json.NewEncoder(conn).Encode(resp)
 }
 
 func (s *daemonState) handleRequest(req daemonRequest) daemonResponse {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonRequestTimeout)
+	defer cancel()
+	return s.handleRequestContext(ctx, req)
+}
+func (s *daemonState) handleRequestContext(ctx context.Context, req daemonRequest) daemonResponse {
 	if req.RepoRoot != "" && req.RepoRoot != s.repoRoot {
 		return daemonResponse{Error: fmt.Sprintf("repo root mismatch: %s", req.RepoRoot), Code: int(model.ExitEnv)}
 	}
@@ -630,41 +710,46 @@ func (s *daemonState) handleRequest(req daemonRequest) daemonResponse {
 	}
 	key := strings.TrimSpace(req.SessionKey)
 	switch req.Method {
+	case "ping":
+		return daemonResponse{Version: daemonProtocol, RepoRoot: s.repoRoot, GitDir: s.gitDir}
+	case "recover":
+		info, err := s.recoverSession(ctx, key, req.DryRun)
+		return daemonResponseForInfo(info, err)
 	case "ensure":
-		info, err := s.ensureSession(context.Background(), key, req.Config)
+		info, err := s.ensureSession(ctx, key, req.Config)
 		return daemonResponseForInfo(info, err)
 	case "list":
-		sessions, err := s.listSessions(context.Background())
+		sessions, err := s.listSessions(ctx)
 		resp := daemonResponseForInfo(nil, err)
 		if err == nil {
 			resp.Sessions = sessions
 		}
 		return resp
 	case "acquire_exec":
-		info, leaseID, err := s.acquireExec(context.Background(), key, req.OwnerPID, req.Config)
+		info, leaseID, err := s.acquireExec(ctx, key, req.OwnerPID, req.Config)
 		resp := daemonResponseForInfo(info, err)
 		if err == nil {
 			resp.LeaseID = leaseID
 		}
 		return resp
 	case "release_exec":
-		err := s.releaseExec(context.Background(), key, req.LeaseID)
+		err := s.releaseExecGeneration(ctx, key, req.LeaseID, req.ViewGeneration)
 		return daemonResponseForInfo(nil, err)
 	case "flush":
-		err := s.flushSession(context.Background(), key, time.Duration(req.MinAgeNanos))
+		err := s.flushSession(ctx, key, time.Duration(req.MinAgeNanos))
 		return daemonResponseForInfo(nil, err)
 	case "mark_dirty":
-		err := s.markDirtySession(context.Background(), key)
+		err := s.markDirtySession(ctx, key)
 		return daemonResponseForInfo(nil, err)
 	case "prune":
-		pruned, err := s.pruneSessions(context.Background(), time.Duration(req.IdleForSeconds)*time.Second)
+		pruned, err := s.pruneSessions(ctx, daemonIdleDuration(req))
 		resp := daemonResponseForInfo(nil, err)
 		if err == nil {
 			resp.Pruned = pruned
 		}
 		return resp
 	case "end":
-		ended, err := s.endSession(context.Background(), key)
+		ended, err := s.endSession(ctx, key)
 		resp := daemonResponseForInfo(nil, err)
 		if err == nil {
 			resp.Ended = ended
@@ -690,6 +775,23 @@ func daemonResponseForInfo(info *daemonSessionInfo, err error) daemonResponse {
 func daemonSessionSnapshot(sess *daemonSession) daemonSessionInfo {
 	info := sess.info
 	info.Dirty = sess.dirty
+	info.ExternalRoot = filepath.Dir(sess.menv.tempRoot)
+	info.BaseOID = sess.baseOID
+	info.Generation = sess.generation
+	info.LastDurableGeneration = sess.lastDurableGeneration
+	info.ViewGeneration = sess.viewGeneration
+	info.LastError = sess.lastError
+	info.State = "ready"
+	if sess.dirty {
+		info.State = "dirty"
+	}
+	if sess.busy {
+		info.State = "mutating"
+	}
+	if sess.lastError != "" {
+		info.State = "recovery_required"
+		info.RecoveryRoot = sess.sess.Root
+	}
 	info.Busy = sess.busy
 	info.BusyOwnerPID = sess.busyOwnerPID
 	if !sess.createdAt.IsZero() {
@@ -712,13 +814,22 @@ func daemonSessionSnapshot(sess *daemonSession) daemonSessionInfo {
 
 func daemonSessionMetaSnapshot(sess *daemonSession) daemonSessionMeta {
 	meta := daemonSessionMeta{
-		SessionKey:     sess.key,
-		Config:         sess.config,
-		SessionRoot:    sess.sess.Root,
-		FlushCount:     sess.flushCount,
-		FlushSkipped:   sess.flushSkipped,
-		RecoveredCount: sess.recoveredCount,
-		Dirty:          sess.dirty,
+		SessionKey:            sess.key,
+		Config:                sess.config,
+		SessionRoot:           sess.sess.Root,
+		FlushCount:            sess.flushCount,
+		FlushSkipped:          sess.flushSkipped,
+		RecoveredCount:        sess.recoveredCount,
+		Dirty:                 sess.dirty,
+		BaseOID:               sess.baseOID,
+		Generation:            sess.generation,
+		LastDurableGeneration: sess.lastDurableGeneration,
+		ViewGeneration:        sess.viewGeneration,
+		LastError:             sess.lastError,
+		BusyOwnerPID:          sess.busyOwnerPID,
+		BusyOwnerStart:        sess.busyOwnerStart,
+		InitialIgnored:        sess.initialIgnored,
+		ExternalRoot:          filepath.Dir(sess.menv.tempRoot),
 	}
 	if !sess.createdAt.IsZero() {
 		meta.CreatedUnix = sess.createdAt.Unix()
@@ -757,19 +868,46 @@ func writeDaemonSessionMeta(path string, meta daemonSessionMeta) error {
 	if err := enc.Encode(meta); err != nil {
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func readDaemonSessionMeta(path string) (daemonSessionMeta, error) {
-	data, err := os.ReadFile(path)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return daemonSessionMeta{}, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return daemonSessionMeta{}, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return daemonSessionMeta{}, fmt.Errorf("invalid session metadata file")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (64<<10)+1))
+	if err != nil {
+		return daemonSessionMeta{}, err
+	}
+	if len(data) > 64<<10 {
+		return daemonSessionMeta{}, fmt.Errorf("session metadata too large")
 	}
 	var meta daemonSessionMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
@@ -779,8 +917,11 @@ func readDaemonSessionMeta(path string) (daemonSessionMeta, error) {
 }
 
 func (s *daemonState) ensureSession(ctx context.Context, sessionKey string, cfg daemonSessionConfig) (*daemonSessionInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lockSession(ctx, sessionKey)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	sess, err := s.ensureSessionLocked(ctx, sessionKey, cfg)
 	if err != nil {
 		return nil, err
@@ -790,8 +931,11 @@ func (s *daemonState) ensureSession(ctx context.Context, sessionKey string, cfg 
 }
 
 func (s *daemonState) acquireExec(ctx context.Context, sessionKey string, ownerPID int, cfg daemonSessionConfig) (*daemonSessionInfo, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lockSession(ctx, sessionKey)
+	if err != nil {
+		return nil, "", err
+	}
+	defer unlock()
 	sess, err := s.ensureSessionLocked(ctx, sessionKey, cfg)
 	if err != nil {
 		return nil, "", err
@@ -804,56 +948,112 @@ func (s *daemonState) acquireExec(ctx context.Context, sessionKey string, ownerP
 	}
 	masks, initialIgnored, err := maskIgnoredFiles(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.menv.emptyFile, sess.menv.emptyDir, sess.config.options(), sess.mount, s.log)
 	if err != nil {
-		_ = umountPathsReverse(sess.mount, masks)
-		return nil, "", model.Wrap(model.ExitEnv, "mask ignored files", err)
+		return nil, "", s.abortAcquire(sess, masks, model.Wrap(model.ExitEnv, "mask ignored files", err))
 	}
 	leaseID, err := daemonNonce()
 	if err != nil {
-		_ = umountPathsReverse(sess.mount, masks)
-		return nil, "", model.Wrap(model.ExitEnv, "create daemon lease", err)
+		return nil, "", s.abortAcquire(sess, masks, model.Wrap(model.ExitEnv, "create daemon lease", err))
 	}
+	old := daemonSessionMetaSnapshot(sess)
 	sess.ignoredMasks = masks
-	sess.initialIgnored = initialIgnored
+	if !sess.dirty {
+		sess.initialIgnored = initialIgnored
+	}
 	sess.busy = true
 	sess.busyOwnerPID = ownerPID
+	sess.busyOwnerStart = processStartTime(ownerPID)
 	sess.busyLease = leaseID
+	sess.generation++
 	sess.lastUsed = s.deps.now()
 	sess.dirty = true
 	if err := s.persistSessionLocked(sess); err != nil {
-		return nil, "", err
+		unmaskErr := umountPathsReverse(sess.mount, masks)
+		if unmaskErr == nil {
+			sess.ignoredMasks = nil
+			sess.busy = false
+			sess.busyOwnerPID = 0
+			sess.busyOwnerStart = ""
+			sess.busyLease = ""
+			sess.dirty = old.Dirty
+			sess.generation = old.Generation
+			sess.initialIgnored = old.InitialIgnored
+		} else {
+			sess.lastError = unmaskErr.Error()
+		}
+		s.cacheSession(sess)
+		return nil, "", errors.Join(err, unmaskErr)
 	}
 	info := daemonSessionSnapshot(sess)
 	return &info, leaseID, nil
 }
 
 func (s *daemonState) listSessions(ctx context.Context) ([]daemonSessionInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.restorePersistedSessionsLocked(ctx); err != nil {
+	paths, err := daemonSessionMetaPaths(s.gitDir)
+	if err != nil {
 		return nil, err
 	}
-	keys := make([]string, 0, len(s.sessions))
-	for key := range s.sessions {
-		keys = append(keys, key)
+	keys := map[string]bool{}
+	for _, key := range s.sessionKeys() {
+		keys[key] = true
 	}
-	sort.Strings(keys)
-	sessions := make([]daemonSessionInfo, 0, len(keys))
-	for _, key := range keys {
-		sess := s.sessions[key]
-		if err := s.recoverBusyLocked(ctx, sess); err != nil {
+	var result []daemonSessionInfo
+	for _, path := range paths {
+		meta, err := readDaemonSessionMeta(path)
+		if err != nil {
+			result = append(result, daemonSessionInfo{SessionKey: filepath.Base(path), State: "recovery_required", LastError: err.Error()})
+			continue
+		}
+		if daemonSessionMetaPath(s.gitDir, meta.SessionKey) != path {
+			result = append(result, daemonSessionInfo{SessionKey: filepath.Base(path), State: "recovery_required", LastError: "session metadata filename/key mismatch"})
+			continue
+		}
+		keys[meta.SessionKey] = true
+	}
+	sorted := make([]string, 0, len(keys))
+	for key := range keys {
+		sorted = append(sorted, key)
+	}
+	sort.Strings(sorted)
+	for _, key := range sorted {
+		unlock, cached, err := s.trySession(ctx, key)
+		if err != nil {
 			return nil, err
 		}
-		sessions = append(sessions, daemonSessionSnapshot(sess))
+		if cached != nil {
+			result = append(result, *cached)
+			continue
+		}
+		sess, err := s.lookupSessionLocked(ctx, key)
+		if err == nil && sess != nil {
+			err = s.recoverBusyLocked(ctx, sess)
+		}
+		if err != nil {
+			meta, _ := readDaemonSessionMeta(daemonSessionMetaPath(s.gitDir, key))
+			result = append(result, daemonSessionInfo{SessionKey: key, RepoRoot: s.repoRoot, GitDir: s.gitDir, PatchPath: daemonSessionPatchPath(s.gitDir, key), RecoveryRoot: meta.SessionRoot, ExternalRoot: meta.ExternalRoot, Dirty: meta.Dirty, State: "recovery_required", LastError: err.Error(), BaseOID: meta.BaseOID})
+		} else if sess != nil {
+			result = append(result, daemonSessionSnapshot(sess))
+		}
+		unlock()
 	}
-	return sessions, nil
+	sort.Slice(result, func(i, j int) bool { return result[i].SessionKey < result[j].SessionKey })
+	return result, nil
 }
 
 func (s *daemonState) releaseExec(ctx context.Context, sessionKey, leaseID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess := s.sessions[sessionKey]
+	return s.releaseExecGeneration(ctx, sessionKey, leaseID, 0)
+}
+func (s *daemonState) releaseExecGeneration(ctx context.Context, sessionKey, leaseID string, generation uint64) error {
+	unlock, err := s.lockSession(ctx, sessionKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	sess := s.sessionByKey(sessionKey)
 	if sess == nil {
 		return model.Wrap(model.ExitEnv, "release daemon session", fmt.Errorf("session %q not found", sessionKey))
+	}
+	if generation != 0 && generation != sess.viewGeneration {
+		return model.Wrap(model.ExitEnv, "release daemon session", fmt.Errorf("view generation mismatch"))
 	}
 	if !sess.busy || sess.busyLease != leaseID {
 		return model.Wrap(model.ExitEnv, "release daemon session", fmt.Errorf("session %q lease mismatch", sessionKey))
@@ -862,8 +1062,11 @@ func (s *daemonState) releaseExec(ctx context.Context, sessionKey, leaseID strin
 }
 
 func (s *daemonState) endSession(ctx context.Context, sessionKey string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lockSession(ctx, sessionKey)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 	sess, err := s.lookupSessionLocked(ctx, sessionKey)
 	if err != nil {
 		return false, err
@@ -878,8 +1081,11 @@ func (s *daemonState) endSession(ctx context.Context, sessionKey string) (bool, 
 }
 
 func (s *daemonState) flushSession(ctx context.Context, sessionKey string, minAge time.Duration) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lockSession(ctx, sessionKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	sess, err := s.lookupSessionLocked(ctx, sessionKey)
 	if err != nil {
 		return err
@@ -891,8 +1097,11 @@ func (s *daemonState) flushSession(ctx context.Context, sessionKey string, minAg
 }
 
 func (s *daemonState) markDirtySession(ctx context.Context, sessionKey string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lockSession(ctx, sessionKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	sess, err := s.lookupSessionLocked(ctx, sessionKey)
 	if err != nil {
 		return err
@@ -900,62 +1109,115 @@ func (s *daemonState) markDirtySession(ctx context.Context, sessionKey string) e
 	if sess == nil {
 		return model.Wrap(model.ExitEnv, "mark dirty daemon session", fmt.Errorf("session %q not found", sessionKey))
 	}
+	if sess.busy {
+		return model.Wrap(model.ExitEnv, "mark dirty daemon session", fmt.Errorf("session %q is still busy", sessionKey))
+	}
 	sess.dirty = true
+	sess.generation++
 	sess.lastUsed = s.deps.now()
 	return s.persistSessionLocked(sess)
 }
 
 func (s *daemonState) pruneSessions(ctx context.Context, idleFor time.Duration) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.restorePersistedSessionsLocked(ctx); err != nil {
+	paths, err := daemonSessionMetaPaths(s.gitDir)
+	if err != nil {
 		return nil, err
 	}
-	keys := make([]string, 0, len(s.sessions))
-	for key := range s.sessions {
-		keys = append(keys, key)
+	keys := map[string]bool{}
+	for _, key := range s.sessionKeys() {
+		keys[key] = true
 	}
-	sort.Strings(keys)
+	for _, path := range paths {
+		meta, err := readDaemonSessionMeta(path)
+		if err == nil && daemonSessionMetaPath(s.gitDir, meta.SessionKey) == path {
+			keys[meta.SessionKey] = true
+		}
+	}
+	sorted := make([]string, 0, len(keys))
+	for key := range keys {
+		sorted = append(sorted, key)
+	}
+	sort.Strings(sorted)
 	now := s.deps.now()
-	pruned := make([]string, 0)
-	for _, key := range keys {
-		sess := s.sessions[key]
-		lastUsed := sess.lastUsed
-		if err := s.recoverBusyLocked(ctx, sess); err != nil {
-			return nil, err
+	pruned := []string{}
+	for _, key := range sorted {
+		unlock, err := s.lockSession(ctx, key)
+		if err != nil {
+			return pruned, err
 		}
-		if sess.busy {
+		sess, err := s.lookupSessionLocked(ctx, key)
+		if err != nil {
+			unlock()
 			continue
+		} // Preserve a broken session; continue managing the others.
+		if sess != nil {
+			lastUsed := sess.lastUsed
+			err = s.recoverBusyLocked(ctx, sess)
+			if err == nil && !sess.busy && now.Sub(lastUsed) >= idleFor {
+				err = s.endSessionLocked(ctx, key, sess)
+				if err == nil {
+					pruned = append(pruned, key)
+				}
+			}
 		}
-		if now.Sub(lastUsed) < idleFor {
-			continue
+		unlock()
+		if err != nil {
+			return pruned, err
 		}
-		if err := s.endSessionLocked(ctx, key, sess); err != nil {
-			return nil, err
-		}
-		pruned = append(pruned, key)
 	}
 	return pruned, nil
 }
 
 func (s *daemonState) closeAll() {
 	s.mu.Lock()
-	sessions := make([]*daemonSession, 0, len(s.sessions))
-	for _, sess := range s.sessions {
-		sessions = append(sessions, sess)
-	}
-	s.sessions = make(map[string]*daemonSession)
+	s.closing = true
 	s.mu.Unlock()
-	for _, sess := range sessions {
-		_ = sess.cleanup.Run()
+	for _, key := range s.operationKeys() {
+		s.mu.Lock()
+		gate := s.sessionGateLocked(key)
+		s.mu.Unlock()
+		gate <- struct{}{}
+		sess := s.sessionByKey(key)
+		if sess == nil || sess.closed {
+			<-gate
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), daemonRequestTimeout)
+		var err error
+		if sess.busy && processIdentityAlive(sess.busyOwnerPID, sess.busyOwnerStart) {
+			err = fmt.Errorf("recovery_required: mutation owner %d still alive during shutdown", sess.busyOwnerPID)
+		} else if sess.busy {
+			err = s.finishBusyLocked(ctx, sess)
+		} else if sess.dirty {
+			err = s.flushSessionLocked(ctx, key, sess, "shutdown flush", 0)
+		}
+		if err == nil {
+			err = sess.cleanup.Run()
+		}
+		if err != nil {
+			// Keep upper, worktree, mounts, and metadata. In particular never run a
+			// recursive cleanup after an unsuccessful export or a live external write.
+			sess.lastError = err.Error()
+			if sess.preserve != nil {
+				*sess.preserve = true
+			}
+			_ = s.persistSessionLocked(sess)
+			_ = sess.lock.Unlock()
+			_ = sess.store.Close()
+			s.log.Error("session preserved for recovery", "session", key, "root", sess.sess.Root, "error", err)
+		}
+		cancel()
+		sess.closed = true
+		s.removeSession(key)
+		<-gate
 	}
 }
 
 func (s *daemonState) ensureSessionLocked(ctx context.Context, sessionKey string, cfg daemonSessionConfig) (*daemonSession, error) {
-	if sessionKey == "" {
-		return nil, model.Wrap(model.ExitEnv, "daemon session key", fmt.Errorf("session-key is required"))
+	if sessionKey == "" || len(sessionKey) > 4096 {
+		return nil, model.Wrap(model.ExitEnv, "daemon session key", fmt.Errorf("session-key must contain 1 to 4096 bytes"))
 	}
-	if existing := s.sessions[sessionKey]; existing != nil {
+	if existing := s.sessionByKey(sessionKey); existing != nil {
 		if !existing.config.equal(cfg) {
 			return nil, model.Wrap(model.ExitEnv, "daemon session options", fmt.Errorf("session %q already exists with different options; end it before changing base/apply/ignored settings", sessionKey))
 		}
@@ -974,12 +1236,12 @@ func (s *daemonState) ensureSessionLocked(ctx context.Context, sessionKey string
 	if err != nil {
 		return nil, err
 	}
-	s.sessions[sessionKey] = sess
+	s.putSession(sessionKey, sess)
 	return sess, nil
 }
 
 func (s *daemonState) lookupSessionLocked(ctx context.Context, sessionKey string) (*daemonSession, error) {
-	if existing := s.sessions[sessionKey]; existing != nil {
+	if existing := s.sessionByKey(sessionKey); existing != nil {
 		return existing, nil
 	}
 	metaPath := daemonSessionMetaPath(s.gitDir, sessionKey)
@@ -990,27 +1252,10 @@ func (s *daemonState) lookupSessionLocked(ctx context.Context, sessionKey string
 		}
 		return nil, model.Wrap(model.ExitEnv, "read daemon session metadata", err)
 	}
+	if meta.SessionKey != sessionKey {
+		return nil, fmt.Errorf("session metadata key mismatch")
+	}
 	return s.restoreSessionLocked(ctx, meta, false)
-}
-
-func (s *daemonState) restorePersistedSessionsLocked(ctx context.Context) error {
-	paths, err := daemonSessionMetaPaths(s.gitDir)
-	if err != nil {
-		return model.Wrap(model.ExitEnv, "list daemon session metadata", err)
-	}
-	for _, metaPath := range paths {
-		meta, err := readDaemonSessionMeta(metaPath)
-		if err != nil {
-			return model.Wrap(model.ExitEnv, "read daemon session metadata", err)
-		}
-		if _, ok := s.sessions[meta.SessionKey]; ok {
-			continue
-		}
-		if _, err := s.restoreSessionLocked(ctx, meta, false); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *daemonState) restoreSessionByKeyLocked(ctx context.Context, sessionKey string, cfg daemonSessionConfig) (*daemonSession, error) {
@@ -1022,6 +1267,9 @@ func (s *daemonState) restoreSessionByKeyLocked(ctx context.Context, sessionKey 
 		}
 		return nil, model.Wrap(model.ExitEnv, "read daemon session metadata", err)
 	}
+	if meta.SessionKey != sessionKey {
+		return nil, fmt.Errorf("session metadata key mismatch")
+	}
 	if !meta.Config.equal(cfg) {
 		return nil, model.Wrap(model.ExitEnv, "daemon session options", fmt.Errorf("session %q already exists with different options; end it before changing base/apply/ignored settings", sessionKey))
 	}
@@ -1029,22 +1277,32 @@ func (s *daemonState) restoreSessionByKeyLocked(ctx context.Context, sessionKey 
 }
 
 func (s *daemonState) restoreSessionLocked(ctx context.Context, meta daemonSessionMeta, bumpLastUsed bool) (*daemonSession, error) {
-	if existing := s.sessions[meta.SessionKey]; existing != nil {
+	if existing := s.sessionByKey(meta.SessionKey); existing != nil {
 		return existing, nil
 	}
 	if meta.SessionKey == "" {
 		return nil, model.Wrap(model.ExitEnv, "restore daemon session", fmt.Errorf("session metadata is missing session_key"))
 	}
-	if meta.SessionRoot != "" {
-		sessionsRoot := filepath.Join(s.gitDir, "persona", "sessions")
-		root := filepath.Clean(meta.SessionRoot)
-		if ok, _ := isSubpath(root, sessionsRoot); ok {
-			if err := os.RemoveAll(root); err != nil {
-				return nil, model.Wrap(model.ExitEnv, "remove stale daemon session root", err)
-			}
+	// Never delete a path supplied by recovery metadata. Dirty upper layers and
+	// their immutable worktree are reopened in place only after ownership checks.
+	if meta.Dirty && processIdentityAlive(meta.BusyOwnerPID, meta.BusyOwnerStart) {
+		return nil, model.Wrap(model.ExitEnv, "restore daemon session", fmt.Errorf("recovery_required: previous mutation owner %d is still alive; preserved %s", meta.BusyOwnerPID, meta.SessionRoot))
+	}
+	if !meta.Dirty && meta.SessionRoot != "" {
+		if _, err := os.Lstat(meta.SessionRoot); err == nil {
+			return nil, fmt.Errorf("recovery_required: stale root retained; run daemon recover --session-key %s: %s", meta.SessionKey, meta.SessionRoot)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
 		}
 	}
-	sess, err := s.createSessionLocked(ctx, meta.SessionKey, meta.Config)
+	if meta.ExternalRoot != "" {
+		if _, err := os.Lstat(meta.ExternalRoot); err == nil {
+			return nil, fmt.Errorf("recovery_required: stale external mounts/backing retained: %s", meta.ExternalRoot)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	sess, err := s.createSessionFromMeta(ctx, meta.SessionKey, meta.Config, &meta)
 	if err != nil {
 		return nil, err
 	}
@@ -1063,8 +1321,14 @@ func (s *daemonState) restoreSessionLocked(ctx context.Context, meta daemonSessi
 	sess.flushCount = meta.FlushCount
 	sess.flushSkipped = meta.FlushSkipped
 	sess.recoveredCount = meta.RecoveredCount + 1
-	sess.dirty = false
-	s.sessions[meta.SessionKey] = sess
+	sess.generation = meta.Generation
+	sess.lastDurableGeneration = meta.LastDurableGeneration
+	sess.dirty = meta.Dirty
+	sess.viewGeneration = meta.ViewGeneration + 1
+	if sess.viewGeneration == 0 {
+		sess.viewGeneration = 1
+	}
+	s.putSession(meta.SessionKey, sess)
 	if err := s.persistSessionLocked(sess); err != nil {
 		return nil, err
 	}
@@ -1072,20 +1336,29 @@ func (s *daemonState) restoreSessionLocked(ctx context.Context, meta daemonSessi
 }
 
 func (s *daemonState) persistSessionLocked(sess *daemonSession) error {
-	if err := writeDaemonSessionMeta(sess.metaPath, daemonSessionMetaSnapshot(sess)); err != nil {
+	s.cacheSession(sess)
+	write := s.deps.writeMeta
+	if write == nil {
+		write = writeDaemonSessionMeta
+	}
+	if err := write(sess.metaPath, daemonSessionMetaSnapshot(sess)); err != nil {
 		return model.Wrap(model.ExitWrite, "write daemon session metadata", err)
 	}
 	return nil
 }
 
 func (s *daemonState) createSessionLocked(ctx context.Context, sessionKey string, cfg daemonSessionConfig) (_ *daemonSession, retErr error) {
+	return s.createSessionFromMeta(ctx, sessionKey, cfg, nil)
+}
+
+func (s *daemonState) createSessionFromMeta(ctx context.Context, sessionKey string, cfg daemonSessionConfig, prior *daemonSessionMeta) (_ *daemonSession, retErr error) {
 	patchPath := daemonSessionPatchPath(s.gitDir, sessionKey)
 	metaPath := daemonSessionMetaPath(s.gitDir, sessionKey)
 	patchStore, err := patchio.OpenPatchStore(patchPath)
 	if err != nil {
 		return nil, model.Wrap(model.ExitWrite, "open patch store", err)
 	}
-	lock, err := patchStore.Lock()
+	lock, err := patchStore.LockContext(ctx)
 	if err != nil {
 		_ = patchStore.Close()
 		return nil, model.Wrap(model.ExitWrite, "lock patch", err)
@@ -1095,15 +1368,39 @@ func (s *daemonState) createSessionLocked(ctx context.Context, sessionKey string
 	cleanup.Push(func() error { return lock.Unlock() })
 	defer func() {
 		if retErr != nil {
-			_ = cleanup.Run()
+			retErr = errors.Join(retErr, cleanup.Run())
 		}
 	}()
 
-	sess, err := session.Create(s.gitDir)
-	if err != nil {
-		return nil, model.Wrap(model.ExitEnv, "create session", err)
+	var sess *session.Session
+	reuse := prior != nil && prior.Dirty
+	preserve := reuse
+	if reuse {
+		sess, err = session.Open(s.gitDir, prior.SessionRoot)
+		if err != nil {
+			return nil, model.Wrap(model.ExitEnv, "recovery_required: validate preserved session", err)
+		}
+		mounted, merr := session.HasMounts(sess.Root)
+		if merr != nil {
+			return nil, merr
+		}
+		if mounted {
+			return nil, model.Wrap(model.ExitEnv, "recovery_required", fmt.Errorf("preserved session still has mounts; stop previous owners and unmount before recovery: %s", sess.Root))
+		}
+	} else {
+		// A clean stale root is retained for inspection rather than traversed or
+		// removed using metadata. Normal successful shutdown already removes it.
+		sess, err = session.Create(s.gitDir)
+		if err != nil {
+			return nil, model.Wrap(model.ExitEnv, "create session", err)
+		}
 	}
-	cleanup.Push(func() error { return sess.RemoveAll() })
+	cleanup.Push(func() error {
+		if preserve {
+			return nil
+		}
+		return sess.RemoveAll()
+	})
 
 	repoReal := resolvePath(s.repoRoot)
 	patchReal := resolvePath(patchPath)
@@ -1113,20 +1410,114 @@ func (s *daemonState) createSessionLocked(ctx context.Context, sessionKey string
 	}
 	g := s.deps.newGit(s.repoRoot, s.gitDir, false)
 	baseOpts := cfg.options()
-	basePath, err := prepareBase(ctx, g, baseOpts, sess, patchInRepo, patchRel, cleanup, &retErr)
-	if err != nil {
-		return nil, err
+	baseOpts.KeepSession = model.KeepAlways
+	pinned := ""
+	if prior != nil {
+		pinned = prior.BaseOID
+		if pinned == "" {
+			if _, ok := g.(interface{ SetBaseOID(string) }); ok {
+				return nil, model.Wrap(model.ExitRepo, "recover base", fmt.Errorf("legacy session has no immutable base OID; preserve and inspect %s", prior.SessionRoot))
+			}
+		}
+	} else {
+		pinned, err = s.loadPatchBase(sessionKey, cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if pinned != "" {
+		if cfg.BaseMode == model.BaseRepo {
+			probe := s.deps.newGit(s.repoRoot, s.gitDir, false)
+			if resolver, ok := probe.(interface {
+				ResolveBase(context.Context, string) (string, error)
+			}); ok {
+				current, err := resolver.ResolveBase(ctx, "HEAD")
+				if err != nil {
+					return nil, err
+				}
+				if current != pinned {
+					return nil, fmt.Errorf("repo-mode lower HEAD differs from saved base; preserve the patch and use a matching worktree base")
+				}
+			}
+		}
+		if real, ok := g.(interface{ SetBaseOID(string) }); ok {
+			real.SetBaseOID(pinned)
+		}
+	}
+
+	var basePath string
+	if reuse {
+		if err := validateDaemonOwner(sess.Root, sessionKey, prior.BaseOID); err != nil {
+			return nil, err
+		}
+		if cfg.BaseMode == model.BaseWorktree {
+			basePath = sess.BaseWT
+		} else {
+			return nil, model.Wrap(model.ExitRepo, "recovery_required", fmt.Errorf("dirty repo-mode lower layer cannot be verified; preserved %s", sess.Root))
+		}
+	} else {
+		basePath, err = prepareBase(ctx, g, baseOpts, sess, patchInRepo, patchRel, cleanup, &retErr)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if cfg.BaseMode == model.BaseWorktree {
+		cleanup.Push(func() error {
+			if preserve {
+				return nil
+			}
+			mounted, err := session.HasMounts(sess.Root)
+			if err != nil {
+				return err
+			}
+			if mounted {
+				return fmt.Errorf("refuse to remove mounted session worktree %s", sess.BaseWT)
+			}
+			return g.WorktreeRemoveForce(context.Background(), sess.BaseWT)
+		})
+	}
+
+	if !reuse {
+		oid := ""
+		if pinned, ok := g.(interface{ PinnedBaseOID() string }); ok {
+			oid = pinned.PinnedBaseOID()
+		}
+		if err := writeDaemonOwner(sess.Root, sessionKey, oid); err != nil {
+			return nil, err
+		}
 	}
 	mount := s.deps.newMount()
 	menv, err := setupMountTargetEnv(sess.View, s.gitDir, basePath, sess, mount, cleanup, s.log)
 	if err != nil {
 		return nil, err
 	}
+	externalRoot := filepath.Dir(menv.tempRoot)
+	oid := ""
+	if pinned, ok := g.(interface{ PinnedBaseOID() string }); ok {
+		oid = pinned.PinnedBaseOID()
+	}
+	if err := writeDaemonOwner(externalRoot, sessionKey, oid); err != nil {
+		return nil, err
+	}
 	pushUmountCleanup(cleanup, mount, sess.View)
 	maskTargets := make([]string, 0, 4)
+	cleanup.Push(func() error { return umountPathsReverse(mount, maskTargets) })
 	commandMaskPaths := patchStatePathsForRepo(sess.View, patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git", patchRel).abs
-	if err := applyPatchStore(ctx, g, cfg.ApplyMode, patchStore, sess.View, menv.gitDirForOps, sess.Root, s.log); err != nil {
-		return nil, model.Wrap(model.ExitApply, "apply patch", err)
+	if !reuse {
+		if err := applyPatchStore(ctx, g, cfg.ApplyMode, patchStore, sess.View, menv.gitDirForOps, sess.Root, s.log); err != nil {
+			return nil, model.Wrap(model.ExitApply, "apply patch", err)
+		}
+	}
+	initialIgnored, err := listIgnoredCandidatesChecked(ctx, g, sess.View, menv.gitDirForOps, cfg.IgnoredMax)
+	if cfg.IgnoredMax == 0 {
+		initialIgnored = nil
+		err = nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if reuse {
+		initialIgnored = prior.InitialIgnored
 	}
 	for _, patchMaskPath := range commandMaskPaths {
 		if err := maskPathWithBacking(mount, patchMaskPath, model.MaskFile, menv.emptyFile, menv.emptyDir); err != nil {
@@ -1145,9 +1536,6 @@ func (s *daemonState) createSessionLocked(ctx context.Context, sessionKey string
 		}
 		maskTargets = append(maskTargets, gitPath)
 	}
-	cleanup.Push(func() error {
-		return umountPathsReverse(mount, maskTargets)
-	})
 	info := daemonSessionInfo{
 		SessionKey: sessionKey,
 		RepoRoot:   s.repoRoot,
@@ -1157,25 +1545,37 @@ func (s *daemonState) createSessionLocked(ctx context.Context, sessionKey string
 	}
 	createdAt := s.deps.now()
 	daemonSess := &daemonSession{
-		key:         sessionKey,
-		config:      cfg,
-		info:        info,
-		metaPath:    metaPath,
-		store:       patchStore,
-		lock:        lock,
-		sess:        sess,
-		cleanup:     cleanup,
-		g:           g,
-		mount:       mount,
-		menv:        menv,
-		patchInRepo: patchInRepo,
-		patchRel:    patchRel,
-		createdAt:   createdAt,
-		lastUsed:    createdAt,
+		key:            sessionKey,
+		config:         cfg,
+		info:           info,
+		metaPath:       metaPath,
+		store:          patchStore,
+		lock:           lock,
+		sess:           sess,
+		cleanup:        cleanup,
+		g:              g,
+		mount:          mount,
+		menv:           menv,
+		patchInRepo:    patchInRepo,
+		patchRel:       patchRel,
+		createdAt:      createdAt,
+		lastUsed:       createdAt,
+		initialIgnored: initialIgnored,
+		viewGeneration: 1,
+		preserve:       &preserve,
 	}
-	if err := s.persistSessionLocked(daemonSess); err != nil {
+	if real, ok := g.(interface{ PinnedBaseOID() string }); ok {
+		daemonSess.baseOID = real.PinnedBaseOID()
+	}
+	if err := s.retainPatchBase(ctx, g, sessionKey, cfg, daemonSess.baseOID); err != nil {
 		return nil, err
 	}
+	if prior == nil {
+		if err := s.persistSessionLocked(daemonSess); err != nil {
+			return nil, err
+		}
+	}
+	preserve = false
 	return daemonSess, nil
 }
 
@@ -1183,7 +1583,7 @@ func (s *daemonState) recoverBusyLocked(ctx context.Context, sess *daemonSession
 	if !sess.busy {
 		return nil
 	}
-	if processAlive(sess.busyOwnerPID) {
+	if processIdentityAlive(sess.busyOwnerPID, sess.busyOwnerStart) {
 		return nil
 	}
 	return s.finishBusyLocked(ctx, sess)
@@ -1204,22 +1604,21 @@ func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string,
 		}
 		return nil
 	}
-	var currentIgnored []string
-	if sess.config.IgnoredMax != 0 {
-		var err error
-		currentIgnored, err = listIgnoredCandidatesChecked(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.config.IgnoredMax)
-		if err != nil {
-			return model.Wrap(model.ExitEnv, "list ignored files", err)
-		}
-	}
-	if err := s.writeSessionPatch(ctx, sess, currentIgnored); err != nil {
+	if err := s.writeSessionPatch(ctx, sess, sess.initialIgnored); err != nil {
+		sess.dirty = true
+		sess.lastError = err.Error()
+		_ = s.persistSessionLocked(sess)
 		return err
 	}
 	sess.lastUsed = now
 	sess.lastFlushed = now
 	sess.flushCount++
 	sess.dirty = false
+	sess.lastError = ""
+	sess.lastDurableGeneration = sess.generation
 	if err := s.persistSessionLocked(sess); err != nil {
+		sess.dirty = true
+		sess.lastError = err.Error()
 		return err
 	}
 	return nil
@@ -1235,43 +1634,40 @@ func (s *daemonState) endSessionLocked(ctx context.Context, sessionKey string, s
 	if err := os.Remove(sess.metaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return model.Wrap(model.ExitWrite, "remove daemon session metadata", err)
 	}
-	delete(s.sessions, sessionKey)
+	s.removeSession(sessionKey)
 	return nil
 }
 
 func (s *daemonState) finishBusyLocked(ctx context.Context, sess *daemonSession) error {
 	exportErr := s.writeSessionPatch(ctx, sess, sess.initialIgnored)
-	unmaskErr := umountPathsReverse(sess.mount, sess.ignoredMasks)
+	if err := umountPathsReverse(sess.mount, sess.ignoredMasks); err != nil {
+		sess.lastError = err.Error()
+		sess.dirty = true
+		_ = s.persistSessionLocked(sess)
+		return errors.Join(exportErr, model.Wrap(model.ExitEnv, "unmask ignored files", err))
+	}
 	sess.ignoredMasks = nil
-	sess.initialIgnored = nil
 	sess.busy = false
 	sess.busyOwnerPID = 0
+	sess.busyOwnerStart = ""
 	sess.busyLease = ""
 	sess.lastUsed = s.deps.now()
 	if exportErr == nil {
 		sess.lastFlushed = sess.lastUsed
 		sess.flushCount++
 		sess.dirty = false
+		sess.lastError = ""
+		sess.lastDurableGeneration = sess.generation
+	} else {
+		sess.dirty = true
+		sess.lastError = exportErr.Error()
 	}
-	if persistErr := s.persistSessionLocked(sess); persistErr != nil {
-		if exportErr != nil {
-			exportErr = errors.Join(exportErr, persistErr)
-		} else if unmaskErr != nil {
-			unmaskErr = errors.Join(unmaskErr, persistErr)
-		} else {
-			return persistErr
-		}
+	if err := s.persistSessionLocked(sess); err != nil {
+		sess.dirty = true
+		sess.lastError = err.Error()
+		return errors.Join(exportErr, err)
 	}
-	if exportErr != nil && unmaskErr != nil {
-		return errors.Join(exportErr, model.Wrap(model.ExitEnv, "unmask ignored files", unmaskErr))
-	}
-	if exportErr != nil {
-		return exportErr
-	}
-	if unmaskErr != nil {
-		return model.Wrap(model.ExitEnv, "unmask ignored files", unmaskErr)
-	}
-	return nil
+	return exportErr
 }
 
 func (s *daemonState) writeSessionPatch(ctx context.Context, sess *daemonSession, initialIgnored []string) error {
@@ -1301,7 +1697,7 @@ func processAlive(pid int) bool {
 }
 
 func daemonNonce() (string, error) {
-	buf := make([]byte, 6)
+	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
@@ -1339,17 +1735,26 @@ func daemonSessionMetaPaths(gitDir string) ([]string, error) {
 }
 
 func daemonSafeName(raw string) string {
-	replacer := strings.NewReplacer("/", "-", "\\", "-", " ", "-")
-	name := replacer.Replace(strings.TrimSpace(raw))
-	name = strings.Trim(name, "-.")
+	var out strings.Builder
+	for _, r := range strings.TrimSpace(raw) {
+		if out.Len() >= 48 {
+			break
+		}
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
+			out.WriteRune(r)
+		} else {
+			out.WriteByte('-')
+		}
+	}
+	name := strings.Trim(out.String(), "-.")
 	if name == "" {
 		return "session"
 	}
 	return name
 }
-
 func daemonSocketPath(gitDir string) string {
-	return filepath.Join(gitDir, "persona", "daemon", daemonSocketFile)
+	digest := sha256.Sum256([]byte(filepath.Clean(gitDir)))
+	return filepath.Join("/tmp", fmt.Sprintf("persona-%d", os.Getuid()), hex.EncodeToString(digest[:16])+".sock")
 }
 
 func ensureDaemonDir(gitDir string) (string, error) {
@@ -1393,7 +1798,7 @@ func newDaemonClient(ctx context.Context, repoRoot, gitDir string) (*daemonClien
 
 func ensureDaemonRunning(ctx context.Context, repoRoot, gitDir string) (string, error) {
 	socketPath := daemonSocketPath(gitDir)
-	if err := daemonPing(ctx, socketPath); err == nil {
+	if err := daemonPingRepo(ctx, socketPath, repoRoot, gitDir); err == nil {
 		return socketPath, nil
 	}
 	daemonDir, err := ensureDaemonDir(gitDir)
@@ -1405,17 +1810,14 @@ func ensureDaemonRunning(ctx context.Context, repoRoot, gitDir string) (string, 
 		return "", model.Wrap(model.ExitEnv, "open daemon launch lock", err)
 	}
 	defer lockFile.Close()
-	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX); err != nil {
+	if err := flockContext(ctx, lockFile); err != nil {
 		return "", model.Wrap(model.ExitEnv, "lock daemon launch", err)
 	}
 	defer func() {
 		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
 	}()
-	if err := daemonPing(ctx, socketPath); err == nil {
+	if err := daemonPingRepo(ctx, socketPath, repoRoot, gitDir); err == nil {
 		return socketPath, nil
-	}
-	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", model.Wrap(model.ExitEnv, "remove stale daemon socket", err)
 	}
 	if err := spawnDaemonServer(repoRoot, gitDir, socketPath); err != nil {
 		return "", err
@@ -1433,8 +1835,14 @@ func spawnDaemonServer(repoRoot, gitDir, socketPath string) error {
 	}
 	cmd := exec.Command(exe, "daemon", "serve", "--repo-root", repoRoot, "--git-dir", gitDir, "--socket", socketPath)
 	cmd.Stdin = nil
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	logPath := filepath.Join(gitDir, "persona", "daemon", "daemon.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return model.Wrap(model.ExitEnv, "start daemon server", err)
@@ -1454,21 +1862,33 @@ func waitForDaemon(ctx context.Context, socketPath string) error {
 		if time.Now().After(deadline) {
 			return model.Wrap(model.ExitEnv, "wait for daemon server", fmt.Errorf("timed out waiting for %s", socketPath))
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 }
 
 func daemonPing(ctx context.Context, socketPath string) error {
-	dialer := &net.Dialer{Timeout: 150 * time.Millisecond}
-	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	ctx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancel()
+	c := &daemonClient{socketPath: socketPath}
+	resp, err := c.call(ctx, daemonRequest{Method: "ping"})
 	if err != nil {
 		return err
 	}
-	_ = conn.Close()
+	if resp.Version != daemonProtocol {
+		return fmt.Errorf("daemon protocol mismatch")
+	}
 	return nil
 }
 
 func (c *daemonClient) call(ctx context.Context, req daemonRequest) (*daemonResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, daemonRequestTimeout)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	req.DeadlineNanos = deadline.UnixNano()
 	req.RepoRoot = c.repoRoot
 	req.GitDir = c.gitDir
 	dialer := &net.Dialer{}
@@ -1477,11 +1897,14 @@ func (c *daemonClient) call(ctx context.Context, req daemonRequest) (*daemonResp
 		return nil, model.Wrap(model.ExitEnv, "connect daemon", err)
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(deadline)
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "encode daemon request", err)
 	}
 	var resp daemonResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, 4<<20)).Decode(&resp); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "decode daemon response", err)
 	}
 	if resp.Error != "" {
@@ -1560,6 +1983,7 @@ func (c *daemonClient) prune(ctx context.Context, idleFor time.Duration) ([]stri
 	resp, err := c.call(ctx, daemonRequest{
 		Method:         "prune",
 		IdleForSeconds: int64(idleFor / time.Second),
+		IdleForNanos:   int64(idleFor),
 	})
 	if err != nil {
 		return nil, err
