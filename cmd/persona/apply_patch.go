@@ -46,60 +46,49 @@ func applyPatchStore(ctx context.Context, g model.GitOps, applyMode model.ApplyM
 	if file == nil {
 		return nil
 	}
-	info, statErr := file.Stat()
-	_ = file.Close()
-	if statErr == nil && info.Size() == 0 {
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() > patchio.MaxPatchBytes {
+		return fmt.Errorf("patch exceeds size limit of %d bytes: %d", patchio.MaxPatchBytes, info.Size())
+	}
+	// Read once into a bounded, private snapshot. Reopening or merely seeking
+	// the original file lets an uncooperative writer replace or alter the
+	// bytes between validation, apply, and the existing-file fallback.
+	data, err := io.ReadAll(io.LimitReader(file, patchio.MaxPatchBytes+1))
+	if err != nil {
+		return err
+	}
+	if err := patchio.CheckPatchSize(len(data)); err != nil {
+		return err
+	}
+	if len(data) == 0 {
 		return nil
 	}
-
-	file, err = openPatchStoreRead(store, "validation reopen", false)
-	if err != nil {
+	if err := patchio.ValidatePatchReader(bytes.NewReader(data)); err != nil {
 		return err
 	}
-	err = patchio.ValidatePatchReader(file)
-	_ = file.Close()
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	file, err = openPatchStoreRead(store, "apply reopen", false)
-	if err != nil {
-		return err
-	}
-	err = g.ApplyPatchReader(ctx, applyMode, repoRoot, gitDirForOps, file)
-	_ = file.Close()
+	err = g.ApplyPatchReader(ctx, applyMode, repoRoot, gitDirForOps, bytes.NewReader(data))
 	if err == nil {
 		return nil
 	}
 
-	filtered, ferr := os.CreateTemp(scratchDir, "persona-filter-*.patch")
-	if ferr != nil {
-		return ferr
-	}
-	defer closeAndRemoveTempFile(filtered)
-
-	file, ferr = openPatchStoreRead(store, "filter reopen", false)
-	if ferr != nil {
-		return ferr
-	}
-	skipped, ferr := patchio.FilterExistingNewFilesReader(file, repoRoot, filtered)
-	_ = file.Close()
+	var filtered bytes.Buffer
+	skipped, ferr := patchio.FilterExistingNewFilesReader(bytes.NewReader(data), repoRoot, &filtered)
 	if ferr != nil {
 		return ferr
 	}
 	return retryFilteredExistingNewFiles(applyMode, err, skipped, log,
 		func() (bool, error) {
-			filteredInfo, statErr := filtered.Stat()
-			if statErr != nil {
-				return false, statErr
-			}
-			return filteredInfo.Size() == 0, nil
+			return filtered.Len() == 0, nil
 		},
 		func() error {
-			if _, seekErr := filtered.Seek(0, io.SeekStart); seekErr != nil {
-				return seekErr
-			}
-			return g.ApplyPatchReader(ctx, applyMode, repoRoot, gitDirForOps, filtered)
+			return g.ApplyPatchReader(ctx, applyMode, repoRoot, gitDirForOps, bytes.NewReader(filtered.Bytes()))
 		},
 	)
 }

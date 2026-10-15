@@ -2,10 +2,12 @@ package patchio
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -212,6 +214,26 @@ func TestEnsurePatchPathAutoRejectsSymlinkedPersonaDir(t *testing.T) {
 	}
 }
 
+func TestEnsurePatchPathAllowsFinalSymlinkBeforeCLIResolution(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real.patch")
+		link := filepath.Join(dir, "link.patch")
+		if existing {
+			if err := os.WriteFile(target, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		got, err := EnsurePatchPath(model.Options{PatchPath: link}, dir, time.Now())
+		if err != nil || got != link {
+			t.Fatalf("final symlink must reach CLI resolution: %q %v", got, err)
+		}
+	}
+}
+
 func TestEnsurePatchPathExplicitRejectsSymlinkedParentDir(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
@@ -281,11 +303,11 @@ func TestIsAlreadyExistsError(t *testing.T) {
 		err  error
 		want bool
 	}{
-		"nil":                 {err: nil, want: false},
-		"english":             {err: errors.New("same.txt: already exists in working directory"), want: true},
-		"localized german":    {err: errors.New("Datei existiert bereits"), want: true},
+		"nil":                  {err: nil, want: false},
+		"english":              {err: errors.New("same.txt: already exists in working directory"), want: true},
+		"localized german":     {err: errors.New("Datei existiert bereits"), want: true},
 		"path aware localized": {err: errors.New("same.txt: Datei existiert bereits"), want: true},
-		"unrelated":           {err: errors.New("patch does not apply"), want: false},
+		"unrelated":            {err: errors.New("patch does not apply"), want: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := IsAlreadyExistsError(tc.err); got != tc.want {
@@ -1148,55 +1170,28 @@ func TestPatchStoreReadAllRejectsPatchOverSizeLimit(t *testing.T) {
 	}
 }
 
-func TestPatchStoreReadAllRejectsStreamingInputOverSizeLimit(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "state.patch")
+func TestPatchStoreReadAllRejectsFIFOWithoutWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.patch")
 	if err := syscall.Mkfifo(path, 0o644); err != nil {
 		t.Fatalf("mkfifo: %v", err)
 	}
-
-	done := make(chan error, 1)
-	go func() {
-		file, err := os.OpenFile(path, os.O_WRONLY, 0)
-		if err != nil {
-			done <- err
-			return
-		}
-		defer file.Close()
-
-		chunk := bytes.Repeat([]byte("a"), 64*1024)
-		remaining := MaxPatchBytes + 1
-		for remaining > 0 {
-			part := chunk
-			if remaining < len(part) {
-				part = part[:remaining]
-			}
-			if _, err := file.Write(part); err != nil {
-				done <- err
-				return
-			}
-			remaining -= len(part)
-		}
-		done <- nil
-	}()
-
 	store, err := OpenPatchStore(path)
 	if err != nil {
-		t.Fatalf("open patch store: %v", err)
+		t.Fatal(err)
 	}
 	defer store.Close()
-	data, err := readPatchStore(store)
-	if err == nil {
-		t.Fatal("expected oversize streaming patch read to fail")
-	}
-	if data != nil {
-		t.Fatalf("expected nil data on oversize streaming failure, got %d bytes", len(data))
-	}
-	if !strings.Contains(err.Error(), "patch exceeds size limit") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if writeErr := <-done; writeErr != nil && !errors.Is(writeErr, syscall.EPIPE) {
-		t.Fatalf("fifo writer error: %v", writeErr)
+	done := make(chan error, 1)
+	go func() {
+		_, err := readPatchStore(store)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("expected a regular-file error, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("opening a FIFO patch waited for a writer")
 	}
 }
 
@@ -1464,5 +1459,222 @@ func TestParsePatchBlocksIgnoresPreHeaderLines(t *testing.T) {
 	}
 	if blocks[0].path != "foo.txt" {
 		t.Fatalf("expected path foo.txt, got %q", blocks[0].path)
+	}
+}
+
+func TestPatchDescriptorsCloseOnExec(t *testing.T) {
+	if os.Getenv("PERSONA_PATCHIO_FD_HELPER") == "1" {
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			os.Exit(2)
+		}
+		for _, entry := range entries {
+			if path, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name())); err == nil {
+				fmt.Println(path)
+			}
+		}
+		os.Exit(0)
+	}
+	path := filepath.Join(t.TempDir(), "internal-state.patch")
+	store, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.WriteAll([]byte("state")); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := store.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Unlock()
+	patch, err := store.OpenRead()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer patch.Close()
+	tmp, tmpName, err := createAtomicTempFileAt(store.dir, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tmp.Close()
+	defer unix.Unlinkat(int(store.dir.Fd()), tmpName, 0)
+	for _, file := range []*os.File{store.dir, lock.file, patch, tmp} {
+		flags, err := unix.FcntlInt(file.Fd(), unix.F_GETFD, 0)
+		if err != nil || flags&unix.FD_CLOEXEC == 0 {
+			t.Fatalf("descriptor %s has no CLOEXEC flag: flags=%d err=%v", file.Name(), flags, err)
+		}
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPatchDescriptorsCloseOnExec$")
+	cmd.Env = append(os.Environ(), "PERSONA_PATCHIO_FD_HELPER=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("inspect child descriptors: %v: %s", err, out)
+	}
+	for _, internal := range []string{path, path + ".lock", filepath.Join(filepath.Dir(path), tmpName)} {
+		if strings.Contains(string(out), internal) {
+			t.Fatalf("child inherited internal file %s: %s", internal, out)
+		}
+	}
+}
+
+func TestPatchStoreLockContextCancelsAndCanBeReacquired(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.patch")
+	first, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	lock, err := first.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Unlock()
+	second, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := second.LockContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline while another holder owns the lock, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("lock cancellation took %v", elapsed)
+	}
+	if err := lock.Unlock(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Unlock(); err != nil {
+		t.Fatalf("repeated unlock: %v", err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	reacquired, err := second.LockContext(ctx)
+	if err != nil {
+		t.Fatalf("reacquire after cancellation: %v", err)
+	}
+	defer reacquired.Unlock()
+}
+
+func TestPatchStoreRejectsSymlinkAndNonregularTargets(t *testing.T) {
+	for _, kind := range []string{"symlink", "directory", "fifo"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "state.patch")
+			sentinel := filepath.Join(t.TempDir(), "sentinel")
+			if err := os.WriteFile(sentinel, []byte("preserve"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "symlink":
+				if err := os.Symlink(sentinel, path); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "fifo":
+				if err := unix.Mkfifo(path, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store, err := OpenPatchStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if file, err := store.OpenRead(); err == nil {
+				file.Close()
+				t.Fatal("nonregular patch read was allowed")
+			}
+			if err := store.WriteAll([]byte("replace")); err == nil {
+				t.Fatal("nonregular patch replacement was allowed")
+			}
+			if err := os.Rename(path, path+".lock"); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if lock, err := store.LockContext(ctx); err == nil {
+				lock.Unlock()
+				t.Fatal("nonregular lock target was allowed")
+			}
+			data, err := os.ReadFile(sentinel)
+			if err != nil || string(data) != "preserve" {
+				t.Fatalf("sentinel changed: data=%q err=%v", data, err)
+			}
+		})
+	}
+}
+
+func TestAtomicWriteFileAtPreservesModeWithRestrictiveUmask(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.patch")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenPatchStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	previous := unix.Umask(0o077)
+	defer unix.Umask(previous)
+	if err := store.WriteAll([]byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o664 {
+		t.Fatalf("existing permissions were changed by umask: info=%v err=%v", info, err)
+	}
+}
+
+type countingPatchReader struct {
+	read int
+}
+
+func (r *countingPatchReader) Read(out []byte) (int, error) {
+	for i := range out {
+		out[i] = 'x'
+	}
+	r.read += len(out)
+	return len(out), nil
+}
+
+func TestPatchReadersStopBeforeAllocatingAnUnboundedLine(t *testing.T) {
+	for _, operation := range []string{"validate", "filter"} {
+		t.Run(operation, func(t *testing.T) {
+			r := &countingPatchReader{}
+			var err error
+			if operation == "validate" {
+				err = ValidatePatchReader(r)
+			} else {
+				_, err = FilterExistingNewFilesReader(r, t.TempDir(), io.Discard)
+			}
+			if err == nil || !strings.Contains(err.Error(), "patch exceeds size limit") {
+				t.Fatalf("expected size limit, got %v", err)
+			}
+			if r.read != MaxPatchBytes+1 {
+				t.Fatalf("unbounded source read %d bytes; want at most %d", r.read, MaxPatchBytes+1)
+			}
+		})
+	}
+}
+
+func TestValidatePatchReaderChecksOnlyRealPathFields(t *testing.T) {
+	patch := []byte("diff --git a/doc b/doc\n--- a/doc\n+++ b/doc\n@@ -1,2 +1,2 @@\n--- /absolute-content\n-rename from ../content\n+++ /absolute-content\n+rename to .git/content\n")
+	if err := ValidatePatchReader(bytes.NewReader(patch)); err != nil {
+		t.Fatalf("file content must not be parsed as paths: %v", err)
+	}
+	patch = append(patch, []byte("diff --git a/next b/next\n--- a/next\n+++ /real-unsafe-path\n")...)
+	if err := ValidatePatchReader(bytes.NewReader(patch)); err == nil {
+		t.Fatal("path validation did not resume after hunk counts completed")
 	}
 }

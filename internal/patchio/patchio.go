@@ -3,6 +3,7 @@ package patchio
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -60,10 +61,14 @@ func (s *PatchStore) Close() error {
 }
 
 func (s *PatchStore) Lock() (*PatchLock, error) {
+	return s.LockContext(context.Background())
+}
+
+func (s *PatchStore) LockContext(ctx context.Context) (*PatchLock, error) {
 	if s == nil || s.dir == nil {
 		return nil, errors.New("patch store is closed")
 	}
-	return lockPatchFileAt(s.dir, s.name+".lock")
+	return lockPatchFileAt(ctx, s.dir, s.name+".lock")
 }
 
 func (s *PatchStore) OpenRead() (*os.File, error) {
@@ -80,28 +85,52 @@ func (s *PatchStore) WriteFromReader(reader io.Reader) error {
 	return writeFileAt(s.dir, s.name, reader)
 }
 
-func lockPatchFileAt(dir *os.File, name string) (*PatchLock, error) {
+func lockPatchFileAt(ctx context.Context, dir *os.File, name string) (*PatchLock, error) {
 	if dir == nil {
 		return nil, errors.New("dir is nil")
 	}
-	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_CREAT|unix.O_RDWR, 0o644)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o644)
 	if err != nil {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), name)
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+	if err := requireRegularFile(file); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
-	return &PatchLock{file: file}, nil
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+			return &PatchLock{file: file}, nil
+		} else if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
+			_ = file.Close()
+			return nil, err
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (l *PatchLock) Unlock() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	_ = unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
-	return l.file.Close()
+	file := l.file
+	l.file = nil
+	_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+	return file.Close()
 }
 
 func EnsurePatchPath(opts model.Options, gitDir string, now time.Time) (string, error) {
@@ -117,8 +146,14 @@ func EnsurePatchPath(opts model.Options, gitDir string, now time.Time) (string, 
 		if err := rejectSymlinkPathParents(filepath.Dir(path), "patch path"); err != nil {
 			return "", err
 		}
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return "", fmt.Errorf("patch path is directory: %s", path)
+		// The CLI resolves a final symlink (including a not-yet-created target)
+		// before opening the store. Its resolved open still requires a regular
+		// file and never follows another symlink at open time.
+		if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+			if info.IsDir() {
+				return "", fmt.Errorf("patch path is directory: %s", path)
+			}
+			return "", fmt.Errorf("patch path is not a regular file: %s", path)
 		} else if err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
@@ -189,20 +224,27 @@ func AtomicWriteFileAt(dir *os.File, name string, data []byte) error {
 }
 
 type atomicTargetInfo struct {
-	mode uint32
-	uid  int
-	gid  int
+	mode   uint32
+	uid    int
+	gid    int
+	exists bool
 }
 
-func statAtomicTargetAt(dir *os.File, name string) atomicTargetInfo {
+func statAtomicTargetAt(dir *os.File, name string) (atomicTargetInfo, error) {
 	info := atomicTargetInfo{mode: 0o644, uid: -1, gid: -1}
 	var stat unix.Stat_t
-	if err := unix.Fstatat(int(dir.Fd()), name, &stat, 0); err == nil {
+	if err := unix.Fstatat(int(dir.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+			return info, fmt.Errorf("patch target is not a regular file: %s", name)
+		}
 		info.mode = stat.Mode & 0o777
 		info.uid = int(stat.Uid)
 		info.gid = int(stat.Gid)
+		info.exists = true
+	} else if !errors.Is(err, unix.ENOENT) {
+		return info, err
 	}
-	return info
+	return info, nil
 }
 
 func createAtomicTempFileAt(dir *os.File, mode uint32) (*os.File, string, error) {
@@ -212,7 +254,7 @@ func createAtomicTempFileAt(dir *os.File, mode uint32) (*os.File, string, error)
 		return nil, "", err
 	}
 	tmpName := fmt.Sprintf("%s%s", prefix, rnd)
-	fd, err := unix.Openat(int(dir.Fd()), tmpName, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR, mode)
+	fd, err := unix.Openat(int(dir.Fd()), tmpName, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, mode)
 	if err != nil {
 		return nil, "", err
 	}
@@ -227,13 +269,18 @@ func commitAtomicTempFileAt(dir *os.File, name string, target atomicTargetInfo, 
 			_ = unix.Unlinkat(int(dir.Fd()), tmpName, 0)
 		}
 	}()
-	if err := file.Sync(); err != nil {
-		return err
-	}
 	if target.uid >= 0 || target.gid >= 0 {
 		if err := fchownFn(int(file.Fd()), target.uid, target.gid); err != nil {
 			return fmt.Errorf("preserve owner for %s: %w", name, err)
 		}
+	}
+	if target.exists {
+		if err := unix.Fchmod(int(file.Fd()), target.mode); err != nil {
+			return fmt.Errorf("preserve mode for %s: %w", name, err)
+		}
+	}
+	if err := file.Sync(); err != nil {
+		return err
 	}
 	if err := file.Close(); err != nil {
 		return err
@@ -249,7 +296,10 @@ func writeFileAt(dir *os.File, name string, reader io.Reader) error {
 	if dir == nil {
 		return errors.New("dir is nil")
 	}
-	target := statAtomicTargetAt(dir, name)
+	target, err := statAtomicTargetAt(dir, name)
+	if err != nil {
+		return err
+	}
 	file, tmpName, err := createAtomicTempFileAt(dir, target.mode)
 	if err != nil {
 		return err
@@ -269,7 +319,8 @@ func writeFileAt(dir *os.File, name string, reader io.Reader) error {
 }
 
 func walkPatchLines(reader io.Reader, fn func([]byte) error) error {
-	buf := bufio.NewReader(reader)
+	// Limit the read itself: ReadBytes allocates a whole line before returning.
+	buf := bufio.NewReader(io.LimitReader(reader, MaxPatchBytes+1))
 	size := 0
 	for {
 		line, err := buf.ReadBytes('\n')
@@ -278,7 +329,7 @@ func walkPatchLines(reader io.Reader, fn func([]byte) error) error {
 			if err := CheckPatchSize(size); err != nil {
 				return err
 			}
-			if err := fn(trimLineBytes(line)); err != nil {
+			if err := fn(line); err != nil {
 				return err
 			}
 		}
@@ -292,50 +343,53 @@ func walkPatchLines(reader io.Reader, fn func([]byte) error) error {
 }
 
 func validatePatchPathReader(reader io.Reader) error {
-	return walkPatchLines(reader, func(line []byte) error {
-		if bytes.HasPrefix(line, []byte("diff --git ")) {
-			rest := bytes.TrimLeft(line[len("diff --git "):], " ")
-			if len(rest) == 0 {
+	var hunk patchHunk
+	err := walkPatchLines(reader, func(line []byte) error {
+		line = trimLineBytes(line)
+		if hunk.old > 0 || hunk.new > 0 {
+			if bytes.Equal(line, []byte("\\ No newline at end of file")) {
 				return nil
 			}
-			var left []byte
-			if rest[0] == '"' {
-				token, next, ok := readQuotedTokenBytes(rest)
-				if !ok {
-					return nil
-				}
-				left = token
-				rest = next
-			} else {
-				split := bytes.IndexByte(rest, ' ')
-				if split == -1 {
-					return nil
-				}
-				left = rest[:split]
-				rest = bytes.TrimLeft(rest[split+1:], " ")
+			if len(line) == 0 {
+				return errors.New("invalid empty patch hunk line")
 			}
-			if len(rest) == 0 {
-				return nil
+			switch line[0] {
+			case ' ':
+				hunk.old--
+				hunk.new--
+			case '-':
+				hunk.old--
+			case '+':
+				hunk.new--
+			default:
+				return errors.New("incomplete patch hunk")
 			}
-			var right []byte
-			if rest[0] == '"' {
-				token, _, ok := readQuotedTokenBytes(rest)
-				if !ok {
-					return nil
-				}
-				right = token
-			} else {
-				split := bytes.IndexByte(rest, ' ')
-				if split == -1 {
-					right = rest
-				} else {
-					right = rest[:split]
-				}
+			if hunk.old < 0 || hunk.new < 0 {
+				return errors.New("patch hunk exceeds declared line counts")
 			}
-			if err := checkPath(sanitizePatchPath(parseMaybeQuotedPathBytes(left))); err != nil {
+			return nil
+		}
+		if bytes.HasPrefix(line, []byte("@@ ")) {
+			parsed, err := parseHunkHeader(line)
+			if err != nil {
 				return err
 			}
-			return checkPath(sanitizePatchPath(parseMaybeQuotedPathBytes(right)))
+			hunk = parsed
+			return nil
+		}
+		if bytes.HasPrefix(line, []byte("diff --git ")) {
+			pathsList, err := diffHeaderPaths(line)
+			if err != nil {
+				return err
+			}
+			for _, paths := range pathsList {
+				for _, path := range paths {
+					if err := checkPath(sanitizePatchPath(path)); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
 		}
 		if bytes.HasPrefix(line, []byte("+++ ")) || bytes.HasPrefix(line, []byte("--- ")) {
 			parsed := parsePatchHeaderPath(line[4:])
@@ -357,6 +411,45 @@ func validatePatchPathReader(reader io.Reader) error {
 		}
 		return nil
 	})
+	if err == nil && (hunk.old > 0 || hunk.new > 0) {
+		return errors.New("incomplete patch hunk")
+	}
+	return err
+}
+
+type patchHunk struct {
+	old int64
+	new int64
+}
+
+func parseHunkHeader(line []byte) (patchHunk, error) {
+	fields := bytes.SplitN(line, []byte(" "), 5)
+	if len(fields) < 4 || string(fields[0]) != "@@" || string(fields[3]) != "@@" {
+		return patchHunk{}, errors.New("invalid patch hunk header")
+	}
+	var counts [2]int64
+	for i, prefix := range []byte{'-', '+'} {
+		field := fields[i+1]
+		if len(field) < 2 || field[0] != prefix {
+			return patchHunk{}, errors.New("invalid patch hunk range")
+		}
+		rangeParts := bytes.SplitN(field[1:], []byte(","), 3)
+		if len(rangeParts) > 2 {
+			return patchHunk{}, errors.New("invalid patch hunk range")
+		}
+		if _, err := strconv.ParseUint(string(rangeParts[0]), 10, 63); err != nil {
+			return patchHunk{}, errors.New("invalid patch hunk position")
+		}
+		counts[i] = 1
+		if len(rangeParts) == 2 {
+			count, err := strconv.ParseUint(string(rangeParts[1]), 10, 63)
+			if err != nil {
+				return patchHunk{}, errors.New("invalid patch hunk count")
+			}
+			counts[i] = int64(count)
+		}
+	}
+	return patchHunk{old: counts[0], new: counts[1]}, nil
 }
 
 func ValidatePatchReader(reader io.Reader) error {
@@ -381,11 +474,9 @@ func FilterExistingNewFilesReader(reader io.Reader, workTree string, out io.Writ
 	if out == nil {
 		out = io.Discard
 	}
-	buf := bufio.NewReader(reader)
 	seenDiff := false
 	var current patchBlock
 	skipped := make([]string, 0)
-	size := 0
 	flushCurrent := func() error {
 		if !seenDiff || len(current.lines) == 0 {
 			return nil
@@ -401,33 +492,23 @@ func FilterExistingNewFilesReader(reader io.Reader, workTree string, out io.Writ
 		}
 		return nil
 	}
-	for {
-		line, err := buf.ReadBytes('\n')
-		if len(line) > 0 {
-			size += len(line)
-			if err := CheckPatchSize(size); err != nil {
-				return nil, err
-			}
-			lineCopy := append([]byte(nil), line...)
-			raw := trimLineBytes(lineCopy)
-			if bytes.HasPrefix(raw, []byte("diff --git ")) || bytes.Equal(raw, []byte("diff --git")) {
-				if seenDiff {
-					if err := flushCurrent(); err != nil {
-						return nil, err
-					}
+	err := walkPatchLines(reader, func(line []byte) error {
+		raw := trimLineBytes(line)
+		if bytes.HasPrefix(raw, []byte("diff --git ")) || bytes.Equal(raw, []byte("diff --git")) {
+			if seenDiff {
+				if err := flushCurrent(); err != nil {
+					return err
 				}
-				seenDiff = true
-				current = beginPatchBlock(lineCopy)
-			} else if seenDiff {
-				appendPatchBlockLine(&current, lineCopy, raw)
 			}
+			seenDiff = true
+			current = beginPatchBlock(line)
+		} else if seenDiff {
+			appendPatchBlockLine(&current, line, raw)
 		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	if !seenDiff {
 		return nil, nil
@@ -444,14 +525,86 @@ type patchBlock struct {
 	isNew    bool
 	isBinary bool
 	mode     string
+	inBody   bool
+}
+
+// diffHeaderPaths retains all possible a/… b/… splits: Git leaves spaces
+// unquoted, so renamed paths can make this header alone ambiguous. Actual
+// ---/+++ and rename/copy fields are validated separately as well.
+func diffHeaderPaths(line []byte) ([][2]string, error) {
+	if !bytes.HasPrefix(line, []byte("diff --git ")) {
+		return nil, nil
+	}
+	rest := bytes.TrimLeft(line[len("diff --git "):], " ")
+	if len(rest) == 0 {
+		return nil, nil
+	}
+	if rest[0] == '"' {
+		left, right, ok := readQuotedTokenBytes(rest)
+		if !ok || len(right) == 0 {
+			return nil, nil
+		}
+		return [][2]string{{parseMaybeQuotedPathBytes(left), parseMaybeQuotedPathBytes(right)}}, nil
+	}
+	text := string(rest)
+	mid := len(text) / 2
+	if len(text)%2 == 1 && text[mid] == ' ' && strings.HasPrefix(text, "a/") && strings.HasPrefix(text[mid+1:], "b/") && text[2:mid] == text[mid+3:] {
+		return [][2]string{{unescapeGitPath(text[:mid]), unescapeGitPath(text[mid+1:])}}, nil
+	}
+	decode := func(path string) string {
+		if strings.HasPrefix(path, "\"") {
+			return parseMaybeQuotedPathBytes([]byte(path))
+		}
+		return unescapeGitPath(path)
+	}
+	var paths [][2]string
+	for i, ch := range text {
+		if ch != ' ' || i+1 == len(text) {
+			continue
+		}
+		right := text[i+1:]
+		if strings.HasPrefix(right, "b/") || strings.HasPrefix(right, "\"b/") {
+			// Reject pathological ambiguity instead of allocating/scanning an
+			// unbounded number of complete path candidates.
+			if len(paths) == 64 {
+				return nil, errors.New("too many ambiguous paths in diff header")
+			}
+			paths = append(paths, [2]string{decode(text[:i]), decode(right)})
+		}
+	}
+	if len(paths) == 0 {
+		if left, right, ok := strings.Cut(text, " "); ok {
+			paths = append(paths, [2]string{decode(left), decode(right)})
+		}
+	}
+	return paths, nil
 }
 
 func beginPatchBlock(line []byte) patchBlock {
-	return patchBlock{lines: [][]byte{line}}
+	block := patchBlock{lines: [][]byte{line}}
+	pathsList, err := diffHeaderPaths(trimLineBytes(line))
+	if err != nil {
+		return block
+	}
+	for _, paths := range pathsList {
+		left, right := sanitizePatchPath(paths[0]), sanitizePatchPath(paths[1])
+		if left == right {
+			block.path = right
+			break
+		}
+	}
+	return block
 }
 
 func appendPatchBlockLine(block *patchBlock, line []byte, raw []byte) {
 	block.lines = append(block.lines, line)
+	if block.inBody {
+		return
+	}
+	if bytes.HasPrefix(raw, []byte("@@ ")) {
+		block.inBody = true
+		return
+	}
 	if bytes.HasPrefix(raw, []byte("new file mode ")) {
 		block.isNew = true
 		block.mode = string(bytes.TrimSpace(raw[len("new file mode "):]))
@@ -461,6 +614,7 @@ func appendPatchBlockLine(block *patchBlock, line []byte, raw []byte) {
 	}
 	if bytes.HasPrefix(raw, []byte("GIT binary patch")) || bytes.HasPrefix(raw, []byte("Binary files ")) {
 		block.isBinary = true
+		block.inBody = true
 	}
 	if bytes.HasPrefix(raw, []byte("+++ ")) && block.path == "" {
 		block.path = parsePatchHeaderPath(raw[4:])
@@ -483,88 +637,84 @@ func shouldSkipNewFileBlock(block patchBlock, workTree string) bool {
 			}
 		}
 	}
+	if err := checkPath(block.path); err != nil {
+		return false
+	}
 	var expectedSize int64
+	var remaining int64
 	inHunk := false
-	sawHeader := false
-	sawHunk := false
-	noFinalNL := false
-	for _, line := range block.lines {
-		raw := trimLineBytes(line)
-		if bytes.HasPrefix(raw, []byte("+++ ")) {
-			sawHeader = true
-		}
-		if bytes.HasPrefix(raw, []byte("@@ ")) {
-			inHunk = true
-			sawHunk = true
-			continue
-		}
-		if !inHunk {
-			continue
-		}
-		if bytes.Equal(raw, []byte("\\ No newline at end of file")) {
-			noFinalNL = true
-			continue
-		}
-		if len(raw) > 0 && raw[0] == '+' {
-			expectedSize += int64(len(raw))
-		}
-	}
-	if !sawHunk && !sawHeader {
-		return false
-	}
-	if noFinalNL && expectedSize > 0 {
-		expectedSize--
-	}
-	if info.Size() != expectedSize {
-		return false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	reader := bufio.NewReader(file)
-	scratch := make([]byte, 32*1024)
-	inHunk = false
-	remaining := expectedSize
-	for _, line := range block.lines {
+	for i, line := range block.lines {
 		raw := trimLineBytes(line)
 		if bytes.HasPrefix(raw, []byte("@@ ")) {
+			if remaining != 0 {
+				return false
+			}
+			hunk, err := parseHunkHeader(raw)
+			if err != nil || hunk.old != 0 {
+				return false
+			}
+			remaining = hunk.new
 			inHunk = true
 			continue
 		}
 		if !inHunk || bytes.Equal(raw, []byte("\\ No newline at end of file")) {
 			continue
 		}
-		if len(raw) == 0 || raw[0] != '+' {
-			continue
-		}
-		content := raw[1:]
-		for len(content) > 0 {
-			n := len(content)
-			if n > len(scratch) {
-				n = len(scratch)
-			}
-			if _, err := io.ReadFull(reader, scratch[:n]); err != nil {
+		if remaining == 0 {
+			if len(raw) != 0 {
 				return false
 			}
-			if !bytes.Equal(scratch[:n], content[:n]) {
+			continue
+		}
+		if len(line) == 0 || line[0] != '+' {
+			return false
+		}
+		content := line[1:]
+		if i+1 < len(block.lines) && bytes.Equal(trimLineBytes(block.lines[i+1]), []byte("\\ No newline at end of file")) {
+			content = bytes.TrimSuffix(content, []byte("\n"))
+		}
+		expectedSize += int64(len(content))
+		remaining--
+	}
+	if remaining != 0 || info.Size() != expectedSize {
+		return false
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return false
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	if err := requireRegularFile(file); err != nil {
+		return false
+	}
+	scratch := make([]byte, 32*1024)
+	inHunk = false
+	for i, line := range block.lines {
+		if bytes.HasPrefix(line, []byte("@@ ")) {
+			inHunk = true
+			continue
+		}
+		if !inHunk || len(line) == 0 || line[0] != '+' {
+			continue
+		}
+		// Keep a CR from CRLF file content. Only the patch's added LF is
+		// removed when the following marker describes a missing final LF.
+		content := line[1:]
+		if i+1 < len(block.lines) && bytes.Equal(trimLineBytes(block.lines[i+1]), []byte("\\ No newline at end of file")) {
+			content = bytes.TrimSuffix(content, []byte("\n"))
+		}
+		for len(content) > 0 {
+			n := min(len(content), len(scratch))
+			if _, err := io.ReadFull(file, scratch[:n]); err != nil || !bytes.Equal(scratch[:n], content[:n]) {
 				return false
 			}
 			content = content[n:]
-			remaining -= int64(n)
 		}
-		if remaining == 0 {
-			continue
-		}
-		b, err := reader.ReadByte()
-		if err != nil || b != '\n' {
-			return false
-		}
-		remaining--
 	}
-	_, err = reader.ReadByte()
-	return err == io.EOF && remaining == 0
+	var extra [1]byte
+	n, err := file.Read(extra[:])
+	return n == 0 && err == io.EOF
 }
 
 func parsePatchHeaderPath(path []byte) string {
@@ -579,8 +729,9 @@ func parsePatchHeaderPath(path []byte) string {
 }
 
 func sanitizePatchPath(path string) string {
-	path = strings.TrimPrefix(path, "a/")
-	path = strings.TrimPrefix(path, "b/")
+	if strings.HasPrefix(path, "a/") || strings.HasPrefix(path, "b/") {
+		path = path[2:]
+	}
 	return path
 }
 
@@ -741,8 +892,6 @@ func randSuffix() (string, error) {
 }
 
 func checkPath(path string) error {
-	path = strings.TrimPrefix(path, "a/")
-	path = strings.TrimPrefix(path, "b/")
 	if path == "" || path == "/dev/null" {
 		return nil
 	}
@@ -776,12 +925,28 @@ func openReadAt(dir *os.File, name string) (*os.File, error) {
 	if dir == nil {
 		return nil, errors.New("dir is nil")
 	}
-	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY, 0)
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), name), nil
+	file := os.NewFile(uintptr(fd), name)
+	if err := requireRegularFile(file); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func requireRegularFile(file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("patch file is not a regular file: %s", file.Name())
+	}
+	return nil
 }
