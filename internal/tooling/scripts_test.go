@@ -725,7 +725,7 @@ func TestReadmeDocumentsPrivilegedIntegrationFlow(t *testing.T) {
 	}
 	text := string(data)
 	for _, want := range []string{
-		"sudo env \"PATH=$PATH\" PERSONA_INTEGRATION=1 $(command -v go) test ./integration -run TestPersonaIntegration",
+		"sudo env \"PATH=$PATH\" PERSONA_INTEGRATION=1 $(command -v go) test -count=1 ./integration",
 		"If `go` is not in the sudo PATH, keep the `env \"PATH=$PATH\"` prefix.",
 		"After changes around mount/masking, linked worktree handling, or patch export/apply boundaries, re-run the privileged integration suite",
 	} {

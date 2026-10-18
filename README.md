@@ -42,7 +42,7 @@ What the plugin does:
 - `PreToolUse` on `Bash` rewrites eligible shell commands to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
 - Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` calls are rewritten into the daemon session's stable `view_path`.
 - Managed file tools use `persona daemon acquire` and `persona daemon release` for the same exclusive mutation lease as Bash, with a `view_generation` tied to their view. `PostToolUse`, `PostToolUseFailure`, and `PermissionDenied` hooks release the lease and durably save any changes. A failed save retains recovery state and reports an unsaved-change message to both the user and Claude.
-- `SessionEnd` runs `persona daemon end --session-key <claude-session-id>` so finished Claude chats clean up their daemon-backed views automatically.
+- `SessionEnd` runs `persona daemon end --session-key <claude-session-id>` for every repository used by that chat, even when its final cwd is outside Git. Failed cleanup records remain available for retry.
 - The first wrapped Bash call lazily starts a per-repo background daemon under `<gitdir>/persona/daemon/`.
 - Each Claude chat session key maps to its own daemon-backed patch/view pair, so concurrent chats in the same Claude instance stay isolated from each other.
 - The plugin ships a `persona-worker` agent, and `settings.json` sets `"agent": "persona-worker"` so the main thread prefers Bash-based editing.
@@ -130,7 +130,9 @@ persona daemon end --session-key claude-chat-123
 `persona daemon flush` accepts `--min-age` to skip a recent write-back. A skip does not schedule a future save; dirty data is still unsaved. Lease release and normal shutdown save without this skip.
 If the background daemon exits or restarts, the next `persona daemon info`, `list`, `flush`, `prune`, or `end` call recreates persisted sessions from metadata under `<gitdir>/persona/daemon/state/` and resumes from the same patch file and saved base OID. Dirty sessions retain their upper layer and report `recovery_required` when ownership, mounts, a live writer, or a mutable repo-mode lower layer prevents safe restoration. Legacy metadata without a base OID is preserved for manual inspection. Recovery keeps the patch path stable, but the recreated daemon `view_path` may change across daemon restarts.
 `persona daemon info --json` and `persona daemon list --json` report `dirty`, `created_*`, `last_used_*`, `last_flushed_*`, `flush_count`, `flush_skipped`, and `recovered_count` so plugin integrations can inspect daemon session health.
-The daemon defaults to `--base-mode worktree`. Session info also exposes `base_oid`, `view_generation`, mutation `generation`, `last_durable_generation`, `state`, `last_error`, and `recovery_root`. A normal SIGTERM/SIGINT blocks new operations, drains requests, and saves idle dirty sessions. A live lease or failed save preserves the upper layer, base worktree, and recovery metadata; it is never silently marked clean. SIGKILL recovery guarantees the last successfully saved patch, and retains newer upper-layer data for recovery. After an unclean exit, stale roots and external mount backing remain tracked and block automatic recreation; `recover --dry-run` reports them and explicit `recover` checks ownership and unmounts them before reopening. A changed temporary-directory configuration may require manual inspection of the old external backing.
+The daemon defaults to `--base-mode worktree`. Session info also exposes `base_oid`, `view_generation`, mutation `generation`, `last_durable_generation`, `state`, `last_error`, and `recovery_root`. A normal SIGTERM/SIGINT blocks new operations, allows outstanding lease releases for up to 30 seconds, and saves idle dirty sessions. A lease that remains live or a failed save preserves the upper layer, base worktree, and recovery metadata, logs the recovery path, and makes shutdown return an error. SIGKILL recovery guarantees the last successfully saved patch, and retains newer upper-layer data for recovery. After an unclean exit, stale roots and external mount backing remain tracked and block automatic recreation; `recover --dry-run` reports them and explicit `recover` checks ownership and unmounts them before reopening. A changed temporary-directory configuration may require manual inspection of the old external backing.
+
+Runtime metadata records the saved patch's SHA-256 checksum and schema version. Flush records a dirty checkpoint before replacing the patch, so interruption before the final metadata commit preserves the upper layer. Recovery validates a clean checkpoint's checksum under the patch lock before removing stale resources; dirty recovery also verifies the retained base worktree's HEAD, raw file contents, index, and absence of untracked or ignored additions. Temporary metadata files are excluded from recovery, and corrupt sessions do not hide healthy ones. If cleanup partially fails, the session reports `cleanup_required`; retry `daemon end` to finish only the remaining cleanup operations.
 
 Daemon RPCs have a 30-second maximum duration, cancel work on client disconnect, and use per-session locks. The socket uses a short private directory under `/tmp`; protocol ping/pong checks the repository identity. A lifetime lock prevents a second server from unlinking an active socket. Background daemon diagnostics are appended to `<gitdir>/persona/daemon/daemon.log` (mode 0600).
 
@@ -199,6 +201,7 @@ Use `recover --dry-run` before recovery of an uncertain session. A failed save k
 - Patch paths are resolved through symlinks. If the provided patch path is a symlink to a repo-internal file, the tool locks/writes the **target path**, and `--print-patch-path` prints the resolved path.
 - Existing parent directories for `--patch` and `--patch-dir` must not be symlinks. Symlink patch files are allowed; symlink parent directories are rejected.
 - Internal git operations use a bind-mounted gitdir outside the repo root to avoid `.git` masking interfering with export/apply.
+- One-shot namespace setup, command execution, and mount cleanup run on a dedicated locked OS thread. The thread is retired when the goroutine exits and is never returned to the scheduler with a private namespace.
 - In `strict` apply mode, if a text patch adds a new regular file that already exists with identical content and mode, persona skips that block during apply so re-running the same text new-file patch is idempotent. Binary new-file blocks are retried normally.
 
 ## Exit Codes
@@ -217,10 +220,12 @@ Integration tests require Linux + root for mount namespace/OverlayFS. In non-pri
 
 ```
 cd /path/to/persona
-sudo env "PATH=$PATH" PERSONA_INTEGRATION=1 $(command -v go) test ./integration -run TestPersonaIntegration
+sudo env "PATH=$PATH" PERSONA_INTEGRATION=1 $(command -v go) test -count=1 ./integration
 ```
 
 If `go` is not in the sudo PATH, keep the `env "PATH=$PATH"` prefix.
+
+On hosts permitting unprivileged user namespaces, the same suite can run with `unshare -Ur -m --propagation private env PERSONA_INTEGRATION=1 "$(command -v go)" test -count=1 ./integration`. Required integration runs fail if mount setup is unavailable. The suite isolates its mount namespace and tests actual daemon shutdown/recovery, shared leases, and plugin file-tool round trips against disposable repositories.
 
 After changes around mount/masking, linked worktree handling, or patch export/apply boundaries, re-run the privileged integration suite with `PERSONA_INTEGRATION=1` to confirm the real mount-namespace path still behaves as expected.
 
