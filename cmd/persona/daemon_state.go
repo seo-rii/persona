@@ -13,11 +13,15 @@ import (
 // A gate protects a single session, including creation. The map mutex is never
 // held across Git, flock, mount, or filesystem I/O.
 func (s *daemonState) lockSession(ctx context.Context, key string) (func(), error) {
+	return s.lockSessionDuringDrain(ctx, key, false)
+}
+
+func (s *daemonState) lockSessionDuringDrain(ctx context.Context, key string, release bool) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	if s.closing {
+	if s.closing && !release {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("daemon is shutting down")
 	}
@@ -28,7 +32,7 @@ func (s *daemonState) lockSession(ctx context.Context, key string) (func(), erro
 		s.mu.Lock()
 		closing := s.closing
 		s.mu.Unlock()
-		if closing {
+		if closing && !release {
 			<-gate
 			return nil, fmt.Errorf("daemon is shutting down")
 		}
@@ -152,6 +156,40 @@ func writeDaemonOwner(root, key, oid string) error {
 		return err
 	}
 	return syncDaemonDirectory(root)
+}
+
+// Keep accepting releases while refusing new work. A bounded drain gives
+// running tools a chance to save; an owner that outlives it is preserved.
+func (s *daemonState) drainMutations(ctx context.Context) {
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
+	for {
+		pending := false
+		for _, key := range s.operationKeys() {
+			s.mu.Lock()
+			gate := s.sessionGateLocked(key)
+			s.mu.Unlock()
+			select {
+			case gate <- struct{}{}:
+				sess := s.sessionByKey(key)
+				if sess != nil && sess.busy && processIdentityAlive(sess.busyOwnerPID, sess.busyOwnerStart) {
+					pending = true
+				}
+				<-gate
+			default:
+				pending = true
+			}
+		}
+		if !pending {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 func validateDaemonOwner(root, key, oid string) error {
 	path := filepath.Join(root, ".persona-daemon-owner")

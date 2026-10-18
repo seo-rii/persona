@@ -657,20 +657,26 @@ func runDaemonServe(parent context.Context, repoRoot, gitDir, socketPath string)
 	}
 	ctx, stop := signalNotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	shutdown := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
+		drainCtx, cancel := context.WithTimeout(context.Background(), daemonRequestTimeout)
+		state.drainMutations(drainCtx)
+		cancel()
+		err := state.closeSessions()
 		_ = listener.Close()
+		shutdown <- err
 	}()
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				state.closeAll()
-				return nil
+				return <-shutdown
 			default:
 			}
-			return model.Wrap(model.ExitEnv, "accept daemon connection", err)
+			stop()
+			return errors.Join(model.Wrap(model.ExitEnv, "accept daemon connection", err), <-shutdown)
 		}
 		go state.serveConn(conn)
 	}
@@ -730,6 +736,9 @@ func (s *daemonState) handleRequestContext(ctx context.Context, req daemonReques
 		}
 		return resp
 	case "acquire_exec":
+		if req.OwnerPID <= 0 || processStartTime(req.OwnerPID) == "" {
+			return daemonResponseForInfo(nil, fmt.Errorf("mutation owner must identify a live process"))
+		}
 		info, leaseID, err := s.acquireExec(ctx, key, req.OwnerPID, req.Config)
 		resp := daemonResponseForInfo(info, err)
 		if err == nil {
@@ -794,6 +803,10 @@ func daemonSessionSnapshot(sess *daemonSession) daemonSessionInfo {
 	}
 	if sess.lastError != "" {
 		info.State = "recovery_required"
+		info.RecoveryRoot = sess.sess.Root
+	}
+	if sess.closed {
+		info.State = "cleanup_required"
 		info.RecoveryRoot = sess.sess.Root
 	}
 	info.Busy = sess.busy
@@ -1053,7 +1066,7 @@ func (s *daemonState) releaseExec(ctx context.Context, sessionKey, leaseID strin
 	return s.releaseExecGeneration(ctx, sessionKey, leaseID, 0)
 }
 func (s *daemonState) releaseExecGeneration(ctx context.Context, sessionKey, leaseID string, generation uint64) error {
-	unlock, err := s.lockSession(ctx, sessionKey)
+	unlock, err := s.lockSessionDuringDrain(ctx, sessionKey, true)
 	if err != nil {
 		return err
 	}
@@ -1061,6 +1074,9 @@ func (s *daemonState) releaseExecGeneration(ctx context.Context, sessionKey, lea
 	sess := s.sessionByKey(sessionKey)
 	if sess == nil {
 		return model.Wrap(model.ExitEnv, "release daemon session", fmt.Errorf("session %q not found", sessionKey))
+	}
+	if sess.closed {
+		return fmt.Errorf("session %q requires cleanup; retry daemon end", sessionKey)
 	}
 	if generation != 0 && generation != sess.viewGeneration {
 		return model.Wrap(model.ExitEnv, "release daemon session", fmt.Errorf("view generation mismatch"))
@@ -1118,6 +1134,9 @@ func (s *daemonState) markDirtySession(ctx context.Context, sessionKey string) e
 	}
 	if sess == nil {
 		return model.Wrap(model.ExitEnv, "mark dirty daemon session", fmt.Errorf("session %q not found", sessionKey))
+	}
+	if sess.closed {
+		return fmt.Errorf("session %q requires cleanup; retry daemon end", sessionKey)
 	}
 	if sess.busy {
 		return model.Wrap(model.ExitEnv, "mark dirty daemon session", fmt.Errorf("session %q is still busy", sessionKey))
@@ -1179,22 +1198,30 @@ func (s *daemonState) pruneSessions(ctx context.Context, idleFor time.Duration) 
 }
 
 func (s *daemonState) closeAll() {
+	_ = s.closeSessions()
+}
+
+func (s *daemonState) closeSessions() error {
 	s.mu.Lock()
 	s.closing = true
 	s.mu.Unlock()
+	var errs []error
 	for _, key := range s.operationKeys() {
 		s.mu.Lock()
 		gate := s.sessionGateLocked(key)
 		s.mu.Unlock()
 		gate <- struct{}{}
 		sess := s.sessionByKey(key)
-		if sess == nil || sess.closed {
+		if sess == nil {
 			<-gate
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), daemonRequestTimeout)
 		var err error
-		if sess.busy && processIdentityAlive(sess.busyOwnerPID, sess.busyOwnerStart) {
+		if sess.closed {
+			// A prior end has already saved and may have closed the store. Retry
+			// just its remaining cleanup actions, never export through closed FDs.
+		} else if sess.busy && processIdentityAlive(sess.busyOwnerPID, sess.busyOwnerStart) {
 			err = fmt.Errorf("recovery_required: mutation owner %d still alive during shutdown", sess.busyOwnerPID)
 		} else if sess.busy {
 			err = s.finishBusyLocked(ctx, sess)
@@ -1211,16 +1238,18 @@ func (s *daemonState) closeAll() {
 			if sess.preserve != nil {
 				*sess.preserve = true
 			}
-			_ = s.persistSessionLocked(sess)
+			err = errors.Join(err, s.persistSessionLocked(sess))
 			_ = sess.lock.Unlock()
 			_ = sess.store.Close()
 			s.log.Error("session preserved for recovery", "session", key, "root", sess.sess.Root, "error", err)
+			errs = append(errs, fmt.Errorf("session %q preserved at %s: %w", key, sess.sess.Root, err))
 		}
 		cancel()
 		sess.closed = true
 		s.removeSession(key)
 		<-gate
 	}
+	return errors.Join(errs...)
 }
 
 func (s *daemonState) ensureSessionLocked(ctx context.Context, sessionKey string, cfg daemonSessionConfig) (*daemonSession, error) {
@@ -1228,6 +1257,9 @@ func (s *daemonState) ensureSessionLocked(ctx context.Context, sessionKey string
 		return nil, model.Wrap(model.ExitEnv, "daemon session key", fmt.Errorf("session-key must contain 1 to 4096 bytes"))
 	}
 	if existing := s.sessionByKey(sessionKey); existing != nil {
+		if existing.closed {
+			return nil, fmt.Errorf("session %q requires cleanup; retry daemon end", sessionKey)
+		}
 		if !existing.config.equal(cfg) {
 			return nil, model.Wrap(model.ExitEnv, "daemon session options", fmt.Errorf("session %q already exists with different options; end it before changing base/apply/ignored settings", sessionKey))
 		}
@@ -1619,6 +1651,9 @@ func (s *daemonState) recoverBusyLocked(ctx context.Context, sess *daemonSession
 }
 
 func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string, sess *daemonSession, op string, minAge time.Duration) error {
+	if sess.closed {
+		return fmt.Errorf("session %q requires cleanup; retry daemon end", sessionKey)
+	}
 	if err := s.recoverBusyLocked(ctx, sess); err != nil {
 		return err
 	}
@@ -1661,14 +1696,22 @@ func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string,
 }
 
 func (s *daemonState) endSessionLocked(ctx context.Context, sessionKey string, sess *daemonSession) error {
-	if err := s.flushSessionLocked(ctx, sessionKey, sess, "end daemon session", 0); err != nil {
-		return err
+	if !sess.closed {
+		if err := s.flushSessionLocked(ctx, sessionKey, sess, "end daemon session", 0); err != nil {
+			return err
+		}
+		sess.closed = true
 	}
 	if err := sess.cleanup.Run(); err != nil {
+		sess.lastError = err.Error()
+		_ = s.persistSessionLocked(sess)
 		return model.Wrap(model.ExitEnv, "cleanup daemon session", err)
 	}
 	if err := os.Remove(sess.metaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return model.Wrap(model.ExitWrite, "remove daemon session metadata", err)
+	}
+	if err := syncDaemonDirectory(filepath.Dir(sess.metaPath)); err != nil {
+		return model.Wrap(model.ExitWrite, "sync removed daemon session metadata", err)
 	}
 	s.removeSession(sessionKey)
 	return nil
