@@ -37,6 +37,7 @@ const (
 	daemonLaunchLock     = "launch.lock"
 	daemonProtocol       = 2
 	daemonMetadataSchema = 1
+	daemonMetadataLimit  = 64 << 10
 	daemonRequestTimeout = 30 * time.Second
 )
 
@@ -871,6 +872,17 @@ func daemonTimeFromUnix(unixSeconds int64) time.Time {
 
 func writeDaemonSessionMeta(path string, meta daemonSessionMeta) error {
 	meta.SchemaVersion = daemonMetadataSchema
+	if err := validateDaemonSessionMeta(meta); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if len(data) > daemonMetadataLimit {
+		return fmt.Errorf("session metadata exceeds size limit of %d bytes", daemonMetadataLimit)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -883,9 +895,7 @@ func writeDaemonSessionMeta(path string, meta daemonSessionMeta) error {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 	}()
-	enc := json.NewEncoder(tmp)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(meta); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
@@ -919,14 +929,14 @@ func readDaemonSessionMeta(path string) (daemonSessionMeta, error) {
 	if err != nil {
 		return daemonSessionMeta{}, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > 64<<10 {
+	if !info.Mode().IsRegular() || info.Size() > daemonMetadataLimit {
 		return daemonSessionMeta{}, fmt.Errorf("invalid session metadata file")
 	}
-	data, err := io.ReadAll(io.LimitReader(file, (64<<10)+1))
+	data, err := io.ReadAll(io.LimitReader(file, daemonMetadataLimit+1))
 	if err != nil {
 		return daemonSessionMeta{}, err
 	}
-	if len(data) > 64<<10 {
+	if len(data) > daemonMetadataLimit {
 		return daemonSessionMeta{}, fmt.Errorf("session metadata too large")
 	}
 	var meta daemonSessionMeta

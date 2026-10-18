@@ -34,6 +34,29 @@ func TestDaemonMetadataIgnoresInterruptedTemporaryFiles(t *testing.T) {
 	}
 }
 
+func TestDaemonMetadataWriterNeverReplacesReadableCheckpointWithOversizedState(t *testing.T) {
+	meta := daemonSessionMeta{SessionKey: "key", Config: daemonTestConfig()}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := writeDaemonSessionMeta(path, meta); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.InitialIgnored = []string{strings.Repeat("ignored/", daemonMetadataLimit)}
+	if err := writeDaemonSessionMeta(path, meta); err == nil {
+		t.Fatal("writer accepted metadata its reader cannot recover")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("oversized metadata damaged prior checkpoint: %v", err)
+	}
+	if _, err := readDaemonSessionMeta(path); err != nil {
+		t.Fatalf("prior metadata became unreadable: %v", err)
+	}
+}
+
 func TestDaemonMetadataValidatesSchemaAndSaveIdentity(t *testing.T) {
 	base := daemonSessionMeta{SchemaVersion: daemonMetadataSchema, SessionKey: "key", Config: daemonTestConfig()}
 	for _, tc := range []struct {
