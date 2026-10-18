@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"persona/internal/model"
 )
@@ -430,7 +431,7 @@ func storageDiffArgs() []string {
 		"-c", "core.filemode=true", "-c", "core.symlinks=true", "-c", "core.ignorestat=false",
 		"-c", "core.fsmonitor=false", "-c", "diff.mnemonicPrefix=false",
 		"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv",
-		"--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--unified=3",
+		"--no-color", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--unified=3",
 		"--ignore-submodules=none", "--submodule=short",
 	}
 }
@@ -492,6 +493,36 @@ func (g Git) exportEnv(ctx context.Context, workTree, gitDir string) (*exportInd
 	for _, entry := range splitNullList(staged) {
 		meta, path, ok := strings.Cut(entry, "\t")
 		if ok && strings.HasSuffix(meta, " 0") && !paths[path] {
+			// Only import additions that exist in this view. An absent source
+			// index entry can otherwise replace a pinned parent/child entry
+			// through update-index's directory/file conflict resolution.
+			info, err := os.Lstat(filepath.Join(workTree, filepath.FromSlash(path)))
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+				continue
+			}
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			if info.IsDir() && !strings.HasPrefix(meta, "160000 ") {
+				continue
+			}
+			// Lstat still follows symlinks in parent components. Do not let
+			// such a source-only child replace a pinned symlink in the index.
+			blockedParent := false
+			for parent := filepath.Dir(path); parent != "."; parent = filepath.Dir(parent) {
+				if !paths[parent] {
+					continue
+				}
+				info, err := os.Lstat(filepath.Join(workTree, filepath.FromSlash(parent)))
+				if err != nil || !info.IsDir() {
+					blockedParent = true
+					break
+				}
+			}
+			if blockedParent {
+				continue
+			}
 			extra.WriteString(entry)
 			extra.WriteByte(0)
 			paths[path] = true
@@ -527,6 +558,11 @@ func (g Git) checkStorageAttributes(ctx context.Context, workTree, gitDir string
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = workTree
 	cmd.Env = g.envWith(workTree, gitDir)
+	if index != nil {
+		// check-attr falls back to the index when a .gitattributes file is
+		// absent. Inspect exactly the same attributes that diff will use.
+		cmd.Env = index.env
+	}
 	cmd.Stdin = &input
 	var stderr boundedOutput
 	cmd.Stderr = &stderr
@@ -544,7 +580,7 @@ func (g Git) checkStorageAttributes(ctx context.Context, workTree, gitDir string
 		}
 		checked[path] = true
 		info, err := os.Lstat(filepath.Join(workTree, filepath.FromSlash(path)))
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 			continue // Deletions do not pass through content filters.
 		}
 		if err != nil {

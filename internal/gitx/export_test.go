@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"persona/internal/model"
+	"persona/internal/patchio"
 	"persona/internal/testutil"
 )
 
@@ -32,6 +33,9 @@ func exportAll(t *testing.T, g *Git, view string) []byte {
 		if err := g.DiffNewFileNoIndexTo(ctx, view, g.GitDir, path, &patch); err != nil {
 			t.Fatalf("export new %q: %v", path, err)
 		}
+	}
+	if err := patchio.ValidatePatchReader(bytes.NewReader(patch.Bytes())); err != nil {
+		t.Fatalf("validate exported patch: %v\n%s", err, patch.Bytes())
 	}
 	return patch.Bytes()
 }
@@ -105,6 +109,7 @@ func TestStoragePatchRoundTripIgnoresDisplayConfig(t *testing.T) {
 		{"external-default", "diff.external", "printf 'NOT A PATCH'"},
 		{"no-prefix", "diff.noprefix", "true"},
 		{"mnemonic-prefix", "diff.mnemonicPrefix", "true"},
+		{"relative", "diff.relative", "true"},
 		{"zero-context", "diff.context", "0"},
 		{"forced-color", "color.ui", "always"},
 		{"autocrlf", "core.autocrlf", "true"},
@@ -150,7 +155,7 @@ func TestStoragePatchRoundTripIgnoresDisplayConfig(t *testing.T) {
 			if err := os.Symlink("data.bin", filepath.Join(repo, "link")); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"tab\tname.txt", "line\nbreak.txt", "quote\"back\\slash.txt", "a/nested.txt", "b/nested.txt"} {
+			for _, name := range []string{"tab\tname.txt", "line\nbreak.txt", "quote\"back\\slash.txt", "a/nested.txt", "b/nested.txt", " leading.txt", "trailing.txt ", "a/ leading b/file "} {
 				testutil.WriteFile(t, filepath.Join(repo, name), "++ /absolute-is-content\r\n-- /also-content")
 			}
 			indexBefore, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
@@ -325,5 +330,149 @@ func TestStoragePatchRejectsNewNormalizationOfUnchangedRawBlob(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(repo, ".git", "info", "attributes"), "tracked.txt text\n")
 	if _, err := g.DiffHeadBinary(context.Background(), repo, g.GitDir, nil); err == nil || !strings.Contains(err.Error(), "content transformation attribute") {
 		t.Fatalf("new normalization of unchanged raw blob was not rejected: %v", err)
+	}
+}
+
+func TestStorageAttributesUsePinnedIndexWhenWorktreeAttributesAreDeleted(t *testing.T) {
+	isolateGitConfig(t)
+	repo := testutil.InitRepo(t)
+	testutil.WriteFile(t, filepath.Join(repo, ".gitattributes"), "tracked.txt text\n")
+	testutil.RunCmd(t, repo, "git", "add", ".")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "base attributes")
+	g := &Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+	if _, err := g.ResolveBase(context.Background(), "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	view := filepath.Join(t.TempDir(), "view")
+	if err := g.WorktreeAddDetach(context.Background(), view, g.BaseOID); err != nil {
+		t.Fatal(err)
+	}
+	// Removing attributes from the source checkout must not change the index
+	// fallback used to inspect transformations for the pinned session's diff.
+	testutil.RunCmd(t, repo, "git", "rm", ".gitattributes")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "source drops attributes")
+	if err := os.Remove(filepath.Join(view, ".gitattributes")); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, filepath.Join(view, "tracked.txt"), "changed CRLF\r\n")
+	if patch, err := g.DiffHeadBinary(context.Background(), view, g.GitDir, nil); err == nil || !strings.Contains(err.Error(), "content transformation attribute") {
+		t.Fatalf("pinned index normalization was not rejected: err=%v patch=%q", err, patch)
+	}
+}
+
+func TestPinnedBaseIgnoresSourceIndexPathTypeChanges(t *testing.T) {
+	for _, kind := range []string{"file", "directory", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			isolateGitConfig(t)
+			repo := testutil.InitRepo(t)
+			baseName, sourceName := "shape", "shape/child.txt"
+			if kind == "directory" {
+				baseName, sourceName = sourceName, baseName
+			}
+			if kind == "symlink" {
+				testutil.WriteFile(t, filepath.Join(repo, "target-dir/child.txt"), "pinned contents\n")
+				if err := os.Symlink("target-dir", filepath.Join(repo, baseName)); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				testutil.WriteFile(t, filepath.Join(repo, baseName), "pinned contents\n")
+			}
+			testutil.RunCmd(t, repo, "git", "add", ".")
+			testutil.RunCmd(t, repo, "git", "commit", "-m", "pinned path shape")
+			g := &Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+			if _, err := g.ResolveBase(context.Background(), "HEAD"); err != nil {
+				t.Fatal(err)
+			}
+			view := filepath.Join(t.TempDir(), "view")
+			if err := g.WorktreeAddDetach(context.Background(), view, g.BaseOID); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.RemoveAll(filepath.Join(repo, "shape")); err != nil {
+				t.Fatal(err)
+			}
+			testutil.WriteFile(t, filepath.Join(repo, sourceName), "source-only shape\n")
+			testutil.RunCmd(t, repo, "git", "add", "-A")
+			if patch := exportAll(t, g, view); len(patch) != 0 {
+				t.Fatalf("source index path type change altered the pinned session:\n%s", patch)
+			}
+		})
+	}
+}
+
+func TestStoragePatchAllowsDeletionOfTransformedFileByDirectoryReplacement(t *testing.T) {
+	isolateGitConfig(t)
+	repo := testutil.InitRepo(t)
+	testutil.WriteFile(t, filepath.Join(repo, ".gitattributes"), "dir/child.txt text\n")
+	testutil.WriteFile(t, filepath.Join(repo, "dir/child.txt"), "base\n")
+	testutil.RunCmd(t, repo, "git", "add", ".")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "transformed file base")
+	g := &Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+	if _, err := g.ResolveBase(context.Background(), "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(t.TempDir(), "restored")
+	if err := g.WorktreeAddDetach(context.Background(), restored, g.BaseOID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(repo, "dir")); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, filepath.Join(repo, "dir"), "ordinary replacement\r\n")
+	patch := exportAll(t, g, repo)
+	if err := g.ApplyPatch(context.Background(), model.ApplyStrict, restored, g.GitDir, patch); err != nil {
+		t.Fatalf("apply directory replacement: %v\n%s", err, patch)
+	}
+	if got, want := fileState(t, restored), fileState(t, repo); !reflect.DeepEqual(got, want) {
+		t.Fatalf("directory replacement round trip mismatch:\ngot  %v\nwant %v", got, want)
+	}
+}
+
+func TestStoragePatchRoundTripPreservesTypeTransitionsAndRenames(t *testing.T) {
+	isolateGitConfig(t)
+	repo := testutil.InitRepo(t)
+	for _, name := range []string{"file-to-dir", "dir-to-file/child", "regular-to-link", "rename source.txt"} {
+		testutil.WriteFile(t, filepath.Join(repo, name), "before "+name+"\n")
+	}
+	if err := os.Symlink("tracked.txt", filepath.Join(repo, "link-to-regular")); err != nil {
+		t.Fatal(err)
+	}
+	testutil.RunCmd(t, repo, "git", "add", ".")
+	testutil.RunCmd(t, repo, "git", "commit", "-m", "type transition base")
+	g := &Git{RepoRoot: repo, GitDir: filepath.Join(repo, ".git")}
+	if _, err := g.ResolveBase(context.Background(), "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(t.TempDir(), "restored")
+	if err := g.WorktreeAddDetach(context.Background(), restored, g.BaseOID); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"file-to-dir", "dir-to-file", "regular-to-link", "link-to-regular"} {
+		if err := os.RemoveAll(filepath.Join(repo, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"file-to-dir/child", "dir-to-file", "link-to-regular"} {
+		testutil.WriteFile(t, filepath.Join(repo, name), "after "+name+"\r\n")
+	}
+	if err := os.Symlink("file-to-dir/child", filepath.Join(repo, "regular-to-link")); err != nil {
+		t.Fatal(err)
+	}
+	renamed := filepath.Join(repo, " a renamed b", "destination ")
+	if err := os.MkdirAll(filepath.Dir(renamed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(repo, "rename source.txt"), renamed); err != nil {
+		t.Fatal(err)
+	}
+	testutil.RunCmd(t, repo, "git", "add", "-A")
+	patch := exportAll(t, g, repo)
+	if !bytes.Contains(patch, []byte("rename from rename source.txt\n")) {
+		t.Fatalf("fixture did not exercise Git rename headers:\n%s", patch)
+	}
+	if err := g.ApplyPatch(context.Background(), model.ApplyStrict, restored, g.GitDir, patch); err != nil {
+		t.Fatalf("apply type changes: %v\n%s", err, patch)
+	}
+	if got, want := fileState(t, restored), fileState(t, repo); !reflect.DeepEqual(got, want) {
+		t.Fatalf("type transition round trip mismatch:\ngot  %v\nwant %v", got, want)
 	}
 }
