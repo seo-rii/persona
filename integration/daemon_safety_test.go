@@ -34,6 +34,22 @@ func daemonCLI(t *testing.T, binary, repo string, args ...string) []byte {
 }
 
 func startTestDaemon(t *testing.T, binary, repo string) func() {
+	return startManagedTestDaemon(t, binary, repo).stop
+}
+
+type testDaemon struct {
+	stop           func()
+	stopPreserving func()
+	crash          func()
+	beginShutdown  func()
+}
+
+func testDaemonSocket(repo string) string {
+	digest := sha256.Sum256([]byte(filepath.Join(repo, ".git")))
+	return filepath.Join("/tmp", fmt.Sprintf("persona-%d", os.Getuid()), hex.EncodeToString(digest[:16])+".sock")
+}
+
+func startManagedTestDaemon(t *testing.T, binary, repo string) testDaemon {
 	t.Helper()
 	log, err := os.CreateTemp(t.TempDir(), "daemon-*.log")
 	if err != nil {
@@ -49,15 +65,17 @@ func startTestDaemon(t *testing.T, binary, repo string) func() {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	stopped := false
-	stop := func() {
+	shutdown := func(sig syscall.Signal, expectPreserved bool) {
 		if stopped {
 			return
 		}
 		stopped = true
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Process.Signal(sig)
 		select {
 		case err := <-done:
-			if err != nil {
+			if expectPreserved && err == nil {
+				t.Error("daemon silently reported a successful shutdown while preserving unsaved state")
+			} else if err != nil && !expectPreserved && sig != syscall.SIGKILL {
 				t.Errorf("daemon exit: %v", err)
 			}
 		case <-time.After(40 * time.Second):
@@ -67,9 +85,9 @@ func startTestDaemon(t *testing.T, binary, repo string) func() {
 		}
 		_ = log.Close()
 	}
+	stop := func() { shutdown(syscall.SIGTERM, false) }
 	t.Cleanup(stop)
-	digest := sha256.Sum256([]byte(filepath.Join(repo, ".git")))
-	socket := filepath.Join("/tmp", fmt.Sprintf("persona-%d", os.Getuid()), hex.EncodeToString(digest[:16])+".sock")
+	socket := testDaemonSocket(repo)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		conn, err := net.DialTimeout("unix", socket, 50*time.Millisecond)
@@ -82,7 +100,16 @@ func startTestDaemon(t *testing.T, binary, repo string) func() {
 			err = json.NewDecoder(conn).Decode(&pong)
 			_ = conn.Close()
 			if err == nil && pong.Version == 2 {
-				return stop
+				return testDaemon{
+					stop:           stop,
+					stopPreserving: func() { shutdown(syscall.SIGTERM, true) },
+					crash:          func() { shutdown(syscall.SIGKILL, false) },
+					beginShutdown: func() {
+						if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+							t.Fatal(err)
+						}
+					},
+				}
 			}
 		}
 		select {

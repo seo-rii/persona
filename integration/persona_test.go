@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -22,15 +24,56 @@ var (
 	buildErr   error
 )
 
-func requireIntegration(t *testing.T) string {
-	if runtime.GOOS != "linux" {
-		t.Skip("linux only")
+// Daemons expose their mounts to file tools in the caller's namespace. Run the
+// entire suite in a disposable private namespace, including direct go test
+// invocations, so a failed/crashed daemon cannot leave mounts in the host.
+func TestMain(m *testing.M) {
+	if os.Getenv("PERSONA_INTEGRATION") == "1" {
+		if os.Geteuid() != 0 {
+			fmt.Fprintln(os.Stderr, "PERSONA_INTEGRATION=1 requires root in a mount-capable namespace; required tests were not run")
+			os.Exit(1)
+		}
+		mountNS, err := os.Readlink("/proc/self/ns/mnt")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "read integration mount namespace:", err)
+			os.Exit(1)
+		}
+		if parentNS := os.Getenv("PERSONA_TEST_PARENT_MOUNT_NS"); parentNS == "" {
+			cmd := exec.Command(os.Args[0], os.Args[1:]...)
+			cmd.Env = append(os.Environ(), "PERSONA_TEST_PARENT_MOUNT_NS="+mountNS)
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+			cmd.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWNS, Pdeathsig: unix.SIGKILL}
+			if err := cmd.Run(); err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					os.Exit(exitErr.ExitCode())
+				}
+				fmt.Fprintln(os.Stderr, "create required integration mount namespace:", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		} else if parentNS == mountNS {
+			fmt.Fprintln(os.Stderr, "refusing to run integration mounts in the parent namespace")
+			os.Exit(1)
+		}
+		if err := unix.Mount("", "/", "", uintptr(unix.MS_PRIVATE|unix.MS_REC), ""); err != nil {
+			fmt.Fprintln(os.Stderr, "make integration mounts private:", err)
+			os.Exit(1)
+		}
 	}
+	code := m.Run()
+	if personaBin != "" {
+		_ = os.RemoveAll(filepath.Dir(personaBin))
+	}
+	os.Exit(code)
+}
+
+func requireIntegration(t *testing.T) string {
+	t.Helper()
 	if os.Getenv("PERSONA_INTEGRATION") != "1" {
 		t.Skip("set PERSONA_INTEGRATION=1 to run")
 	}
 	if os.Geteuid() != 0 {
-		t.Skip("requires root for mount namespace")
+		t.Fatal("required integration tests need root in a mount-capable namespace")
 	}
 	return buildPersona(t)
 }

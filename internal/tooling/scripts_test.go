@@ -13,7 +13,7 @@ import (
 	"persona/internal/model"
 )
 
-func TestTestShRunsCmdAndInternalPackagesAndSkipsWithoutSudo(t *testing.T) {
+func TestTestShRequiresIntegrationAfterUnitTests(t *testing.T) {
 	repoRoot := repoRoot(t)
 	binDir, argsFile := stubGo(t, "dirname")
 
@@ -24,11 +24,12 @@ func TestTestShRunsCmdAndInternalPackagesAndSkipsWithoutSudo(t *testing.T) {
 		"GO_ARGS_FILE="+argsFile,
 	)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("test.sh failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "skip integration: sudo not found") {
-		t.Fatalf("expected explicit sudo skip message, got %s", out)
+	if os.Geteuid() != 0 {
+		if err == nil || !strings.Contains(string(out), "integration required: sudo not found") {
+			t.Fatalf("test.sh must fail when required integration cannot run: %v\n%s", err, out)
+		}
+	} else if err != nil {
+		t.Fatalf("test.sh failed as root: %v\n%s", err, out)
 	}
 	argsData, err := os.ReadFile(argsFile)
 	if err != nil {
@@ -37,11 +38,14 @@ func TestTestShRunsCmdAndInternalPackagesAndSkipsWithoutSudo(t *testing.T) {
 	if !strings.Contains(string(argsData), "test ./cmd/... ./internal/... -v") {
 		t.Fatalf("expected unit go test to cover cmd and internal packages, got %q", string(argsData))
 	}
+	if os.Geteuid() == 0 && !strings.Contains(string(argsData), "test -count=1 ./integration -v") {
+		t.Fatalf("expected all uncached integration tests, got %q", argsData)
+	}
 }
 
-func TestTestLogStderrReportsSkippedIntegrationWithoutSudo(t *testing.T) {
+func TestTestLogStderrRequiresIntegrationAfterUnitTests(t *testing.T) {
 	repoRoot := repoRoot(t)
-	binDir, argsFile := stubGo(t, "date", "tee", "grep", "rm", "dirname")
+	binDir, argsFile := stubGo(t, "date", "tee", "rm", "dirname", "env")
 	logPath := filepath.Join(t.TempDir(), "persona-test.log")
 
 	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "test_log_stderr.sh"), logPath)
@@ -51,14 +55,12 @@ func TestTestLogStderrReportsSkippedIntegrationWithoutSudo(t *testing.T) {
 		"GO_ARGS_FILE="+argsFile,
 	)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("test_log_stderr.sh failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "SKIP: sudo not found") {
-		t.Fatalf("expected explicit sudo skip message, got %s", out)
-	}
-	if !strings.Contains(string(out), "integration=SKIP(0)") {
-		t.Fatalf("expected skip summary, got %s", out)
+	if os.Geteuid() != 0 {
+		if err == nil || !strings.Contains(string(out), "FAIL: sudo not found") || !strings.Contains(string(out), "integration=FAIL(1)") {
+			t.Fatalf("missing required integration must fail: %v\n%s", err, out)
+		}
+	} else if err != nil || !strings.Contains(string(out), "integration=PASS(0)") {
+		t.Fatalf("root invocation did not run integration: %v\n%s", err, out)
 	}
 	argsData, err := os.ReadFile(argsFile)
 	if err != nil {
@@ -66,6 +68,39 @@ func TestTestLogStderrReportsSkippedIntegrationWithoutSudo(t *testing.T) {
 	}
 	if !strings.Contains(string(argsData), "test ./cmd/... ./internal/... -v") {
 		t.Fatalf("expected unit go test to cover cmd and internal packages, got %q", string(argsData))
+	}
+	if os.Geteuid() == 0 && !strings.Contains(string(argsData), "test -count=1 ./integration -v") {
+		t.Fatalf("expected all uncached integration tests, got %q", argsData)
+	}
+}
+
+func TestTestLogStderrPreservesFailureExitStatus(t *testing.T) {
+	for _, transport := range []string{"pipe", "pty"} {
+		for _, stage := range []string{"unit", "integration"} {
+			t.Run(transport+"/"+stage, func(t *testing.T) {
+				commands := []string{"date", "tee", "rm", "dirname", "env"}
+				if transport == "pty" {
+					commands = append(commands, "script")
+				}
+				failedArg := "./integration"
+				want := "integration=FAIL(17)"
+				if stage == "unit" {
+					failedArg = "./cmd/..."
+					want = "unit=FAIL(17)"
+				}
+				body := "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = '" + failedArg + "' ]; then\n    printf 'ok\\tpersona/integration\\t0.001s\\n'\n    exit 17\n  fi\ndone\nexit 0\n"
+				binDir, argsFile := stubGoWithBody(t, body, commands...)
+				if err := os.WriteFile(filepath.Join(binDir, "sudo"), []byte("#!/bin/sh\nif [ \"$1\" = '-E' ]; then shift; fi\nexec \"$@\"\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command("/bin/bash", filepath.Join(repoRoot(t), "test_log_stderr.sh"), filepath.Join(t.TempDir(), "result.log"))
+				cmd.Env = append(os.Environ(), "PATH="+binDir, "GO_ARGS_FILE="+argsFile, "SHELL=/bin/sh")
+				out, err := cmd.CombinedOutput()
+				if err == nil || !strings.Contains(string(out), want) || !strings.Contains(string(out), "overall=FAIL(1)") {
+					t.Fatalf("test helper masked %s failure over %s: %v\n%s", stage, transport, err, out)
+				}
+			})
+		}
 	}
 }
 

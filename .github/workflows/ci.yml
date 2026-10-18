@@ -61,6 +61,11 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: bash ./test.sh
 
+      - name: Repeat daemon persistence and recovery in private mount namespaces
+        run: |
+          sudo env "PATH=$PATH" PERSONA_INTEGRATION=1 \
+            "$(command -v go)" test -count=3 -shuffle=on ./integration -run '^TestPersonaIntegrationDaemon'
+
       - name: Verify non-root file capability execution
         run: |
           go build -o "$RUNNER_TEMP/persona-capability" ./cmd/persona
