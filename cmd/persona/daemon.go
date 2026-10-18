@@ -36,6 +36,7 @@ const (
 	daemonSocketFile     = "persona.sock"
 	daemonLaunchLock     = "launch.lock"
 	daemonProtocol       = 2
+	daemonMetadataSchema = 1
 	daemonRequestTimeout = 30 * time.Second
 )
 
@@ -165,12 +166,14 @@ type daemonSession struct {
 	lastDurableGeneration uint64
 	viewGeneration        uint64
 	lastError             string
+	patchChecksum         string
 	busyOwnerStart        string
 	closed                bool
 	preserve              *bool
 }
 
 type daemonSessionMeta struct {
+	SchemaVersion         int                 `json:"schema_version,omitempty"`
 	SessionKey            string              `json:"session_key"`
 	Config                daemonSessionConfig `json:"config"`
 	SessionRoot           string              `json:"session_root"`
@@ -190,6 +193,7 @@ type daemonSessionMeta struct {
 	BusyOwnerStart        string              `json:"busy_owner_start,omitempty"`
 	InitialIgnored        []string            `json:"initial_ignored,omitempty"`
 	ExternalRoot          string              `json:"external_root,omitempty"`
+	PatchChecksum         string              `json:"patch_checksum,omitempty"`
 }
 
 func addDaemonCommands(root *cobra.Command) {
@@ -814,6 +818,7 @@ func daemonSessionSnapshot(sess *daemonSession) daemonSessionInfo {
 
 func daemonSessionMetaSnapshot(sess *daemonSession) daemonSessionMeta {
 	meta := daemonSessionMeta{
+		SchemaVersion:         daemonMetadataSchema,
 		SessionKey:            sess.key,
 		Config:                sess.config,
 		SessionRoot:           sess.sess.Root,
@@ -830,6 +835,7 @@ func daemonSessionMetaSnapshot(sess *daemonSession) daemonSessionMeta {
 		BusyOwnerStart:        sess.busyOwnerStart,
 		InitialIgnored:        sess.initialIgnored,
 		ExternalRoot:          filepath.Dir(sess.menv.tempRoot),
+		PatchChecksum:         sess.patchChecksum,
 	}
 	if !sess.createdAt.IsZero() {
 		meta.CreatedUnix = sess.createdAt.Unix()
@@ -851,10 +857,11 @@ func daemonTimeFromUnix(unixSeconds int64) time.Time {
 }
 
 func writeDaemonSessionMeta(path string, meta daemonSessionMeta) error {
+	meta.SchemaVersion = daemonMetadataSchema
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "session-meta-*.json")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".session-meta-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -911,6 +918,9 @@ func readDaemonSessionMeta(path string) (daemonSessionMeta, error) {
 	}
 	var meta daemonSessionMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
+		return daemonSessionMeta{}, err
+	}
+	if err := validateDaemonSessionMeta(meta); err != nil {
 		return daemonSessionMeta{}, err
 	}
 	return meta, nil
@@ -1277,6 +1287,10 @@ func (s *daemonState) restoreSessionByKeyLocked(ctx context.Context, sessionKey 
 }
 
 func (s *daemonState) restoreSessionLocked(ctx context.Context, meta daemonSessionMeta, bumpLastUsed bool) (*daemonSession, error) {
+	return s.restoreSessionWithCheckpoint(ctx, meta, bumpLastUsed, nil)
+}
+
+func (s *daemonState) restoreSessionWithCheckpoint(ctx context.Context, meta daemonSessionMeta, bumpLastUsed bool, checkpoint *daemonCheckpoint) (*daemonSession, error) {
 	if existing := s.sessionByKey(meta.SessionKey); existing != nil {
 		return existing, nil
 	}
@@ -1302,7 +1316,7 @@ func (s *daemonState) restoreSessionLocked(ctx context.Context, meta daemonSessi
 			return nil, err
 		}
 	}
-	sess, err := s.createSessionFromMeta(ctx, meta.SessionKey, meta.Config, &meta)
+	sess, err := s.createSessionWithCheckpoint(ctx, meta.SessionKey, meta.Config, &meta, checkpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -1324,13 +1338,16 @@ func (s *daemonState) restoreSessionLocked(ctx context.Context, meta daemonSessi
 	sess.generation = meta.Generation
 	sess.lastDurableGeneration = meta.LastDurableGeneration
 	sess.dirty = meta.Dirty
+	sess.lastError = meta.LastError
 	sess.viewGeneration = meta.ViewGeneration + 1
 	if sess.viewGeneration == 0 {
 		sess.viewGeneration = 1
 	}
 	s.putSession(meta.SessionKey, sess)
 	if err := s.persistSessionLocked(sess); err != nil {
-		return nil, err
+		// The registry now owns the live view and checkpoint descriptors, even
+		// when publishing its metadata fails. Preserve them for retry/shutdown.
+		return sess, err
 	}
 	return sess, nil
 }
@@ -1342,6 +1359,8 @@ func (s *daemonState) persistSessionLocked(sess *daemonSession) error {
 		write = writeDaemonSessionMeta
 	}
 	if err := write(sess.metaPath, daemonSessionMetaSnapshot(sess)); err != nil {
+		sess.lastError = err.Error()
+		s.cacheSession(sess)
 		return model.Wrap(model.ExitWrite, "write daemon session metadata", err)
 	}
 	return nil
@@ -1352,25 +1371,30 @@ func (s *daemonState) createSessionLocked(ctx context.Context, sessionKey string
 }
 
 func (s *daemonState) createSessionFromMeta(ctx context.Context, sessionKey string, cfg daemonSessionConfig, prior *daemonSessionMeta) (_ *daemonSession, retErr error) {
+	return s.createSessionWithCheckpoint(ctx, sessionKey, cfg, prior, nil)
+}
+
+func (s *daemonState) createSessionWithCheckpoint(ctx context.Context, sessionKey string, cfg daemonSessionConfig, prior *daemonSessionMeta, checkpoint *daemonCheckpoint) (_ *daemonSession, retErr error) {
 	patchPath := daemonSessionPatchPath(s.gitDir, sessionKey)
 	metaPath := daemonSessionMetaPath(s.gitDir, sessionKey)
-	patchStore, err := patchio.OpenPatchStore(patchPath)
-	if err != nil {
-		return nil, model.Wrap(model.ExitWrite, "open patch store", err)
+	var err error
+	if checkpoint == nil {
+		checkpoint, err = openDaemonCheckpoint(ctx, patchPath)
+		if err != nil {
+			return nil, model.Wrap(model.ExitWrite, "open patch checkpoint", err)
+		}
 	}
-	lock, err := patchStore.LockContext(ctx)
-	if err != nil {
-		_ = patchStore.Close()
-		return nil, model.Wrap(model.ExitWrite, "lock patch", err)
-	}
+	patchStore, lock := checkpoint.store, checkpoint.lock
 	cleanup := &cleanupStack{}
-	cleanup.Push(func() error { return patchStore.Close() })
-	cleanup.Push(func() error { return lock.Unlock() })
+	cleanup.Push(checkpoint.close)
 	defer func() {
 		if retErr != nil {
 			retErr = errors.Join(retErr, cleanup.Run())
 		}
 	}()
+	if err := checkpoint.validate(prior); err != nil {
+		return nil, err
+	}
 
 	var sess *session.Session
 	reuse := prior != nil && prior.Dirty
@@ -1452,6 +1476,11 @@ func (s *daemonState) createSessionFromMeta(ctx context.Context, sessionKey stri
 		}
 		if cfg.BaseMode == model.BaseWorktree {
 			basePath = sess.BaseWT
+			if _, realGit := g.(*gitx.Git); realGit {
+				if err := validateRecoveryBase(ctx, basePath, prior.BaseOID); err != nil {
+					return nil, model.Wrap(model.ExitRepo, "recovery_required: validate preserved base", err)
+				}
+			}
 		} else {
 			return nil, model.Wrap(model.ExitRepo, "recovery_required", fmt.Errorf("dirty repo-mode lower layer cannot be verified; preserved %s", sess.Root))
 		}
@@ -1560,6 +1589,7 @@ func (s *daemonState) createSessionFromMeta(ctx context.Context, sessionKey stri
 		createdAt:      createdAt,
 		lastUsed:       createdAt,
 		initialIgnored: initialIgnored,
+		patchChecksum:  checkpoint.checksum,
 		viewGeneration: 1,
 		preserve:       &preserve,
 	}
@@ -1603,6 +1633,12 @@ func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string,
 		}
 		return nil
 	}
+	// Publish the in-progress save before replacing the patch. A crash after
+	// patch rename but before the final metadata write must retain the upper.
+	sess.dirty = true
+	if err := s.persistSessionLocked(sess); err != nil {
+		return err
+	}
 	if err := s.writeSessionPatch(ctx, sess, sess.initialIgnored); err != nil {
 		sess.dirty = true
 		sess.lastError = err.Error()
@@ -1618,6 +1654,7 @@ func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string,
 	if err := s.persistSessionLocked(sess); err != nil {
 		sess.dirty = true
 		sess.lastError = err.Error()
+		s.cacheSession(sess)
 		return err
 	}
 	return nil
@@ -1664,6 +1701,7 @@ func (s *daemonState) finishBusyLocked(ctx context.Context, sess *daemonSession)
 	if err := s.persistSessionLocked(sess); err != nil {
 		sess.dirty = true
 		sess.lastError = err.Error()
+		s.cacheSession(sess)
 		return errors.Join(exportErr, err)
 	}
 	return exportErr
@@ -1675,7 +1713,8 @@ func (s *daemonState) writeSessionPatch(ctx context.Context, sess *daemonSession
 		return model.Wrap(model.ExitExport, "create export temp", err)
 	}
 	defer closeAndRemoveTempFile(exportFile)
-	if _, err := exportPatchToWriter(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.patchInRepo, sess.patchRel, sess.config.IgnoredMax, initialIgnored, exportFile); err != nil {
+	hash := sha256.New()
+	if _, err := exportPatchToWriter(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.patchInRepo, sess.patchRel, sess.config.IgnoredMax, initialIgnored, io.MultiWriter(exportFile, hash)); err != nil {
 		return model.Wrap(model.ExitExport, "export patch", err)
 	}
 	if _, err := exportFile.Seek(0, 0); err != nil {
@@ -1684,6 +1723,7 @@ func (s *daemonState) writeSessionPatch(ctx context.Context, sess *daemonSession
 	if err := sess.store.WriteFromReader(exportFile); err != nil {
 		return model.Wrap(model.ExitWrite, "write patch", err)
 	}
+	sess.patchChecksum = hex.EncodeToString(hash.Sum(nil))
 	return nil
 }
 
@@ -1724,7 +1764,7 @@ func daemonSessionMetaPaths(gitDir string) ([]string, error) {
 	}
 	paths := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || !validDaemonMetaFilename(entry.Name()) {
 			continue
 		}
 		paths = append(paths, filepath.Join(stateDir, entry.Name()))

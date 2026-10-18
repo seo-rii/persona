@@ -212,6 +212,18 @@ func (s *daemonState) recoverSession(ctx context.Context, key string, dryRun boo
 	if processIdentityAlive(meta.BusyOwnerPID, meta.BusyOwnerStart) {
 		return nil, fmt.Errorf("previous mutation owner is still alive")
 	}
+	checkpoint, err := openDaemonCheckpoint(ctx, daemonSessionPatchPath(s.gitDir, key))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if checkpoint != nil {
+			_ = checkpoint.close()
+		}
+	}()
+	if err := checkpoint.validate(&meta); err != nil {
+		return nil, err
+	}
 	if _, statErr := os.Lstat(meta.SessionRoot); statErr == nil {
 		owned, err := session.Open(s.gitDir, meta.SessionRoot)
 		if err != nil {
@@ -241,7 +253,10 @@ func (s *daemonState) recoverSession(ctx context.Context, key string, dryRun boo
 		return nil, err
 	}
 	meta.ExternalRoot = ""
-	restored, err := s.restoreSessionLocked(ctx, meta, true)
+	restored, err := s.restoreSessionWithCheckpoint(ctx, meta, true, checkpoint)
+	if restored != nil {
+		checkpoint = nil
+	}
 	if err != nil {
 		return nil, err
 	}

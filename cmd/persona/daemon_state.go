@@ -148,7 +148,10 @@ func writeDaemonOwner(root, key, oid string) error {
 	if _, err := file.WriteString(daemonOwnerData(key, oid)); err != nil {
 		return err
 	}
-	return file.Sync()
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	return syncDaemonDirectory(root)
 }
 func validateDaemonOwner(root, key, oid string) error {
 	path := filepath.Join(root, ".persona-daemon-owner")
