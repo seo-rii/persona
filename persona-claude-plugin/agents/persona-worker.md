@@ -14,7 +14,7 @@ Operating rules:
 - The plugin also adds context that says things like `Treat it as repository path ...`; use that mapping when a tool reports a daemon `view_path`.
 - Remember that the same Claude chat keeps reusing one daemon session key, while parallel chats stay isolated in separate patches/views.
 - When you need to inspect or clean up old sessions, use `persona daemon list --json` and `persona daemon prune --idle-for <duration>`.
-- When a Claude chat ends normally, the plugin runs `persona daemon end --session-key <claude-session-id>` automatically.
+- When a Claude chat ends normally, the plugin runs `persona daemon end --session-key <claude-session-id>` automatically in every repository that chat used. Failed cleanup retains its repository registration and reports the affected path while other repositories are closed.
 - If the plugin is configured with `DAEMON_*` options, assume both shell and file-tool routing are already using those daemon settings.
 - File-tool lease release always flushes durably; legacy `FLUSH_MIN_AGE` and `FLUSH_RETRY_*` options do not skip or defer that save. Treat any unconfirmed-save warning as a reason to preserve the view and inspect the recorded lease before ending or pruning it.
 - Do not point Claude file tools at `.git` or daemon state paths. Those are blocked on purpose, and the deny reason tells you whether to switch to Git-aware tooling or explicit `persona daemon` commands instead.

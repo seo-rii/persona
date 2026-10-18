@@ -691,7 +691,7 @@ func TestPersonaWrapRetainsLeaseAndReportsFailedSave(t *testing.T) {
 	if !strings.Contains(context, "NOT confirmed") || !strings.Contains(context, "Do not end, prune") || response["systemMessage"] != context {
 		t.Fatalf("save failure must be visible to Claude and user: %s", output)
 	}
-	entries, err := os.ReadDir(leaseDir)
+	entries, err := personaLeaseRecordEntries(leaseDir)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("failed release must retain lease record: entries=%v err=%v", entries, err)
 	}
@@ -700,7 +700,7 @@ func TestPersonaWrapRetainsLeaseAndReportsFailedSave(t *testing.T) {
 	if !bytes.Contains(output, []byte("durably flushed")) {
 		t.Fatalf("retry did not save retained lease: %s", output)
 	}
-	entries, err = os.ReadDir(leaseDir)
+	entries, err = personaLeaseRecordEntries(leaseDir)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("successful release must remove lease record: entries=%v err=%v", entries, err)
 	}
@@ -763,6 +763,170 @@ func TestPersonaWrapEndsDaemonSessionOnSessionEnd(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "daemon end --session-key session-123") {
 		t.Fatalf("expected daemon end call on SessionEnd, got log:\n%s", logData)
+	}
+}
+
+func TestPersonaWrapEndsEveryRegisteredRepositoryFromOutsideGit(t *testing.T) {
+	repoRoot := repoRoot(t)
+	view, leaseDir, logDir := t.TempDir(), t.TempDir(), t.TempDir()
+	personaStub := writePersonaDaemonStub(t, view, "")
+	logPath := filepath.Join(logDir, "cwd.log")
+	env := map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub, "PERSONA_TEST_VIEW_PATH": view,
+		"PERSONA_WRAP_LEASE_DIR": leaseDir, "PERSONA_TEST_CWD_LOG": logPath,
+	}
+	projects := []string{newPersonaHookRepository(t), newPersonaHookRepository(t)}
+	for _, project := range projects {
+		output := runPersonaWrap(t, repoRoot, map[string]any{
+			"session_id": "multi-repo", "cwd": project, "hook_event_name": "PreToolUse", "tool_name": "Bash",
+			"tool_input": map[string]any{"command": "printf changed > note.txt"},
+		}, env)
+		if !bytes.Contains(output, []byte("updatedInput")) {
+			t.Fatalf("register Bash repository: %s", output)
+		}
+	}
+	output := runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id": "other-session", "cwd": projects[0], "hook_event_name": "PreToolUse", "tool_name": "Bash",
+		"tool_input": map[string]any{"command": "printf other"},
+	}, env)
+	if !bytes.Contains(output, []byte("updatedInput")) {
+		t.Fatalf("register other session: %s", output)
+	}
+	output = runPersonaWrap(t, repoRoot, map[string]any{
+		"session_id": "multi-repo", "cwd": t.TempDir(), "hook_event_name": "SessionEnd",
+	}, env)
+	if len(bytes.TrimSpace(output)) != 0 {
+		t.Fatalf("end registered repositories: %s", output)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range projects {
+		if !bytes.Contains(logData, []byte(project+" daemon end --session-key multi-repo")) {
+			t.Fatalf("repository %s not ended: %s", project, logData)
+		}
+	}
+	if bytes.Contains(logData, []byte("other-session")) {
+		t.Fatalf("SessionEnd touched another session: %s", logData)
+	}
+	entries, err := os.ReadDir(leaseDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("only the other session registration should remain: %v %v", entries, err)
+	}
+}
+
+func TestPersonaWrapSessionEndIsolatesFailuresAndRetainsRetryState(t *testing.T) {
+	repoRoot := repoRoot(t)
+	for _, failure := range []string{"daemon", "timeout", "corrupt-registration"} {
+		t.Run(failure, func(t *testing.T) {
+			view, leaseDir := t.TempDir(), t.TempDir()
+			personaStub := writePersonaDaemonStub(t, view, "")
+			logPath := filepath.Join(t.TempDir(), "cwd.log")
+			broken, healthy := newPersonaHookRepository(t), newPersonaHookRepository(t)
+			env := map[string]string{
+				"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub, "PERSONA_TEST_VIEW_PATH": view,
+				"PERSONA_WRAP_LEASE_DIR": leaseDir, "PERSONA_TEST_CWD_LOG": logPath,
+				"PERSONA_TEST_END_FAIL_REPO": broken,
+			}
+			for _, project := range []string{broken, healthy} {
+				output := runPersonaWrap(t, repoRoot, map[string]any{
+					"session_id": "multi-repo", "cwd": project, "hook_event_name": "PreToolUse", "tool_name": "Bash",
+					"tool_input": map[string]any{"command": "printf ok"},
+				}, env)
+				if !bytes.Contains(output, []byte("updatedInput")) {
+					t.Fatalf("register repository: %s", output)
+				}
+			}
+			var brokenPath string
+			if failure == "corrupt-registration" {
+				entries, err := os.ReadDir(leaseDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					path := filepath.Join(leaseDir, entry.Name())
+					data, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if bytes.Contains(data, []byte(broken)) {
+						brokenPath = path
+						if err := os.WriteFile(path, []byte("{interrupted"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if brokenPath == "" {
+					t.Fatal("missing broken repository registration")
+				}
+			}
+			if failure == "timeout" {
+				env["PERSONA_WRAP_DAEMON_TIMEOUT"] = "500ms"
+				env["PERSONA_TEST_END_SLEEP_REPO"] = broken
+			}
+			event := map[string]any{"session_id": "multi-repo", "cwd": t.TempDir(), "hook_event_name": "SessionEnd"}
+			started := time.Now()
+			output := runPersonaWrap(t, repoRoot, event, env)
+			if failure == "timeout" && time.Since(started) > 2*time.Second {
+				t.Fatal("SessionEnd exceeded its shared timeout budget")
+			}
+			if !bytes.Contains(output, []byte("failed during SessionEnd")) {
+				t.Fatalf("failure must remain visible: %s", output)
+			}
+			logData, err := os.ReadFile(logPath)
+			if err != nil || !bytes.Contains(logData, []byte(healthy+" daemon end --session-key multi-repo")) {
+				t.Fatalf("failed repository blocked healthy cleanup: %s %v", logData, err)
+			}
+			entries, err := os.ReadDir(leaseDir)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("only failed registration must remain: %v %v", entries, err)
+			}
+			if failure == "corrupt-registration" {
+				if !bytes.Contains(output, []byte(brokenPath)) {
+					t.Fatalf("corrupt registration must report recovery path: %s", output)
+				}
+				return
+			}
+			env["PERSONA_TEST_END_FAIL_REPO"] = ""
+			env["PERSONA_TEST_END_SLEEP_REPO"] = ""
+			if output := runPersonaWrap(t, repoRoot, event, env); len(bytes.TrimSpace(output)) != 0 {
+				t.Fatalf("retry failed: %s", output)
+			}
+			entries, err = os.ReadDir(leaseDir)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("successful retry must remove final registration: %v %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestPersonaWrapPostToolUsesAcquiredRepositoryAfterCwdChanges(t *testing.T) {
+	repoRoot := repoRoot(t)
+	view, project := t.TempDir(), newPersonaHookRepository(t)
+	personaStub := writePersonaDaemonStub(t, view, "")
+	logPath := filepath.Join(t.TempDir(), "cwd.log")
+	env := map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub, "PERSONA_TEST_VIEW_PATH": view,
+		"PERSONA_WRAP_LEASE_DIR": t.TempDir(), "PERSONA_TEST_CWD_LOG": logPath,
+		"PERSONA_TEST_SKIP_PRETOOL": "1",
+	}
+	event := map[string]any{
+		"session_id": "moved-cwd", "tool_use_id": "write-1", "cwd": project,
+		"hook_event_name": "PreToolUse", "tool_name": "Write",
+		"tool_input": map[string]any{"file_path": "note.txt", "content": "saved"},
+	}
+	if output := runPersonaWrap(t, repoRoot, event, env); !bytes.Contains(output, []byte("updatedInput")) {
+		t.Fatalf("acquire lease: %s", output)
+	}
+	event["hook_event_name"], event["cwd"] = "PostToolUse", t.TempDir()
+	env["CLAUDE_PLUGIN_OPTION_PERSONA_BIN"] = filepath.Join(t.TempDir(), "missing-persona")
+	if output := runPersonaWrap(t, repoRoot, event, env); !bytes.Contains(output, []byte("durably flushed")) {
+		t.Fatalf("post hook must use original repository and binary: %s", output)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil || !bytes.Contains(logData, []byte(project+" daemon release --session-key moved-cwd --lease-id lease-123 --view-generation 7")) {
+		t.Fatalf("release lost acquired repository identity: %s %v", logData, err)
 	}
 }
 
@@ -1192,7 +1356,7 @@ func TestPersonaWrapFileToolsShareLeaseAndReleaseAfterFailureOrDenial(t *testing
 			if !bytes.Contains(output, []byte("updatedInput")) {
 				t.Fatalf("first writer did not acquire: %s", output)
 			}
-			entries, err := os.ReadDir(leaseDir)
+			entries, err := personaLeaseRecordEntries(leaseDir)
 			if err != nil || len(entries) != 1 {
 				t.Fatalf("missing private lease record: %v %v", entries, err)
 			}
@@ -1214,7 +1378,7 @@ func TestPersonaWrapFileToolsShareLeaseAndReleaseAfterFailureOrDenial(t *testing
 			if outcome == "PostToolUseFailure" && !bytes.Contains(output, []byte("partial file changes")) {
 				t.Fatalf("failure must flush partial state: %s", output)
 			}
-			entries, err = os.ReadDir(leaseDir)
+			entries, err = personaLeaseRecordEntries(leaseDir)
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("completion must release private record: %v %v", entries, err)
 			}
@@ -1364,11 +1528,16 @@ args = sys.argv[1:]
 if os.getenv("PERSONA_TEST_LOG"):
     with open(os.environ["PERSONA_TEST_LOG"], "a") as log:
         log.write(" ".join(args) + "\n")
+if os.getenv("PERSONA_TEST_CWD_LOG"):
+    with open(os.environ["PERSONA_TEST_CWD_LOG"], "a") as log:
+        log.write(os.getcwd() + " " + " ".join(args) + "\n")
 if os.getenv("PERSONA_TEST_SLEEP"):
     time.sleep(float(os.environ["PERSONA_TEST_SLEEP"]))
 def option(name, default=""):
     return args[args.index(name) + 1] if name in args else default
 method = args[1] if len(args) > 1 else ""
+if method == "end" and os.getenv("PERSONA_TEST_END_SLEEP_REPO") == os.getcwd():
+    time.sleep(3)
 session = option("--session-key")
 git_dir = os.getenv("PERSONA_TEST_GIT_DIR", os.path.join(os.getcwd(), ".git"))
 info = {"session_key": session, "repo_root": os.getcwd(), "git_dir": git_dir,
@@ -1408,6 +1577,9 @@ elif method == "exec":
         sys.stderr.write("session is still busy\n")
         sys.exit(1)
     sys.exit(subprocess.run(args[args.index("--") + 1:], cwd=info["view_path"]).returncode)
+elif method == "end" and os.getenv("PERSONA_TEST_END_FAIL_REPO") == os.getcwd():
+    sys.stderr.write("session still busy; keep the view\n")
+    sys.exit(1)
 `
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write persona stub: %v", err)
@@ -1423,6 +1595,29 @@ elif method == "exec":
 		}
 	}
 	return scriptPath
+}
+
+func newPersonaHookRepository(t *testing.T) string {
+	t.Helper()
+	path := t.TempDir()
+	if output, err := exec.Command("git", "-C", path, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("init hook repository: %v %s", err, output)
+	}
+	return path
+}
+
+func personaLeaseRecordEntries(directory string) ([]os.DirEntry, error) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, err
+	}
+	leases := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "repo-") {
+			leases = append(leases, entry)
+		}
+	}
+	return leases, nil
 }
 
 func runPersonaWrap(t *testing.T, repoRoot string, event map[string]any, env map[string]string) []byte {

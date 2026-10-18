@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 
 DEFAULT_BYPASS_PREFIXES = ("git", "gh", "persona", "claude")
@@ -277,10 +278,14 @@ def daemon_option_args():
     return args
 
 
-def daemon_call(args, cwd):
+def daemon_timeout():
     timeout = parse_duration_seconds(os.getenv("PERSONA_WRAP_DAEMON_TIMEOUT", "30s"), "PERSONA_WRAP_DAEMON_TIMEOUT")
     if timeout <= 0:
         raise ValueError("PERSONA_WRAP_DAEMON_TIMEOUT must be positive")
+    return timeout
+
+
+def daemon_call(args, cwd, timeout=None):
     return subprocess.run(
         args,
         check=True,
@@ -288,7 +293,7 @@ def daemon_call(args, cwd):
         stderr=subprocess.PIPE,
         text=True,
         cwd=cwd,
-        timeout=timeout,
+        timeout=daemon_timeout() if timeout is None else timeout,
     )
 
 
@@ -314,8 +319,8 @@ def daemon_release(persona_bin, session_id, lease_id, generation, cwd):
     )
 
 
-def daemon_end(persona_bin, session_id, cwd):
-    daemon_call([persona_bin, "daemon", "end", "--session-key", session_id], cwd)
+def daemon_end(persona_bin, session_id, cwd, timeout=None):
+    daemon_call([persona_bin, "daemon", "end", "--session-key", session_id], cwd, timeout)
 
 
 def subprocess_error_text(err):
@@ -509,34 +514,58 @@ def open_lease_directory():
     return fd
 
 
-def save_lease_record(event, repo_dir, record):
-    name = lease_record_name(event, repo_dir)
-    directory = open_lease_directory()
+def write_private_record(directory, name, record, replace=False):
+    temporary = ".tmp-" + os.urandom(16).hex()
     try:
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                      0o600, dir_fd=directory)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(record, stream)
             stream.flush()
             os.fsync(stream.fileno())
+        if replace:
+            os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        else:
+            # A repeated tool-use ID must never overwrite a live lease record.
+            os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            os.unlink(temporary, dir_fd=directory)
         os.fsync(directory)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
+def read_private_record(directory, name):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 65536:
+            raise ValueError("invalid persona hook private record")
+        record = json.load(stream)
+    if not isinstance(record, dict):
+        raise ValueError("invalid persona hook private record")
+    return record
+
+
+def save_lease_record(event, repo_dir, record):
+    directory = open_lease_directory()
+    try:
+        write_private_record(directory, lease_record_name(event, repo_dir), record)
     finally:
         os.close(directory)
 
 
 def read_lease_record(event, repo_dir):
-    name = lease_record_name(event, repo_dir)
     directory = open_lease_directory()
     try:
-        try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory)
-        except FileNotFoundError:
+        record = read_private_record(directory, lease_record_name(event, repo_dir))
+        if record is None:
             return None
-        with os.fdopen(fd, "r", encoding="utf-8") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 65536:
-                raise ValueError("invalid persona hook lease record")
-            record = json.load(stream)
         if not isinstance(record, dict) or record.get("session_id") != session_identity(event) or record.get("tool_name") != event.get("tool_name"):
             raise ValueError("persona hook lease record identity mismatch")
         return record
@@ -551,6 +580,85 @@ def remove_lease_record(event, repo_dir):
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def session_registry_prefix(session_id):
+    return "repo-" + hashlib.sha256(session_id.encode("utf-8")).hexdigest() + "-"
+
+
+def session_registry_name(session_id, repo_dir):
+    return session_registry_prefix(session_id) + hashlib.sha256(os.fsencode(os.path.realpath(repo_dir))).hexdigest() + ".json"
+
+
+def register_session_repository(session_id, repo_dir, persona_bin):
+    directory = open_lease_directory()
+    try:
+        write_private_record(directory, session_registry_name(session_id, repo_dir), {
+            "session_id": session_id,
+            "repo_dir": os.path.realpath(repo_dir),
+            "persona_bin": os.path.abspath(shutil.which(persona_bin) or persona_bin),
+        }, replace=True)
+    finally:
+        os.close(directory)
+
+
+def registered_session_repositories(session_id):
+    directory = open_lease_directory()
+    records, errors = [], []
+    prefix = session_registry_prefix(session_id)
+    try:
+        for name in sorted(os.listdir(directory)):
+            if not re.fullmatch(re.escape(prefix) + r"[0-9a-f]{64}\.json", name):
+                continue
+            try:
+                record = read_private_record(directory, name)
+                if record is None:
+                    continue
+                repo_dir = record.get("repo_dir")
+                persona_bin = record.get("persona_bin")
+                if (record.get("session_id") != session_id or not isinstance(repo_dir, str)
+                        or not os.path.isabs(repo_dir) or not isinstance(persona_bin, str)
+                        or not os.path.isabs(persona_bin) or session_registry_name(session_id, repo_dir) != name):
+                    raise ValueError("repository registration identity mismatch")
+                records.append(record)
+            except (OSError, ValueError) as err:
+                errors.append(f"{os.path.join(lease_directory_path(), name)}: {err}")
+    finally:
+        os.close(directory)
+    return records, errors
+
+
+def remove_session_registration(session_id, repo_dir):
+    directory = open_lease_directory()
+    try:
+        os.unlink(session_registry_name(session_id, repo_dir), dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def find_tool_lease(event):
+    session_id = session_identity(event)
+    registrations, errors = registered_session_repositories(session_id)
+    matches = []
+    for registration in registrations:
+        record = read_lease_record(event, registration["repo_dir"])
+        if record is not None:
+            matches.append((registration["repo_dir"], record.get("persona_bin", registration["persona_bin"]), record))
+    if len(matches) > 1:
+        raise ValueError("file-tool identity matches multiple repository leases; keep the records for recovery")
+    if matches:
+        return matches[0]
+    # Older plugin versions did not register repositories. Retain their exact
+    # per-repository lookup, but never redirect a recorded lease to a new cwd.
+    cwd = event.get("cwd") or os.getcwd()
+    repo_dir = repo_root(cwd)
+    record = read_lease_record(event, repo_dir) if repo_dir else None
+    if record is not None:
+        return repo_dir, resolve_persona_bin(), record
+    if errors:
+        raise ValueError("cannot locate file-tool lease: " + "; ".join(errors))
+    return None
 
 
 def handle_pretooluse(event):
@@ -585,6 +693,7 @@ def handle_pretooluse(event):
 
         try:
             daemon_args = daemon_option_args()
+            register_session_repository(session_id, repo_dir, persona_bin)
         except ValueError as err:
             emit_pretooluse("deny", f"invalid persona daemon plugin option: {err}")
             return 0
@@ -606,6 +715,7 @@ def handle_pretooluse(event):
     try:
         daemon_args = daemon_option_args()
         lease_record_name(event, repo_dir)
+        register_session_repository(session_id, repo_dir, persona_bin)
     except ValueError as err:
         emit_pretooluse("deny", f"invalid persona daemon plugin option: {err}")
         return 0
@@ -629,6 +739,7 @@ def handle_pretooluse(event):
     try:
         save_lease_record(event, repo_dir, {"session_id": session_id, "tool_name": tool_name,
                                          "lease_id": lease_id, "session": info,
+                                         "persona_bin": os.path.abspath(shutil.which(persona_bin) or persona_bin),
                                          "context": managed_tool_context(tool_name, updated_input, repo_dir, view_path, cwd)})
     except (OSError, ValueError) as err:
         reason = f"persona could not record the file-tool lease: {subprocess_error_text(err)}"
@@ -659,25 +770,21 @@ def handle_posttooluse(event):
     if tool_name not in FILE_TOOLS:
         return 0
 
-    cwd = event.get("cwd") or os.getcwd()
-    repo_dir = repo_root(cwd)
-    if not repo_dir:
-        return 0
     hook_name = event.get("hook_event_name", "PostToolUse")
     saved = False
     try:
         session_id = session_identity(event)
-        record = read_lease_record(event, repo_dir)
-        if record is None:
+        found = find_tool_lease(event)
+        if found is None:
             if tool_name in WRITE_FILE_TOOLS and hook_name != "PermissionDenied":
                 raise ValueError("file-tool lease record is missing; the change has not been confirmed saved")
             return 0
-        persona_bin = resolve_persona_bin()
+        repo_dir, persona_bin, record = found
         if not persona_bin:
             raise ValueError(persona_not_found_reason())
         # Release uses the generation acquired before the tool ran. Never look
         # up a replacement view after a daemon restart and flush that instead.
-        daemon_release(persona_bin, session_id, record["lease_id"], record["session"]["view_generation"], cwd)
+        daemon_release(persona_bin, session_id, record["lease_id"], record["session"]["view_generation"], repo_dir)
         saved = True
         remove_lease_record(event, repo_dir)
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as err:
@@ -703,18 +810,30 @@ def handle_posttooluse(event):
 
 
 def handle_session_end(event):
-    cwd = event.get("cwd") or os.getcwd()
-    if not repo_root(cwd):
-        return 0
-
-    persona_bin = resolve_persona_bin()
-    if not persona_bin:
-        return 0
-    try:
-        session_id = session_identity(event)
-        daemon_end(persona_bin, session_id, cwd)
-    except (OSError, subprocess.SubprocessError, ValueError) as err:
-        print(f"persona daemon end failed during SessionEnd: {subprocess_error_text(err)}", file=sys.stderr)
+    session_id = session_identity(event)
+    registrations, errors = registered_session_repositories(session_id)
+    if not registrations:
+        # Compatibility for sessions opened before repository registration.
+        repo_dir = repo_root(event.get("cwd") or os.getcwd())
+        persona_bin = resolve_persona_bin()
+        if repo_dir and persona_bin:
+            registrations.append({"repo_dir": repo_dir, "persona_bin": persona_bin, "legacy": True})
+    deadline = time.monotonic() + daemon_timeout()
+    for index, registration in enumerate(registrations):
+        repo_dir = registration["repo_dir"]
+        try:
+            # Give every registered repository a bounded attempt, even when a
+            # previous daemon stalls, within the hook's total subprocess budget.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("SessionEnd time budget exhausted; repository registration retained for retry")
+            daemon_end(registration["persona_bin"], session_id, repo_dir, remaining / (len(registrations) - index))
+            if not registration.get("legacy"):
+                remove_session_registration(session_id, repo_dir)
+        except (OSError, subprocess.SubprocessError, ValueError) as err:
+            errors.append(f"{repo_dir}: {subprocess_error_text(err)}")
+    for err in errors:
+        print(f"persona daemon end failed during SessionEnd: {err}", file=sys.stderr)
     return 0
 
 
