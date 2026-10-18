@@ -127,6 +127,7 @@ func setupMountTargetEnv(targetPath, gitDir, basePath string, sess *session.Sess
 	}); err != nil {
 		return nil, model.Wrap(model.ExitEnv, "mount overlay", err)
 	}
+	pushUmountCleanup(cleanup, mount, targetPath)
 	log.Debug("overlay mounted", "target", targetPath, "base", basePath)
 
 	return env, nil

@@ -40,6 +40,19 @@ func runWithOptions(ctx context.Context, opts model.Options) (retErr error, chil
 }
 
 func runWithDeps(ctx context.Context, opts model.Options, deps runDeps) (retErr error, childCode int) {
+	// A private mount namespace belongs to an OS thread. Run its entire lifetime
+	// on a dedicated goroutine, which retires that thread on exit instead of
+	// returning a thread with changed namespace state to the Go scheduler.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		retErr, childCode = runOnNamespaceThread(ctx, opts, deps)
+	}()
+	<-done
+	return retErr, childCode
+}
+
+func runOnNamespaceThread(ctx context.Context, opts model.Options, deps runDeps) (retErr error, childCode int) {
 	cwd, err := deps.getwd()
 	if err != nil {
 		return model.Wrap(model.ExitEnv, "getwd", err), 0
@@ -97,19 +110,6 @@ func runWithDeps(ctx context.Context, opts model.Options, deps runDeps) (retErr 
 	}
 	cleanup := &cleanupStack{}
 	cleanup.Push(func() error { return patchStore.Close() })
-
-	lock, err := patchStore.LockContext(ctx)
-	if err != nil {
-		return model.Wrap(model.ExitWrite, "lock patch", err), 0
-	}
-	cleanup.Push(func() error { return lock.Unlock() })
-	var sess *session.Session
-	threadLocked := false
-	defer func() {
-		if threadLocked {
-			runtime.UnlockOSThread()
-		}
-	}()
 	defer func() {
 		if err := cleanup.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -119,6 +119,12 @@ func runWithDeps(ctx context.Context, opts model.Options, deps runDeps) (retErr 
 			}
 		}
 	}()
+	lock, err := patchStore.LockContext(ctx)
+	if err != nil {
+		return model.Wrap(model.ExitWrite, "lock patch", err), 0
+	}
+	cleanup.Push(func() error { return lock.Unlock() })
+	var sess *session.Session
 
 	sess, err = session.Create(gitDir)
 	if err != nil {
@@ -138,8 +144,8 @@ func runWithDeps(ctx context.Context, opts model.Options, deps runDeps) (retErr 
 		return err, 0
 	}
 	runtime.LockOSThread()
-	threadLocked = true
 	if err := mount.UnshareMountNS(); err != nil {
+		runtime.UnlockOSThread() // Unshare failed, so this thread is unchanged.
 		reportPermissionHint("unshare mount namespace", err)
 		return model.Wrap(model.ExitEnv, "unshare mount namespace", err), 0
 	}
@@ -157,7 +163,6 @@ func runWithDeps(ctx context.Context, opts model.Options, deps runDeps) (retErr 
 	cleanup.Push(func() error {
 		return umountPathsReverse(mount, maskTargets)
 	})
-	pushUmountCleanup(cleanup, mount, repoRoot)
 	cleanup.Push(func() error {
 		return os.Chdir("/")
 	})

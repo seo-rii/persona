@@ -1499,7 +1499,6 @@ func (s *daemonState) createSessionFromMeta(ctx context.Context, sessionKey stri
 	if err := writeDaemonOwner(externalRoot, sessionKey, oid); err != nil {
 		return nil, err
 	}
-	pushUmountCleanup(cleanup, mount, sess.View)
 	maskTargets := make([]string, 0, 4)
 	cleanup.Push(func() error { return umountPathsReverse(mount, maskTargets) })
 	commandMaskPaths := patchStatePathsForRepo(sess.View, patchInRepo && patchRel != "" && !strings.HasPrefix(patchRel, ".git/") && patchRel != ".git", patchRel).abs

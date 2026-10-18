@@ -27,10 +27,22 @@ func (c *cleanupStack) Push(fn func() error) {
 func (c *cleanupStack) Run() error {
 	var errs []error
 	for i := len(c.fns) - 1; i >= 0; i-- {
+		if c.fns[i] == nil {
+			continue
+		}
 		if err := c.fns[i](); err != nil {
 			errs = append(errs, err)
+		} else {
+			c.fns[i] = nil
 		}
 	}
+	remaining := c.fns[:0]
+	for _, fn := range c.fns {
+		if fn != nil {
+			remaining = append(remaining, fn)
+		}
+	}
+	c.fns = remaining
 	return errors.Join(errs...)
 }
 

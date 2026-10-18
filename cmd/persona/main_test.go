@@ -1491,7 +1491,7 @@ func TestPushUmountCleanupRunsViaCleanupStack(t *testing.T) {
 	}
 
 	pushUmountCleanup(&cleanup, mount, "")
-	if len(cleanup.fns) != 1 {
+	if len(cleanup.fns) != 0 {
 		t.Fatalf("expected empty path to be ignored, got %d cleanup funcs", len(cleanup.fns))
 	}
 }
