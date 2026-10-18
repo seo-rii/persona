@@ -631,10 +631,11 @@ func shouldSkipNewFileBlock(block patchBlock, workTree string) bool {
 		return false
 	}
 	if block.mode != "" {
-		if perm, ok := parseFileMode(block.mode); ok {
-			if info.Mode().Perm() != perm {
-				return false
-			}
+		perm, ok := parseFileMode(block.mode)
+		// A Git regular-file mode records only the owner executable bit;
+		// permissions such as 0600 and 0664 describe the same stored mode.
+		if !ok || info.Mode().Perm()&0o100 != perm&0o100 {
+			return false
 		}
 	}
 	if err := checkPath(block.path); err != nil {
@@ -833,7 +834,7 @@ func unescapeGitPath(path string) string {
 
 func parseFileMode(mode string) (os.FileMode, bool) {
 	val, err := strconv.ParseUint(strings.TrimSpace(mode), 8, 32)
-	if err != nil {
+	if err != nil || val != 0o100644 && val != 0o100755 {
 		return 0, false
 	}
 	return os.FileMode(val) & 0o777, true

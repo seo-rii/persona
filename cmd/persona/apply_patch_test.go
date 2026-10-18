@@ -957,7 +957,7 @@ func TestApplyPatchDataGitRoundTripPreservesFileState(t *testing.T) {
 	if got, err := os.Readlink(filepath.Join(repo, "link")); err != nil || got != linkTarget {
 		t.Fatalf("symlink: got=%q want=%q err=%v", got, linkTarget, err)
 	}
-	if info, err := os.Stat(filepath.Join(repo, "script.sh")); err != nil || info.Mode().Perm() != 0o755 {
+	if info, err := os.Stat(filepath.Join(repo, "script.sh")); err != nil || info.Mode().Perm()&0o100 == 0 {
 		t.Fatalf("executable mode lost: info=%v err=%v", info, err)
 	}
 }

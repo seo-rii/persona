@@ -134,7 +134,9 @@ func FuzzGitPatchRoundTrip(f *testing.F) {
 		if err != nil || !bytes.Equal(got, content) {
 			t.Fatalf("round-trip bytes: got=%q want=%q err=%v", got, content, err)
 		}
-		if info, err := os.Stat(filepath.Join(restored, name)); err != nil || info.Mode().Perm() != mode {
+		// Git stores the owner executable bit; ordinary permissions still obey
+		// the caller's umask when apply creates a file.
+		if info, err := os.Stat(filepath.Join(restored, name)); err != nil || info.Mode().Perm()&0o100 != mode&0o100 {
 			t.Fatalf("round-trip mode: info=%v want=%o err=%v", info, mode, err)
 		}
 		var filtered bytes.Buffer

@@ -1678,3 +1678,42 @@ func TestValidatePatchReaderChecksOnlyRealPathFields(t *testing.T) {
 		t.Fatal("path validation did not resume after hunk counts completed")
 	}
 }
+
+func TestFilterExistingNewFilesUsesGitFileTypeAndExecutableBit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		patchMode string
+		fileMode  os.FileMode
+		wantSkip  bool
+	}{
+		{"private-regular", "100644", 0o600, true},
+		{"group-writable-regular", "100644", 0o664, true},
+		{"other-execute-is-not-git-executable", "100644", 0o641, true},
+		{"private-executable", "100755", 0o700, true},
+		{"missing-executable-bit", "100755", 0o600, false},
+		{"symlink-over-regular", "120000", 0o600, false},
+		{"invalid-mode", "invalid", 0o644, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "file")
+			if err := os.WriteFile(path, []byte("contents\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, tc.fileMode); err != nil {
+				t.Fatal(err)
+			}
+			patch := []byte("diff --git a/file b/file\nnew file mode " + tc.patchMode + "\n--- /dev/null\n+++ b/file\n@@ -0,0 +1 @@\n+contents\n")
+			filtered, skipped, err := FilterExistingNewFiles(patch, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(skipped) == 1; got != tc.wantSkip {
+				t.Fatalf("skip=%t want=%t mode=%s existing=%o", got, tc.wantSkip, tc.patchMode, tc.fileMode)
+			}
+			if tc.wantSkip && len(filtered) != 0 || !tc.wantSkip && !bytes.Equal(filtered, patch) {
+				t.Fatalf("unexpected filtered patch: %q", filtered)
+			}
+		})
+	}
+}
