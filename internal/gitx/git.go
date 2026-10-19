@@ -186,7 +186,7 @@ func (g Git) withExcludePathspecs(args []string, excludePaths []string) []string
 }
 
 func (g Git) WorktreeAddDetach(ctx context.Context, path, ref string) error {
-	return g.gitRun(ctx, g.RepoRoot, g.env(), "git", "-c", "core.autocrlf=false", "worktree", "add", "--detach", path, ref)
+	return g.gitRun(ctx, g.RepoRoot, g.env(), "git", "-c", "core.autocrlf=false", "-c", "core.symlinks=true", "worktree", "add", "--detach", path, ref)
 }
 
 func (g Git) WorktreeRemoveForce(ctx context.Context, path string) error {
@@ -430,6 +430,7 @@ func storageDiffArgs() []string {
 		"-c", "core.quotepath=false", "-c", "core.autocrlf=false",
 		"-c", "core.filemode=true", "-c", "core.symlinks=true", "-c", "core.ignorestat=false",
 		"-c", "core.fsmonitor=false", "-c", "diff.mnemonicPrefix=false",
+		"-c", "diff.suppressBlankEmpty=false",
 		"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv",
 		"--no-color", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--unified=3",
 		"--ignore-submodules=none", "--submodule=short",
@@ -720,6 +721,9 @@ func (g Git) envWith(workTree, gitDir string) []string {
 	}
 	base = filtered
 	base = append(base, "LANG=C", "LC_ALL=C")
+	// Persona's Linux view is case-sensitive even when this checkout was copied
+	// from a case-insensitive filesystem. Discovery must not hide distinct files.
+	base = append(base, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.ignorecase", "GIT_CONFIG_VALUE_0=false")
 	if workTree != "" {
 		base = append(base, "GIT_WORK_TREE="+workTree)
 	}

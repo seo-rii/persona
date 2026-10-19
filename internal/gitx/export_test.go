@@ -111,7 +111,9 @@ func TestStoragePatchRoundTripIgnoresDisplayConfig(t *testing.T) {
 		{"mnemonic-prefix", "diff.mnemonicPrefix", "true"},
 		{"relative", "diff.relative", "true"},
 		{"zero-context", "diff.context", "0"},
+		{"suppress-empty-context", "diff.suppressBlankEmpty", "true"},
 		{"forced-color", "color.ui", "always"},
+		{"case-insensitive", "core.ignorecase", "true"},
 		{"autocrlf", "core.autocrlf", "true"},
 		{"filemode-disabled", "core.filemode", "false"},
 		{"symlinks-disabled", "core.symlinks", "false"},
@@ -125,6 +127,7 @@ func TestStoragePatchRoundTripIgnoresDisplayConfig(t *testing.T) {
 			testutil.WriteFile(t, filepath.Join(repo, "data.bin"), "before\x00binary\xff\n")
 			testutil.WriteFile(t, filepath.Join(repo, "remove.txt"), "remove\n")
 			testutil.WriteFile(t, filepath.Join(repo, "mode.sh"), "#!/bin/sh\n")
+			testutil.WriteFile(t, filepath.Join(repo, "tracked.txt"), "base\n\nkeep\n")
 			if err := os.Symlink("tracked.txt", filepath.Join(repo, "link")); err != nil {
 				t.Fatal(err)
 			}
@@ -134,12 +137,13 @@ func TestStoragePatchRoundTripIgnoresDisplayConfig(t *testing.T) {
 			if _, err := g.ResolveBase(context.Background(), "HEAD"); err != nil {
 				t.Fatal(err)
 			}
+			testutil.RunCmd(t, repo, "git", "config", config.key, config.value)
 			restored := filepath.Join(t.TempDir(), "restored")
 			if err := g.WorktreeAddDetach(context.Background(), restored, g.BaseOID); err != nil {
 				t.Fatal(err)
 			}
-			testutil.RunCmd(t, repo, "git", "config", config.key, config.value)
-			testutil.WriteFile(t, filepath.Join(repo, "tracked.txt"), "changed\nsecond\nthird\nfourth\n")
+			testutil.WriteFile(t, filepath.Join(repo, "tracked.txt"), "changed\n\nkeep\nsecond\nthird\nfourth\n")
+			testutil.WriteFile(t, filepath.Join(repo, "TRACKED.txt"), "distinct case-sensitive file\n")
 			testutil.WriteFile(t, filepath.Join(repo, "data.bin"), "after\x00binary\xfe\r\n")
 			testutil.WriteFile(t, filepath.Join(repo, "new.bin"), "new\x00binary\x80\n")
 			testutil.WriteFile(t, filepath.Join(repo, "한국어 space.txt"), "CRLF\r\nlast line")
