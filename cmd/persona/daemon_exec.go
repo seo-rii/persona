@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -71,13 +72,26 @@ func addDaemonLeaseCommands(parent *cobra.Command) {
 	release.Flags().Uint64Var(&generation, "view-generation", 0, "generation returned by acquire")
 	_ = release.MarkFlagRequired("session-key")
 	_ = release.MarkFlagRequired("lease-id")
-	var repoRoot, viewPath, cwdRel string
+	var repoRoot, gitDir, viewPath, cwdRel, execKey, execLease string
+	var execGeneration uint64
 	view := &cobra.Command{Use: "exec-view -- <command...>", Hidden: true, Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if execKey == "" || execLease == "" || !filepath.IsAbs(gitDir) || execGeneration == 0 {
+			return fmt.Errorf("exec-view requires an acquired daemon lease")
+		}
+		client := &daemonClient{socketPath: daemonSocketPath(gitDir), repoRoot: repoRoot, gitDir: gitDir}
+		if _, err := client.call(cmd.Context(), daemonRequest{Method: "attach_exec", SessionKey: execKey,
+			LeaseID: execLease, ViewGeneration: execGeneration, ExecutionPID: os.Getpid()}); err != nil {
+			return err
+		}
 		return runDaemonView(repoRoot, viewPath, cwdRel, args)
 	}}
 	view.Flags().StringVar(&repoRoot, "repo-root", "", "original repository root")
+	view.Flags().StringVar(&gitDir, "git-dir", "", "original repository git directory")
 	view.Flags().StringVar(&viewPath, "view-path", "", "daemon view")
 	view.Flags().StringVar(&cwdRel, "cwd-rel", ".", "working directory relative to the repository")
+	view.Flags().StringVar(&execKey, "session-key", "", "session owning the command")
+	view.Flags().StringVar(&execLease, "lease-id", "", "acquired mutation lease")
+	view.Flags().Uint64Var(&execGeneration, "view-generation", 0, "generation returned by acquire")
 	var recoverKey string
 	var dryRun bool
 	recoverCmd := &cobra.Command{Use: "recover --session-key <key> [--dry-run]", Short: "Inspect or reopen a preserved session without discarding its upper layer", RunE: func(cmd *cobra.Command, args []string) error {
@@ -123,11 +137,17 @@ func runDaemonView(repoRoot, viewPath, cwdRel string, args []string) error {
 		return model.Wrap(model.ExitEnv, "map original repository into daemon view", err)
 	}
 	defer ns.Umount(repoRoot)
-	code := runCommand(repoRoot, cwdRel, args)
-	if code != 0 {
-		return &exitError{code: model.ExitCode(code)}
+	if err := os.Chdir(filepath.Join(repoRoot, cwdRel)); err != nil {
+		return err
 	}
-	return nil
+	// Keep the registered helper PID and process group for the actual command.
+	// Forking another group here would let it outlive the lease's tracked group.
+	path, err := exec.LookPath(args[0])
+	if err == nil {
+		err = unix.Exec(path, args, gitx.FilterGitEnv(os.Environ()))
+	}
+	fmt.Fprintln(os.Stderr, err)
+	return &exitError{code: 127}
 }
 
 func processStartTime(pid int) string {
@@ -209,8 +229,8 @@ func (s *daemonState) recoverSession(ctx context.Context, key string, dryRun boo
 	if dryRun {
 		return info, nil
 	}
-	if processIdentityAlive(meta.BusyOwnerPID, meta.BusyOwnerStart) {
-		return nil, fmt.Errorf("previous mutation owner is still alive")
+	if mutationOwnerAlive(meta.BusyOwnerPID, meta.BusyOwnerStart, meta.BusyExecPGID, meta.BusyExecStart) {
+		return nil, fmt.Errorf("previous mutation owner or command group is still alive")
 	}
 	checkpoint, err := openDaemonCheckpoint(ctx, daemonSessionPatchPath(s.gitDir, key))
 	if err != nil {

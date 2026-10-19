@@ -173,7 +173,7 @@ func (s *daemonState) drainMutations(ctx context.Context) {
 			select {
 			case gate <- struct{}{}:
 				sess := s.sessionByKey(key)
-				if sess != nil && sess.busy && processIdentityAlive(sess.busyOwnerPID, sess.busyOwnerStart) {
+				if sess != nil && sess.busy && mutationOwnerAlive(sess.busyOwnerPID, sess.busyOwnerStart, sess.busyExecPGID, sess.busyExecStart) {
 					pending = true
 				}
 				<-gate

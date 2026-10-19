@@ -99,7 +99,7 @@ func startManagedTestDaemon(t *testing.T, binary, repo string) testDaemon {
 			}
 			err = json.NewDecoder(conn).Decode(&pong)
 			_ = conn.Close()
-			if err == nil && pong.Version == 2 {
+			if err == nil && pong.Version == 3 {
 				return testDaemon{
 					stop:           stop,
 					stopPreserving: func() { shutdown(syscall.SIGTERM, true) },

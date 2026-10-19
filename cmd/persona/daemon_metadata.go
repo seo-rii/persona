@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"persona/internal/patchio"
@@ -91,6 +92,14 @@ func validateDaemonSessionMeta(meta daemonSessionMeta) error {
 	}
 	if !meta.Dirty && meta.Generation != meta.LastDurableGeneration {
 		return fmt.Errorf("clean metadata has an unsaved mutation generation")
+	}
+	if meta.BusyExecPGID < 0 || (meta.BusyExecPGID == 0) != (meta.BusyExecStart == "") {
+		return fmt.Errorf("incomplete execution process group identity")
+	}
+	if meta.BusyExecPGID > 0 {
+		if _, err := strconv.ParseUint(meta.BusyExecStart, 10, 64); err != nil || !meta.Dirty {
+			return fmt.Errorf("invalid execution process group checkpoint")
+		}
 	}
 	if meta.SchemaVersion == daemonMetadataSchema && meta.SessionRoot != "" && meta.PatchChecksum == "" {
 		return fmt.Errorf("session metadata is missing its saved patch checksum")

@@ -35,7 +35,7 @@ import (
 const (
 	daemonSocketFile     = "persona.sock"
 	daemonLaunchLock     = "launch.lock"
-	daemonProtocol       = 2
+	daemonProtocol       = 3
 	daemonMetadataSchema = 1
 	daemonMetadataLimit  = 64 << 10
 	daemonRequestTimeout = 30 * time.Second
@@ -67,6 +67,7 @@ type daemonRequest struct {
 	SessionKey     string              `json:"session_key,omitempty"`
 	LeaseID        string              `json:"lease_id,omitempty"`
 	OwnerPID       int                 `json:"owner_pid,omitempty"`
+	ExecutionPID   int                 `json:"execution_pid,omitempty"`
 	IdleForSeconds int64               `json:"idle_for_seconds,omitempty"`
 	IdleForNanos   int64               `json:"idle_for_nanos,omitempty"`
 	MinAgeNanos    int64               `json:"min_age_nanos,omitempty"`
@@ -98,6 +99,7 @@ type daemonSessionInfo struct {
 	Dirty                 bool   `json:"dirty"`
 	Busy                  bool   `json:"busy"`
 	BusyOwnerPID          int    `json:"busy_owner_pid,omitempty"`
+	BusyExecPGID          int    `json:"busy_exec_pgid,omitempty"`
 	CreatedUnix           int64  `json:"created_unix"`
 	CreatedRFC3339        string `json:"created_rfc3339"`
 	LastUsedUnix          int64  `json:"last_used_unix"`
@@ -169,6 +171,8 @@ type daemonSession struct {
 	lastError             string
 	patchChecksum         string
 	busyOwnerStart        string
+	busyExecPGID          int
+	busyExecStart         string
 	closed                bool
 	preserve              *bool
 }
@@ -192,6 +196,8 @@ type daemonSessionMeta struct {
 	LastError             string              `json:"last_error,omitempty"`
 	BusyOwnerPID          int                 `json:"busy_owner_pid,omitempty"`
 	BusyOwnerStart        string              `json:"busy_owner_start,omitempty"`
+	BusyExecPGID          int                 `json:"busy_exec_pgid,omitempty"`
+	BusyExecStart         string              `json:"busy_exec_start,omitempty"`
 	InitialIgnored        []string            `json:"initial_ignored,omitempty"`
 	ExternalRoot          string              `json:"external_root,omitempty"`
 	PatchChecksum         string              `json:"patch_checksum,omitempty"`
@@ -495,7 +501,9 @@ func runDaemonExec(ctx context.Context, sessionKey string, cfg daemonSessionConf
 		_ = client.releaseExec(context.Background(), sessionKey, resp.LeaseID)
 		return exeErr
 	}
-	helperArgs := []string{exe, "daemon", "exec-view", "--repo-root", repoRoot, "--view-path", resp.Session.ViewPath, "--cwd-rel", cwdRel, "--"}
+	helperArgs := []string{exe, "daemon", "exec-view", "--repo-root", repoRoot, "--git-dir", gitDir,
+		"--view-path", resp.Session.ViewPath, "--cwd-rel", cwdRel, "--session-key", sessionKey,
+		"--lease-id", resp.LeaseID, "--view-generation", fmt.Sprint(resp.Session.ViewGeneration), "--"}
 	helperArgs = append(helperArgs, args...)
 	childCode := runCommand(repoRoot, cwdRel, helperArgs)
 	if err := client.releaseExec(context.Background(), sessionKey, resp.LeaseID); err != nil {
@@ -749,6 +757,9 @@ func (s *daemonState) handleRequestContext(ctx context.Context, req daemonReques
 	case "release_exec":
 		err := s.releaseExecGeneration(ctx, key, req.LeaseID, req.ViewGeneration)
 		return daemonResponseForInfo(nil, err)
+	case "attach_exec":
+		err := s.attachExec(ctx, key, req.LeaseID, req.ViewGeneration, req.ExecutionPID)
+		return daemonResponseForInfo(nil, err)
 	case "flush":
 		err := s.flushSession(ctx, key, time.Duration(req.MinAgeNanos))
 		return daemonResponseForInfo(nil, err)
@@ -812,6 +823,7 @@ func daemonSessionSnapshot(sess *daemonSession) daemonSessionInfo {
 	}
 	info.Busy = sess.busy
 	info.BusyOwnerPID = sess.busyOwnerPID
+	info.BusyExecPGID = sess.busyExecPGID
 	if !sess.createdAt.IsZero() {
 		info.CreatedUnix = sess.createdAt.Unix()
 		info.CreatedRFC3339 = sess.createdAt.UTC().Format(time.RFC3339)
@@ -847,6 +859,8 @@ func daemonSessionMetaSnapshot(sess *daemonSession) daemonSessionMeta {
 		LastError:             sess.lastError,
 		BusyOwnerPID:          sess.busyOwnerPID,
 		BusyOwnerStart:        sess.busyOwnerStart,
+		BusyExecPGID:          sess.busyExecPGID,
+		BusyExecStart:         sess.busyExecStart,
 		InitialIgnored:        sess.initialIgnored,
 		ExternalRoot:          filepath.Dir(sess.menv.tempRoot),
 		PatchChecksum:         sess.patchChecksum,
@@ -977,7 +991,7 @@ func (s *daemonState) acquireExec(ctx context.Context, sessionKey string, ownerP
 		return nil, "", err
 	}
 	if sess.busy {
-		return nil, "", model.Wrap(model.ExitEnv, "daemon session busy", fmt.Errorf("session %q is already executing in pid %d", sessionKey, sess.busyOwnerPID))
+		return nil, "", model.Wrap(model.ExitEnv, "daemon session busy", fmt.Errorf("session %q is already executing (owner pid %d, command group %d)", sessionKey, sess.busyOwnerPID, sess.busyExecPGID))
 	}
 	masks, initialIgnored, err := maskIgnoredFiles(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.menv.emptyFile, sess.menv.emptyDir, sess.config.options(), sess.mount, s.log)
 	if err != nil {
@@ -1093,6 +1107,9 @@ func (s *daemonState) releaseExecGeneration(ctx context.Context, sessionKey, lea
 	}
 	if !sess.busy || sess.busyLease != leaseID {
 		return model.Wrap(model.ExitEnv, "release daemon session", fmt.Errorf("session %q lease mismatch", sessionKey))
+	}
+	if executionGroupAlive(sess.busyExecPGID, sess.busyExecStart) {
+		return fmt.Errorf("session %q still has live command processes in group %d", sessionKey, sess.busyExecPGID)
 	}
 	return s.finishBusyLocked(ctx, sess)
 }
@@ -1231,8 +1248,8 @@ func (s *daemonState) closeSessions() error {
 		if sess.closed {
 			// A prior end has already saved and may have closed the store. Retry
 			// just its remaining cleanup actions, never export through closed FDs.
-		} else if sess.busy && processIdentityAlive(sess.busyOwnerPID, sess.busyOwnerStart) {
-			err = fmt.Errorf("recovery_required: mutation owner %d still alive during shutdown", sess.busyOwnerPID)
+		} else if sess.busy && mutationOwnerAlive(sess.busyOwnerPID, sess.busyOwnerStart, sess.busyExecPGID, sess.busyExecStart) {
+			err = fmt.Errorf("recovery_required: mutation owner or command group is still alive during shutdown (owner pid %d, group %d)", sess.busyOwnerPID, sess.busyExecPGID)
 		} else if sess.busy {
 			err = s.finishBusyLocked(ctx, sess)
 		} else if sess.dirty {
@@ -1341,8 +1358,8 @@ func (s *daemonState) restoreSessionWithCheckpoint(ctx context.Context, meta dae
 	}
 	// Never delete a path supplied by recovery metadata. Dirty upper layers and
 	// their immutable worktree are reopened in place only after ownership checks.
-	if meta.Dirty && processIdentityAlive(meta.BusyOwnerPID, meta.BusyOwnerStart) {
-		return nil, model.Wrap(model.ExitEnv, "restore daemon session", fmt.Errorf("recovery_required: previous mutation owner %d is still alive; preserved %s", meta.BusyOwnerPID, meta.SessionRoot))
+	if meta.Dirty && mutationOwnerAlive(meta.BusyOwnerPID, meta.BusyOwnerStart, meta.BusyExecPGID, meta.BusyExecStart) {
+		return nil, model.Wrap(model.ExitEnv, "restore daemon session", fmt.Errorf("recovery_required: previous mutation owner or command group is still alive (owner pid %d, group %d); preserved %s", meta.BusyOwnerPID, meta.BusyExecPGID, meta.SessionRoot))
 	}
 	if !meta.Dirty && meta.SessionRoot != "" {
 		if _, err := os.Lstat(meta.SessionRoot); err == nil {
@@ -1657,7 +1674,7 @@ func (s *daemonState) recoverBusyLocked(ctx context.Context, sess *daemonSession
 	if !sess.busy {
 		return nil
 	}
-	if processIdentityAlive(sess.busyOwnerPID, sess.busyOwnerStart) {
+	if mutationOwnerAlive(sess.busyOwnerPID, sess.busyOwnerStart, sess.busyExecPGID, sess.busyExecStart) {
 		return nil
 	}
 	return s.finishBusyLocked(ctx, sess)
@@ -1671,7 +1688,7 @@ func (s *daemonState) flushSessionLocked(ctx context.Context, sessionKey string,
 		return err
 	}
 	if sess.busy {
-		return model.Wrap(model.ExitEnv, op, fmt.Errorf("session %q is still busy in pid %d", sessionKey, sess.busyOwnerPID))
+		return model.Wrap(model.ExitEnv, op, fmt.Errorf("session %q is still busy (owner pid %d, command group %d)", sessionKey, sess.busyOwnerPID, sess.busyExecPGID))
 	}
 	now := s.deps.now()
 	if minAge > 0 && !sess.lastFlushed.IsZero() && now.Sub(sess.lastFlushed) < minAge {
@@ -1742,6 +1759,8 @@ func (s *daemonState) finishBusyLocked(ctx context.Context, sess *daemonSession)
 	sess.busy = false
 	sess.busyOwnerPID = 0
 	sess.busyOwnerStart = ""
+	sess.busyExecPGID = 0
+	sess.busyExecStart = ""
 	sess.busyLease = ""
 	sess.lastUsed = s.deps.now()
 	if exportErr == nil {
