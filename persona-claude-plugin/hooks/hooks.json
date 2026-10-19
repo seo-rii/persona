@@ -15,7 +15,7 @@
         ]
       },
       {
-        "matcher": "Read|Edit|MultiEdit|Write|Glob|Grep",
+        "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep",
         "hooks": [
           {
             "type": "command",
@@ -29,7 +29,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|MultiEdit|Write|Glob|Grep",
+        "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep",
         "hooks": [
           {
             "type": "command",
@@ -54,7 +54,7 @@
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "Read|Edit|MultiEdit|Write|Glob|Grep",
+        "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep",
         "hooks": [
           {
             "type": "command",
@@ -67,7 +67,7 @@
     ],
     "PermissionDenied": [
       {
-        "matcher": "Read|Edit|MultiEdit|Write|Glob|Grep",
+        "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep",
         "hooks": [
           {
             "type": "command",

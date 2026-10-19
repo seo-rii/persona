@@ -43,7 +43,7 @@ The plugin's `settings.json` sets the main thread agent to `persona-worker`.
 ## Behavior
 
 - `PreToolUse` on `Bash` runs `bin/persona-wrap`, which rewrites eligible Bash calls to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
-- `PreToolUse` on `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` rewrites repo-scoped paths into the daemon session's stable `view_path`.
+- `PreToolUse` on `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, and `Grep` rewrites repo-scoped paths into the daemon session's stable `view_path`.
 - Managed file tools acquire a mutation lease before the tool runs, including read/search tools so ignored-file masks and cleanup use the same boundary as Bash. The daemon marks the session dirty when acquiring that lease.
 - `PostToolUse` and `PostToolUseFailure` release the recorded lease with its `view_generation`; release durably flushes the patch, including partial writes from a failed tool. The `PermissionDenied` hook also releases leases for denials that Claude reports through that event.
 - Routing and bypass decisions do not return `permissionDecision: allow`; Claude's usual permission rules and prompts still apply.

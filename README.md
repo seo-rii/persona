@@ -40,7 +40,7 @@ When Claude Code enables the plugin, set `PERSONA_BIN` to the built persona bina
 What the plugin does:
 
 - `PreToolUse` on `Bash` rewrites eligible shell commands to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
-- Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` calls are rewritten into the daemon session's stable `view_path`.
+- Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, and `Grep` calls are rewritten into the daemon session's stable `view_path`.
 - Managed file tools use `persona daemon acquire` and `persona daemon release` for the same exclusive mutation lease as Bash, with a `view_generation` tied to their view. `PostToolUse`, `PostToolUseFailure`, and `PermissionDenied` hooks release the lease and durably save any changes. A failed save retains recovery state and reports an unsaved-change message to both the user and Claude.
 - `SessionEnd` runs `persona daemon end --session-key <claude-session-id>` for every repository used by that chat, even when its final cwd is outside Git. Failed cleanup records remain available for retry.
 - The first wrapped Bash call lazily starts a per-repo background daemon under `<gitdir>/persona/daemon/`.

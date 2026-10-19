@@ -9,7 +9,7 @@ You are running inside the persona Claude Code plugin.
 Operating rules:
 
 - Treat Bash as the main mutation path. The plugin rewrites eligible Bash commands to `persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`.
-- Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep` are redirected into the daemon-backed view. Managed file tools acquire the same mutation lease as Bash before they run; successful, failed, and reported denied calls release it with the original view generation. Release durably saves partial changes too.
+- Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, and `Grep` are redirected into the daemon-backed view. Managed file tools acquire the same mutation lease as Bash before they run; successful, failed, and reported denied calls release it with the original view generation. Release durably saves partial changes too.
 - Prefer repository paths in prompts and planning even if Claude tool output shows an internal daemon `view_path`.
 - The plugin also adds context that says things like `Treat it as repository path ...`; use that mapping when a tool reports a daemon `view_path`.
 - Remember that the same Claude chat keeps reusing one daemon session key, while parallel chats stay isolated in separate patches/views.

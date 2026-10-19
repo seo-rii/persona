@@ -15,7 +15,7 @@ import time
 
 DEFAULT_BYPASS_PREFIXES = ("git", "gh", "persona", "claude")
 READ_ONLY_FILE_TOOLS = {"Read", "Glob", "Grep"}
-WRITE_FILE_TOOLS = {"Edit", "MultiEdit", "Write"}
+WRITE_FILE_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
 FILE_TOOLS = READ_ONLY_FILE_TOOLS | WRITE_FILE_TOOLS
 DURATION_RE = re.compile(r"(?i)^([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)$")
 
@@ -404,12 +404,13 @@ def repo_path_for_view(path_value, repo_dir, view_path):
 
 def rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, git_dir, patch_path, cwd):
     updated_input = dict(tool_input)
-    if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
+    if tool_name in {"Read"} | WRITE_FILE_TOOLS:
+        path_key = "notebook_path" if tool_name == "NotebookEdit" else "file_path"
         rewritten_path, managed, denied_reason = translated_repo_path(
-            tool_input.get("file_path"), repo_dir, view_path, git_dir, patch_path, cwd
+            tool_input.get(path_key), repo_dir, view_path, git_dir, patch_path, cwd
         )
         if managed:
-            updated_input["file_path"] = rewritten_path
+            updated_input[path_key] = rewritten_path
         return updated_input, managed, denied_reason
     if tool_name in {"Glob", "Grep"}:
         rewritten_path, managed, denied_reason = translated_directory_path(
@@ -422,11 +423,12 @@ def rewrite_file_tool_input(tool_name, tool_input, repo_dir, view_path, git_dir,
 
 
 def managed_tool_context(tool_name, tool_input, repo_dir, view_path, cwd):
-    if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
-        repo_path = repo_path_for_view(tool_input.get("file_path"), repo_dir, view_path)
+    if tool_name in {"Read"} | WRITE_FILE_TOOLS:
+        path_key = "notebook_path" if tool_name == "NotebookEdit" else "file_path"
+        repo_path = repo_path_for_view(tool_input.get(path_key), repo_dir, view_path)
         if repo_path:
             return (
-                f"This {tool_name} call used persona view path {os.path.abspath(tool_input.get('file_path'))}. "
+                f"This {tool_name} call used persona view path {os.path.abspath(tool_input[path_key])}. "
                 f"Treat it as repository path {repo_path}."
             )
         return ""

@@ -97,6 +97,9 @@ func TestPersonaClaudePluginHooksWrapBashAndRouteFileTools(t *testing.T) {
 		if !ok || len(entries) != 1 {
 			t.Fatalf("expected lease cleanup hook for %s, got %#v", event, hooks[event])
 		}
+		if got := entries[0].(map[string]any)["matcher"]; got != "Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep" {
+			t.Fatalf("%s must release every managed file tool, got %v", event, got)
+		}
 	}
 	sessionEnd, ok := hooks["SessionEnd"].([]any)
 	if !ok || len(sessionEnd) != 1 {
@@ -127,13 +130,13 @@ func TestPersonaClaudePluginHooksWrapBashAndRouteFileTools(t *testing.T) {
 		}
 	}
 
-	for _, matcher := range []string{"Bash", "Read|Edit|MultiEdit|Write|Glob|Grep"} {
+	for _, matcher := range []string{"Bash", "Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep"} {
 		if !matchers[matcher] {
 			t.Fatalf("missing matcher %q in hooks config", matcher)
 		}
 	}
 	postEntry := postToolUse[0].(map[string]any)
-	if got, want := postEntry["matcher"], "Read|Edit|MultiEdit|Write|Glob|Grep"; got != want {
+	if got, want := postEntry["matcher"], "Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep"; got != want {
 		t.Fatalf("unexpected PostToolUse matcher: got %v want %q", got, want)
 	}
 	endEntry := sessionEnd[0].(map[string]any)
@@ -409,6 +412,83 @@ func TestPersonaWrapForwardsDaemonOptionsToLeaseAcquisition(t *testing.T) {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("expected daemon acquire log to include %q, got log:\n%s", want, logText)
 		}
+	}
+}
+
+func TestPersonaWrapRoutesNotebookEditsThroughFileToolLease(t *testing.T) {
+	repoRoot := repoRoot(t)
+	view := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "daemon.log")
+	personaStub := writePersonaDaemonStub(t, view, logPath)
+	env := map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub, "PERSONA_TEST_VIEW_PATH": view,
+		"PERSONA_WRAP_LEASE_DIR": t.TempDir(), "PERSONA_TEST_LOG": logPath, "PERSONA_TEST_SKIP_PRETOOL": "1",
+	}
+	input := map[string]any{
+		"notebook_path": filepath.Join(repoRoot, "analysis.ipynb"), "cell_id": "cell-1",
+		"new_source": "print('saved')", "cell_type": "code", "edit_mode": "replace",
+	}
+	event := map[string]any{
+		"session_id": "session-123", "tool_use_id": "notebook-1", "cwd": repoRoot,
+		"hook_event_name": "PreToolUse", "tool_name": "NotebookEdit", "tool_input": input,
+	}
+	output := runPersonaWrap(t, repoRoot, event, env)
+	var response map[string]any
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("decode NotebookEdit response: %v: %s", err, output)
+	}
+	hookOutput := response["hookSpecificOutput"].(map[string]any)
+	if _, exists := hookOutput["permissionDecision"]; exists {
+		t.Fatalf("notebook routing changed the permission policy: %s", output)
+	}
+	updated := hookOutput["updatedInput"].(map[string]any)
+	if updated["notebook_path"] != filepath.Join(view, "analysis.ipynb") {
+		t.Fatalf("notebook target was not routed into the view: %s", output)
+	}
+	for _, key := range []string{"cell_id", "new_source", "cell_type", "edit_mode"} {
+		if updated[key] != input[key] {
+			t.Fatalf("notebook input %s changed: %v", key, updated)
+		}
+	}
+	event["hook_event_name"], event["tool_input"] = "PostToolUse", updated
+	output = runPersonaWrap(t, repoRoot, event, env)
+	if !bytes.Contains(output, []byte("durably flushed")) || !bytes.Contains(output, []byte(filepath.Join(repoRoot, "analysis.ipynb"))) {
+		t.Fatalf("notebook completion did not save or map its path: %s", output)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || !bytes.Contains(log, []byte("daemon acquire")) || !bytes.Contains(log, []byte("--lease-id lease-123 --view-generation 7")) {
+		t.Fatalf("notebook lost its lease identity: %s %v", log, err)
+	}
+}
+
+func TestPersonaWrapRejectsUnsafeNotebookTargets(t *testing.T) {
+	repoRoot := repoRoot(t)
+	for _, target := range []string{"outside", "git", "view-symlink"} {
+		t.Run(target, func(t *testing.T) {
+			view, outside := t.TempDir(), t.TempDir()
+			path := filepath.Join(outside, "analysis.ipynb")
+			if target == "git" {
+				path = filepath.Join(repoRoot, ".git", "analysis.ipynb")
+			} else if target == "view-symlink" {
+				if err := os.Symlink(outside, filepath.Join(view, "escape")); err != nil {
+					t.Fatal(err)
+				}
+				path = filepath.Join(repoRoot, "escape", "analysis.ipynb")
+			}
+			logPath := filepath.Join(t.TempDir(), "daemon.log")
+			personaStub := writePersonaDaemonStub(t, view, logPath)
+			output := runPersonaWrap(t, repoRoot, map[string]any{
+				"session_id": "session-123", "cwd": repoRoot, "hook_event_name": "PreToolUse", "tool_name": "NotebookEdit",
+				"tool_input": map[string]any{"notebook_path": path, "cell_id": "cell-1", "new_source": "changed"},
+			}, map[string]string{"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub, "PERSONA_TEST_VIEW_PATH": view, "PERSONA_TEST_LOG": logPath})
+			if !bytes.Contains(output, []byte(`"permissionDecision": "deny"`)) {
+				t.Fatalf("unsafe notebook target must be denied: %s", output)
+			}
+			log, err := os.ReadFile(logPath)
+			if err != nil || !bytes.Contains(log, []byte("daemon release")) {
+				t.Fatalf("denied notebook target left a lease: %s %v", log, err)
+			}
+		})
 	}
 }
 
@@ -947,7 +1027,7 @@ func TestReadmeDocumentsClaudePluginSupport(t *testing.T) {
 		"`settings.json` sets `\"agent\": \"persona-worker\"`",
 		"`DAEMON_BASE_MODE`",
 		"`DAEMON_APPLY_MODE`",
-		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
+		"`Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, and `Grep`",
 		"`persona daemon list --json`",
 		"`persona daemon acquire`",
 		"`persona daemon release`",
@@ -986,7 +1066,7 @@ func TestPersonaClaudePluginReadmeDocumentsBehaviorAndLimits(t *testing.T) {
 		"`persona daemon end --session-key <claude-session-id>`",
 		"`SessionEnd` runs `persona daemon end --session-key <claude-session-id>`",
 		"`tool_input.shell` when Claude exposes it",
-		"`Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
+		"`Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, and `Grep`",
 		"deny reason tells Claude whether it should switch to Git-aware commands or `persona daemon` commands",
 		"`--base-mode worktree`",
 		"tool responses may still show internal daemon `view_path` paths",
@@ -1010,7 +1090,7 @@ func TestPersonaWorkerAgentDocumentsDaemonWorkflow(t *testing.T) {
 	text := string(data)
 	for _, want := range []string{
 		"`persona daemon exec --session-key <claude-session-id> -- <selected shell> ...`",
-		"Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `Glob`, and `Grep`",
+		"Repo-scoped `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, and `Grep`",
 		"parallel chats stay isolated",
 		"`persona daemon list --json`",
 		"`persona daemon prune --idle-for <duration>`",
@@ -1335,62 +1415,67 @@ func TestPersonaWrapBoundsDaemonSubprocessTime(t *testing.T) {
 
 func TestPersonaWrapFileToolsShareLeaseAndReleaseAfterFailureOrDenial(t *testing.T) {
 	repoRoot := repoRoot(t)
-	for _, outcome := range []string{"PostToolUseFailure", "PermissionDenied"} {
-		t.Run(outcome, func(t *testing.T) {
-			view := t.TempDir()
-			leaseDir := t.TempDir()
-			active := filepath.Join(t.TempDir(), "active")
-			logPath := filepath.Join(t.TempDir(), "daemon.log")
-			personaStub := writePersonaDaemonStub(t, view, logPath)
-			env := map[string]string{
-				"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub, "PERSONA_TEST_VIEW_PATH": view,
-				"PERSONA_WRAP_LEASE_DIR": leaseDir, "PERSONA_TEST_ACTIVE_LEASE_FILE": active,
-				"PERSONA_TEST_LOG": logPath, "PERSONA_TEST_SKIP_PRETOOL": "1",
-			}
-			event := map[string]any{
-				"session_id": "session-123", "tool_use_id": "write-1", "cwd": repoRoot,
-				"hook_event_name": "PreToolUse", "tool_name": "Write",
-				"tool_input": map[string]any{"file_path": filepath.Join(repoRoot, "note.txt"), "content": "hello"},
-			}
-			output := runPersonaWrap(t, repoRoot, event, env)
-			if !bytes.Contains(output, []byte("updatedInput")) {
-				t.Fatalf("first writer did not acquire: %s", output)
-			}
-			entries, err := personaLeaseRecordEntries(leaseDir)
-			if err != nil || len(entries) != 1 {
-				t.Fatalf("missing private lease record: %v %v", entries, err)
-			}
-			info, err := entries[0].Info()
-			if err != nil || info.Mode().Perm() != 0o600 {
-				t.Fatalf("lease record permissions: %v %v", info, err)
-			}
-			read := map[string]any{
-				"session_id": "session-123", "tool_use_id": "read-2", "cwd": repoRoot,
-				"hook_event_name": "PreToolUse", "tool_name": "Read",
-				"tool_input": map[string]any{"file_path": filepath.Join(repoRoot, "note.txt")},
-			}
-			output = runPersonaWrap(t, repoRoot, read, env)
-			if !bytes.Contains(output, []byte(`"permissionDecision": "deny"`)) || !bytes.Contains(output, []byte("still busy")) {
-				t.Fatalf("read must not race an active mutation: %s", output)
-			}
-			event["hook_event_name"] = outcome
-			output = runPersonaWrap(t, repoRoot, event, env)
-			if outcome == "PostToolUseFailure" && !bytes.Contains(output, []byte("partial file changes")) {
-				t.Fatalf("failure must flush partial state: %s", output)
-			}
-			entries, err = personaLeaseRecordEntries(leaseDir)
-			if err != nil || len(entries) != 0 {
-				t.Fatalf("completion must release private record: %v %v", entries, err)
-			}
-			output = runPersonaWrap(t, repoRoot, read, env)
-			if !bytes.Contains(output, []byte("updatedInput")) {
-				t.Fatalf("next reader did not acquire after release: %s", output)
-			}
-			logData, err := os.ReadFile(logPath)
-			if err != nil || !bytes.Contains(logData, []byte("--lease-id lease-123 --view-generation 7")) {
-				t.Fatalf("release lost lease identity: %s %v", logData, err)
-			}
-		})
+	for _, tool := range []string{"Write", "NotebookEdit"} {
+		for _, outcome := range []string{"PostToolUseFailure", "PermissionDenied"} {
+			t.Run(tool+"/"+outcome, func(t *testing.T) {
+				view := t.TempDir()
+				leaseDir := t.TempDir()
+				active := filepath.Join(t.TempDir(), "active")
+				logPath := filepath.Join(t.TempDir(), "daemon.log")
+				personaStub := writePersonaDaemonStub(t, view, logPath)
+				env := map[string]string{
+					"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub, "PERSONA_TEST_VIEW_PATH": view,
+					"PERSONA_WRAP_LEASE_DIR": leaseDir, "PERSONA_TEST_ACTIVE_LEASE_FILE": active,
+					"PERSONA_TEST_LOG": logPath, "PERSONA_TEST_SKIP_PRETOOL": "1",
+				}
+				event := map[string]any{
+					"session_id": "session-123", "tool_use_id": "write-1", "cwd": repoRoot,
+					"hook_event_name": "PreToolUse", "tool_name": tool,
+					"tool_input": map[string]any{"file_path": filepath.Join(repoRoot, "note.txt"), "content": "hello"},
+				}
+				if tool == "NotebookEdit" {
+					event["tool_input"] = map[string]any{"notebook_path": filepath.Join(repoRoot, "analysis.ipynb"), "cell_id": "cell-1", "new_source": "changed"}
+				}
+				output := runPersonaWrap(t, repoRoot, event, env)
+				if !bytes.Contains(output, []byte("updatedInput")) {
+					t.Fatalf("first writer did not acquire: %s", output)
+				}
+				entries, err := personaLeaseRecordEntries(leaseDir)
+				if err != nil || len(entries) != 1 {
+					t.Fatalf("missing private lease record: %v %v", entries, err)
+				}
+				info, err := entries[0].Info()
+				if err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("lease record permissions: %v %v", info, err)
+				}
+				read := map[string]any{
+					"session_id": "session-123", "tool_use_id": "read-2", "cwd": repoRoot,
+					"hook_event_name": "PreToolUse", "tool_name": "Read",
+					"tool_input": map[string]any{"file_path": filepath.Join(repoRoot, "note.txt")},
+				}
+				output = runPersonaWrap(t, repoRoot, read, env)
+				if !bytes.Contains(output, []byte(`"permissionDecision": "deny"`)) || !bytes.Contains(output, []byte("still busy")) {
+					t.Fatalf("read must not race an active mutation: %s", output)
+				}
+				event["hook_event_name"] = outcome
+				output = runPersonaWrap(t, repoRoot, event, env)
+				if outcome == "PostToolUseFailure" && !bytes.Contains(output, []byte("partial file changes")) {
+					t.Fatalf("failure must flush partial state: %s", output)
+				}
+				entries, err = personaLeaseRecordEntries(leaseDir)
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("completion must release private record: %v %v", entries, err)
+				}
+				output = runPersonaWrap(t, repoRoot, read, env)
+				if !bytes.Contains(output, []byte("updatedInput")) {
+					t.Fatalf("next reader did not acquire after release: %s", output)
+				}
+				logData, err := os.ReadFile(logPath)
+				if err != nil || !bytes.Contains(logData, []byte("--lease-id lease-123 --view-generation 7")) {
+					t.Fatalf("release lost lease identity: %s %v", logData, err)
+				}
+			})
+		}
 	}
 }
 
