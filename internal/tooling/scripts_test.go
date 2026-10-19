@@ -106,6 +106,7 @@ func TestTestLogStderrPreservesFailureExitStatus(t *testing.T) {
 
 func TestBuildShDoesNotRunGoModTidyOnBuildFailure(t *testing.T) {
 	repoRoot := repoRoot(t)
+	t.Setenv("PERSONA_BUILD_DIR", t.TempDir())
 	binDir, argsFile := stubGoWithBody(t, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GO_ARGS_FILE\"\nif [ \"$1\" = \"build\" ]; then\n  exit 1\nfi\nif [ \"$1\" = \"mod\" ] && [ \"$2\" = \"tidy\" ]; then\n  exit 0\nfi\nexit 0\n", "dirname", "mkdir", "id")
 
 	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "build.sh"))
@@ -132,6 +133,7 @@ func TestBuildShDoesNotRunGoModTidyOnBuildFailure(t *testing.T) {
 
 func TestBuildShFailsFastWhenGoVersionIsTooOld(t *testing.T) {
 	repoRoot := repoRoot(t)
+	t.Setenv("PERSONA_BUILD_DIR", t.TempDir())
 	binDir, argsFile := stubGo(t, "dirname", "mkdir", "id")
 
 	cmd := exec.Command("/bin/bash", filepath.Join(repoRoot, "build.sh"))
@@ -828,6 +830,9 @@ func stubGo(t *testing.T, extraCommands ...string) (string, string) {
 
 func stubGoBuildingPersonaBinary(t *testing.T, goVersion string, extraCommands ...string) (string, string) {
 	t.Helper()
+	// build.sh normally writes to the developer's bin/persona. Each fake build
+	// must use disposable output, including tests that inherit a custom build dir.
+	t.Setenv("PERSONA_BUILD_DIR", t.TempDir())
 	body := strings.Join([]string{
 		"#!/bin/sh",
 		"printf '%s\\n' \"$*\" >> \"$GO_ARGS_FILE\"",
@@ -836,6 +841,10 @@ func stubGoBuildingPersonaBinary(t *testing.T, goVersion string, extraCommands .
 		"  exit 0",
 		"fi",
 		"if [ \"$1\" = \"build\" ] && [ \"$2\" = \"-o\" ]; then",
+		"  if [ -z \"${PERSONA_BUILD_DIR:-}\" ] || [ \"$3\" != \"$PERSONA_BUILD_DIR/persona\" ]; then",
+		"    printf 'refusing fake build outside its test output directory\\n' >&2",
+		"    exit 1",
+		"  fi",
 		"  cat > \"$3\" <<'EOF'",
 		"#!/bin/sh",
 		"if [ \"$1\" = \"doctor\" ]; then",
