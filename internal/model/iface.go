@@ -36,6 +36,12 @@ type GitOps interface {
 	ListIgnoredCandidates(ctx context.Context, workTree, gitDir string, maxN int) ([]string, error)
 }
 
+// GitExportSnapshotter keeps all phases of a patch export on one private index.
+// The caller must release the snapshot after its last Git operation.
+type GitExportSnapshotter interface {
+	SnapshotForExport(ctx context.Context, workTree, gitDir string) (GitOps, func(), error)
+}
+
 // MaskKind distinguishes file-type bind-mount masks.
 type MaskKind int
 

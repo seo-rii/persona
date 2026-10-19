@@ -17,6 +17,9 @@ import (
 )
 
 func prepareBase(ctx context.Context, g model.GitOps, opts model.Options, sess *session.Session, patchInRepo bool, patchRel string, cleanup *cleanupStack, retErr *error) (basePath string, err error) {
+	if baseMode, ok := g.(interface{ SetBaseMode(model.BaseMode) }); ok {
+		baseMode.SetBaseMode(opts.BaseMode)
+	}
 	baseRef := opts.BaseRef
 	if resolver, ok := g.(interface {
 		ResolveBase(context.Context, string) (string, error)

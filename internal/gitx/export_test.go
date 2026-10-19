@@ -21,16 +21,21 @@ import (
 func exportAll(t *testing.T, g *Git, view string) []byte {
 	t.Helper()
 	ctx := context.Background()
+	viewGit, release, err := g.SnapshotForExport(ctx, view, g.GitDir)
+	if err != nil {
+		t.Fatalf("snapshot export index: %v", err)
+	}
+	defer release()
 	var patch bytes.Buffer
-	if err := g.DiffHeadBinaryTo(ctx, view, g.GitDir, nil, &patch); err != nil {
+	if err := viewGit.DiffHeadBinaryTo(ctx, view, g.GitDir, nil, &patch); err != nil {
 		t.Fatalf("export tracked: %v", err)
 	}
-	paths, err := g.ListUntracked(ctx, view, g.GitDir)
+	paths, err := viewGit.ListUntracked(ctx, view, g.GitDir)
 	if err != nil {
 		t.Fatalf("list untracked: %v", err)
 	}
 	for _, path := range paths {
-		if err := g.DiffNewFileNoIndexTo(ctx, view, g.GitDir, path, &patch); err != nil {
+		if err := viewGit.DiffNewFileNoIndexTo(ctx, view, g.GitDir, path, &patch); err != nil {
 			t.Fatalf("export new %q: %v", path, err)
 		}
 	}

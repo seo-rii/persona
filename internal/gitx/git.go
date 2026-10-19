@@ -24,7 +24,9 @@ type Git struct {
 	Verbose  bool
 	// BaseOID is the immutable commit (or unborn repository's empty tree) used
 	// for both restoration and export. ResolveBase binds it once per session.
-	BaseOID string
+	BaseOID        string
+	baseMode       model.BaseMode
+	exportSnapshot *exportIndex
 }
 
 type alreadyExistsApplyError struct {
@@ -46,6 +48,10 @@ func (g *Git) GitDirPath() string { return g.GitDir }
 
 // SetBaseOID supplies the persisted base before ResolveBase validates it.
 func (g *Git) SetBaseOID(oid string) { g.BaseOID = oid }
+
+// SetBaseMode controls whether staged additions from the original checkout are
+// part of the session's lower layer. Frozen worktrees never inherit them.
+func (g *Git) SetBaseMode(mode model.BaseMode) { g.baseMode = mode }
 
 func (g *Git) PinnedBaseOID() string { return g.BaseOID }
 
@@ -417,11 +423,16 @@ func (g Git) DiffNewFileNoIndex(ctx context.Context, workTree, gitDir, relPath s
 }
 
 func (g Git) DiffNewFileNoIndexTo(ctx context.Context, workTree, gitDir, relPath string, out io.Writer) error {
-	if err := g.checkStorageAttributes(ctx, workTree, gitDir, []string{relPath}, nil); err != nil {
+	index, err := g.exportEnv(ctx, workTree, gitDir)
+	if err != nil {
+		return err
+	}
+	defer index.cleanup()
+	if err := g.checkStorageAttributes(ctx, workTree, gitDir, []string{relPath}, index); err != nil {
 		return err
 	}
 	args := g.withDirArgs(workTree, gitDir, append(storageDiffArgs(), "--no-index", "--", "/dev/null", relPath)...)
-	return g.gitDiffToWriter(ctx, workTree, g.envWith(workTree, gitDir), out, "git", args...)
+	return g.gitDiffToWriter(ctx, workTree, index.env, out, "git", args...)
 }
 
 // Storage diffs must be applicable regardless of display-oriented user config.
@@ -437,18 +448,38 @@ func storageDiffArgs() []string {
 	}
 }
 
-// exportEnv uses an index rooted in the immutable base, never the mutable
-// checkout's index. Entries staged by the user are added only when absent from
-// that base so unborn and newly staged files remain tracked for serialization.
+// exportEnv uses an index rooted in the immutable base. Repo-mode staged
+// additions are included, while frozen worktrees depend only on their base.
 type exportIndex struct {
 	baseOID     string
+	workTree    string
+	gitDir      string
 	env         []string
 	cleanup     func()
 	paths       []string
 	baseObjects map[string]string
 }
 
+func (g Git) SnapshotForExport(ctx context.Context, workTree, gitDir string) (model.GitOps, func(), error) {
+	index, err := g.exportEnv(ctx, workTree, gitDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	g.BaseOID = index.baseOID
+	g.exportSnapshot = index
+	return &g, index.cleanup, nil
+}
+
 func (g Git) exportEnv(ctx context.Context, workTree, gitDir string) (*exportIndex, error) {
+	if g.exportSnapshot != nil {
+		if g.exportSnapshot.workTree != workTree || g.exportSnapshot.gitDir != gitDir {
+			return nil, errors.New("export snapshot used with a different worktree or git directory")
+		}
+		// The snapshot owner releases its index after every export phase.
+		index := *g.exportSnapshot
+		index.cleanup = func() {}
+		return &index, nil
+	}
 	baseOID := g.BaseOID
 	if baseOID == "" {
 		var err error
@@ -484,11 +515,14 @@ func (g Git) exportEnv(ctx context.Context, workTree, gitDir string) (*exportInd
 			baseObjects[path] = fields[1]
 		}
 	}
-	args = g.withDirArgs(workTree, gitDir, "ls-files", "--stage", "-z")
-	staged, err := g.gitOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
-	if err != nil {
-		cleanup()
-		return nil, err
+	var staged []byte
+	if g.baseMode != model.BaseWorktree {
+		args = g.withDirArgs(workTree, gitDir, "ls-files", "--stage", "-z")
+		staged, err = g.gitOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
 	}
 	var extra bytes.Buffer
 	for _, entry := range splitNullList(staged) {
@@ -540,7 +574,7 @@ func (g Git) exportEnv(ctx context.Context, workTree, gitDir string) (*exportInd
 	for path := range paths {
 		allPaths = append(allPaths, path)
 	}
-	return &exportIndex{baseOID: baseOID, env: env, cleanup: cleanup, paths: allPaths, baseObjects: baseObjects}, nil
+	return &exportIndex{baseOID: baseOID, workTree: workTree, gitDir: gitDir, env: env, cleanup: cleanup, paths: allPaths, baseObjects: baseObjects}, nil
 }
 
 // Git's clean conversions are distinct from display-only textconv. Reject
@@ -651,8 +685,13 @@ func rawBlobMatches(ctx context.Context, path string, size int64, oid string) (b
 }
 
 func (g Git) ListIgnoredCandidates(ctx context.Context, workTree, gitDir string, maxN int) ([]string, error) {
-	args := g.withDirArgs(workTree, gitDir, "status", "--porcelain=v1", "-z", "--ignored=matching")
-	out, err := g.gitOutputBytes(ctx, workTree, g.envWith(workTree, gitDir), "git", args...)
+	index, err := g.exportEnv(ctx, workTree, gitDir)
+	if err != nil {
+		return nil, err
+	}
+	defer index.cleanup()
+	args := g.withDirArgs(workTree, gitDir, "--no-optional-locks", "-c", "core.autocrlf=false", "-c", "core.filemode=true", "-c", "core.symlinks=true", "-c", "core.ignorestat=false", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--no-renames")
+	out, err := g.gitOutputBytes(ctx, workTree, index.env, "git", args...)
 	if err != nil {
 		return nil, err
 	}

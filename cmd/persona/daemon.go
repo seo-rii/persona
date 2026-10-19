@@ -1475,6 +1475,9 @@ func (s *daemonState) createSessionWithCheckpoint(ctx context.Context, sessionKe
 		patchRel = filepath.ToSlash(patchRel)
 	}
 	g := s.deps.newGit(s.repoRoot, s.gitDir, false)
+	if baseMode, ok := g.(interface{ SetBaseMode(model.BaseMode) }); ok {
+		baseMode.SetBaseMode(cfg.BaseMode)
+	}
 	baseOpts := cfg.options()
 	baseOpts.KeepSession = model.KeepAlways
 	pinned := ""

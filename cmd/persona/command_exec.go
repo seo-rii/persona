@@ -112,6 +112,14 @@ func runCommand(repoRoot, cwdRel string, cmdArgs []string) int {
 }
 
 func exportPatchToWriter(ctx context.Context, g model.GitOps, repoRoot, gitDir string, patchInRepo bool, patchRel string, ignoredMax int, initialIgnored []string, out io.Writer) (int, error) {
+	if snapshotter, ok := g.(model.GitExportSnapshotter); ok {
+		snapshot, closeSnapshot, err := snapshotter.SnapshotForExport(ctx, repoRoot, gitDir)
+		if err != nil {
+			return 0, err
+		}
+		defer closeSnapshot()
+		g = snapshot
+	}
 	if ignoredMax != 0 {
 		if err := checkIgnoredCandidateLimit(initialIgnored, ignoredMax); err != nil {
 			return 0, err
