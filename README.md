@@ -60,7 +60,7 @@ Recommended setup:
    ./bin/persona doctor
    ```
 
-2. If you want capability-based execution, run `sudo ./bin/persona activate` once for that binary.
+2. For non-root capability-based execution, run `sudo ./bin/persona activate --allow-dac-override` once for that binary. OverlayFS creates private mode-000 work directories, so mount capability alone is insufficient. This flag explicitly grants filesystem permission bypass to Persona; use it only with trusted commands and repositories.
 3. Start Claude Code with `claude --plugin-dir ./persona-claude-plugin`.
 4. Point plugin config `PERSONA_BIN` at the built persona binary.
 5. If the default daemon settings are not enough, set plugin options such as `DAEMON_BASE_MODE`, `DAEMON_BASE_REF`, `DAEMON_ALLOW_DIRTY`, `DAEMON_IGNORED_MODE`, `DAEMON_IGNORED_MAX`, `DAEMON_APPLY_MODE`, `FLUSH_MIN_AGE`, `FLUSH_RETRY_FOR`, and `FLUSH_RETRY_INTERVAL_MS`.
@@ -93,7 +93,7 @@ persona --patch /tmp/state.patch -- cat new.txt
 ## Commands
 
 - `persona doctor`: print capability/mount diagnostics, trusted `setcap` path, OverlayFS availability, and `unshare -m true` preflight hints.
-- `persona activate`: grant `cap_sys_admin` to the persona binary by default. Use `--binary PATH` to target a different persona executable, and add `--allow-dac-override` only when patch writes must bypass DAC checks.
+- `persona activate`: grant `cap_sys_admin` to the persona binary by default. Use `--binary PATH` to target a different persona executable. Non-root OverlayFS operation also needs `cap_dac_override` to access the kernel's private work directories; add `--allow-dac-override` to grant it explicitly. The default activation preserves this opt-in and reports that mount capability alone is insufficient.
 - `persona daemon exec --session-key <key> -- <command...>`: create or reuse a daemon-backed overlay session, run the command inside its stable view, and flush back into that session's patch file.
 - `persona daemon info --session-key <key> --json`: ensure a daemon session exists and print its current `view_path` / `patch_path` plus dirty / flush / recovery metadata for tool integrations.
 - `persona daemon list --json`: list daemon sessions for the current repository, including busy / dirty state, created / last-used / last-flushed timestamps, and flush / recovery counters.
@@ -109,7 +109,7 @@ persona --patch /tmp/state.patch -- cat new.txt
 Example:
 
 ```
-sudo ./bin/persona activate
+sudo ./bin/persona activate --allow-dac-override
 ./bin/persona doctor
 ```
 

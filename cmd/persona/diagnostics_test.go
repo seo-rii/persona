@@ -91,6 +91,26 @@ func TestLeastPrivilegeCapabilityHint(t *testing.T) {
 	if !strings.Contains(hint, "--allow-dac-override") {
 		t.Fatalf("expected hint to document DAC override as opt-in: %q", hint)
 	}
+	if !strings.Contains(hint, "OverlayFS workdir") {
+		t.Fatalf("hint must explain the kernel's DAC requirement: %q", hint)
+	}
+}
+
+func TestDoctorReportsMissingOverlayWorkdirCapability(t *testing.T) {
+	original := collectDiagFn
+	t.Cleanup(func() { collectDiagFn = original })
+	collectDiagFn = func() diagInfo {
+		return diagInfo{EUID: 1000, HasSysAdmin: true, Overlayfs: "available", UnshareMount: "ok"}
+	}
+	var out bytes.Buffer
+	cmd := newDoctorCmd()
+	cmd.SetOut(&out)
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "CAP_SYS_ADMIN alone is insufficient") || !strings.Contains(out.String(), "--allow-dac-override") {
+		t.Fatalf("doctor treated mount capability as sufficient: %s", &out)
+	}
 }
 
 func TestFindmntInfoParsesQuotedValuesWithSpaces(t *testing.T) {

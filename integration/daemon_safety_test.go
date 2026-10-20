@@ -201,8 +201,9 @@ func TestPersonaIntegrationDaemonAbsolutePathsAndShutdown(t *testing.T) {
 	stop()
 }
 
-// CI supplies a built binary carrying cap_sys_admin and runs this as an ordinary
-// user. Keep this separate from the root-only suite so it cannot silently skip.
+// CI explicitly opts into cap_sys_admin and cap_dac_override and runs this as
+// an ordinary user. OverlayFS needs DAC bypass for its mode-000 work directories.
+// Keep this separate from the root-only suite so it cannot silently skip.
 func TestPersonaIntegrationCapabilityPath(t *testing.T) {
 	if os.Getenv("PERSONA_CAPABILITY_TEST") != "1" {
 		t.Skip("set PERSONA_CAPABILITY_TEST=1 and PERSONA_CAPABILITY_BIN")

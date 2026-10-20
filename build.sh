@@ -91,5 +91,5 @@ else
   fi
 fi
 
-echo "note: use $bin activate --allow-dac-override only when patch writes must bypass DAC checks" >&2
+echo "note: non-root OverlayFS workdir access also needs CAP_DAC_OVERRIDE; opt in with sudo $bin activate --allow-dac-override" >&2
 echo "built: $bin"

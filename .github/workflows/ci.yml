@@ -69,7 +69,7 @@ jobs:
       - name: Verify non-root file capability execution
         run: |
           go build -o "$RUNNER_TEMP/persona-capability" ./cmd/persona
-          sudo setcap cap_sys_admin+ep "$RUNNER_TEMP/persona-capability"
+          sudo "$RUNNER_TEMP/persona-capability" activate --allow-dac-override
           PERSONA_CAPABILITY_TEST=1 PERSONA_CAPABILITY_BIN="$RUNNER_TEMP/persona-capability" \
             go test -count=2 ./integration -run '^TestPersonaIntegrationCapabilityPath$'
 

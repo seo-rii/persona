@@ -116,6 +116,9 @@ func newDoctorCmd() *cobra.Command {
 				fmt.Fprintln(w, "hint: CAP_SYS_ADMIN is required for unshare and OverlayFS mount.")
 				fmt.Fprintf(w, "hint: %s\n", leastPrivilegeCapabilityHint())
 			}
+			if info.EUID != 0 && info.HasSysAdmin && !info.HasDACOverride {
+				fmt.Fprintln(w, "hint: CAP_SYS_ADMIN alone is insufficient for OverlayFS mode-000 work directories; opt in with `sudo persona activate --allow-dac-override`.")
+			}
 			if strings.Contains(info.MountOptions, "nosuid") {
 				fmt.Fprintln(w, "hint: mount has nosuid; file capabilities are ignored. Use sudo or move the binary.")
 			}
@@ -162,11 +165,14 @@ func newActivateCmd() *cobra.Command {
 				return fmt.Errorf("setcap failed: %s", msg)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "capabilities set on %s\n", path)
+			if !allowDACOverride {
+				fmt.Fprintln(cmd.ErrOrStderr(), "note: non-root OverlayFS workdir access also requires CAP_DAC_OVERRIDE; opt in with activate --allow-dac-override.")
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&target, "binary", "", "path to persona binary (default: current executable)")
-	cmd.Flags().BoolVar(&allowDACOverride, "allow-dac-override", false, "also grant CAP_DAC_OVERRIDE for patch writes that must bypass DAC checks")
+	cmd.Flags().BoolVar(&allowDACOverride, "allow-dac-override", false, "also grant CAP_DAC_OVERRIDE, required for non-root OverlayFS workdir access")
 	return cmd
 }
 
@@ -179,7 +185,7 @@ func activateCapabilitySpec(allowDACOverride bool) string {
 
 func leastPrivilegeCapabilityHint() string {
 	return fmt.Sprintf(
-		"run `sudo persona activate` or `sudo setcap %s /path/to/persona`; add `--allow-dac-override` only when patch writes must bypass DAC checks.",
+		"run `sudo persona activate` or `sudo setcap %s /path/to/persona` for mount capability; non-root OverlayFS workdir access also requires explicit `sudo persona activate --allow-dac-override`.",
 		activateCapabilitySpec(false),
 	)
 }
