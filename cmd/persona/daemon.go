@@ -748,7 +748,7 @@ func (s *daemonState) handleRequestContext(ctx context.Context, req daemonReques
 		if req.OwnerPID <= 0 || processStartTime(req.OwnerPID) == "" {
 			return daemonResponseForInfo(nil, fmt.Errorf("mutation owner must identify a live process"))
 		}
-		info, leaseID, err := s.acquireExec(ctx, key, req.OwnerPID, req.Config)
+		info, leaseID, err := s.acquireExecWithLease(ctx, key, req.OwnerPID, req.Config, req.LeaseID)
 		resp := daemonResponseForInfo(info, err)
 		if err == nil {
 			resp.LeaseID = leaseID
@@ -978,6 +978,16 @@ func (s *daemonState) ensureSession(ctx context.Context, sessionKey string, cfg 
 }
 
 func (s *daemonState) acquireExec(ctx context.Context, sessionKey string, ownerPID int, cfg daemonSessionConfig) (*daemonSessionInfo, string, error) {
+	return s.acquireExecWithLease(ctx, sessionKey, ownerPID, cfg, "")
+}
+
+func (s *daemonState) acquireExecWithLease(ctx context.Context, sessionKey string, ownerPID int, cfg daemonSessionConfig, requestedLease string) (*daemonSessionInfo, string, error) {
+	if requestedLease != "" {
+		decoded, err := hex.DecodeString(requestedLease)
+		if err != nil || len(decoded) != 16 || strings.ToLower(requestedLease) != requestedLease {
+			return nil, "", fmt.Errorf("lease-id must be 32 lowercase hexadecimal characters")
+		}
+	}
 	unlock, err := s.lockSession(ctx, sessionKey)
 	if err != nil {
 		return nil, "", err
@@ -991,15 +1001,25 @@ func (s *daemonState) acquireExec(ctx context.Context, sessionKey string, ownerP
 		return nil, "", err
 	}
 	if sess.busy {
+		if requestedLease != "" && sess.busyLease == requestedLease && sess.busyOwnerPID == ownerPID && sess.busyOwnerStart == processStartTime(ownerPID) {
+			info := daemonSessionSnapshot(sess)
+			return &info, sess.busyLease, nil
+		}
 		return nil, "", model.Wrap(model.ExitEnv, "daemon session busy", fmt.Errorf("session %q is already executing (owner pid %d, command group %d)", sessionKey, sess.busyOwnerPID, sess.busyExecPGID))
 	}
 	masks, initialIgnored, err := maskIgnoredFiles(ctx, sess.g, sess.info.ViewPath, sess.menv.gitDirForOps, sess.menv.emptyFile, sess.menv.emptyDir, sess.config.options(), sess.mount, s.log)
 	if err != nil {
 		return nil, "", s.abortAcquire(sess, masks, model.Wrap(model.ExitEnv, "mask ignored files", err))
 	}
-	leaseID, err := daemonNonce()
-	if err != nil {
-		return nil, "", s.abortAcquire(sess, masks, model.Wrap(model.ExitEnv, "create daemon lease", err))
+	if err := ctx.Err(); err != nil {
+		return nil, "", s.abortAcquire(sess, masks, err)
+	}
+	leaseID := requestedLease
+	if leaseID == "" {
+		leaseID, err = daemonNonce()
+		if err != nil {
+			return nil, "", s.abortAcquire(sess, masks, model.Wrap(model.ExitEnv, "create daemon lease", err))
+		}
 	}
 	old := daemonSessionMetaSnapshot(sess)
 	sess.ignoredMasks = masks

@@ -100,7 +100,7 @@ persona --patch /tmp/state.patch -- cat new.txt
 - `persona daemon flush --session-key <key> [--min-age <duration>]`: write the current daemon view back into that session's patch file without ending the session, optionally skipping very recent flushes.
 - `persona daemon prune --idle-for <duration>`: end idle daemon sessions for the current repository.
 - `persona daemon end --session-key <key>`: flush the daemon session and remove its overlay view.
-- `persona daemon acquire --session-key <key> --owner-pid <pid> --json`: obtain an exclusive file-tool lease. Keep its `lease_id` and `view_generation`.
+- `persona daemon acquire --session-key <key> --owner-pid <pid> --lease-id <id> --json`: obtain an exclusive file-tool lease. Generate and durably retain the required 32-character lowercase hexadecimal `lease_id` before calling acquire, then keep the returned `view_generation`. Repeating an outstanding acquisition with the same ID and owner is idempotent. If its response is lost, the retained ID can release the lease with `--view-generation 0`; another lease's ID is never accepted.
 - `persona daemon release --session-key <key> --lease-id <id> --view-generation <n>`: release that lease and durably save the view.
 - `persona daemon recover --session-key <key> --dry-run`: inspect preserved metadata without changing files or mounts. Omit `--dry-run` to validate ownership, refuse live owners, unmount stale session mounts without lazy detach, and reopen a preserved worktree upper layer.
 - `persona version`: print the current persona CLI version.

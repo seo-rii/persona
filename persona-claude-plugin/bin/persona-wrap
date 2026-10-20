@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import fcntl
 import hashlib
 import json
 import os
@@ -297,16 +298,15 @@ def daemon_call(args, cwd, timeout=None):
     )
 
 
-def daemon_acquire(persona_bin, session_id, daemon_args, cwd):
+def daemon_acquire(persona_bin, session_id, daemon_args, cwd, lease_id, owner_pid):
     completed = daemon_call(
         [persona_bin, "daemon", "acquire", "--session-key", session_id, *daemon_args,
-         "--owner-pid", str(lease_owner_pid()), "--json"], cwd
+         "--lease-id", lease_id, "--owner-pid", str(owner_pid), "--json"], cwd
     )
     response = json.loads(completed.stdout)
     info = response.get("session")
-    lease_id = response.get("lease_id")
-    if not isinstance(info, dict) or not isinstance(lease_id, str) or not lease_id:
-        raise ValueError("daemon acquire returned no session or lease identity")
+    if not isinstance(info, dict) or response.get("lease_id") != lease_id:
+        raise ValueError("daemon acquire did not confirm the recorded lease identity")
     if not isinstance(info.get("view_generation"), int) or info["view_generation"] <= 0:
         raise ValueError("daemon acquire returned no view generation")
     return info, lease_id
@@ -554,10 +554,58 @@ def read_private_record(directory, name):
     return record
 
 
-def save_lease_record(event, repo_dir, record):
+def save_lease_record(event, repo_dir, record, replace=False):
     directory = open_lease_directory()
     try:
-        write_private_record(directory, lease_record_name(event, repo_dir), record)
+        write_private_record(directory, lease_record_name(event, repo_dir), record, replace=replace)
+    finally:
+        os.close(directory)
+
+
+def hook_process_start(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as process:
+            # comm may contain both spaces and parentheses.
+            return process.read(65536).rsplit(")", 1)[1].split()[19]
+    except FileNotFoundError:
+        return ""
+
+
+def pending_hook_alive(record):
+    pid, started = record.get("hook_pid"), record.get("hook_start")
+    if not isinstance(pid, int) or pid <= 1 or not isinstance(started, str) or not started.isdigit():
+        raise ValueError("pending lease has no valid preparation-hook process identity")
+    return hook_process_start(pid) == started
+
+
+def claim_pending_lease_record(event, repo_dir, persona_bin):
+    directory = open_lease_directory()
+    try:
+        # Serialize only the local claim, never the daemon RPC. Two retries
+        # must not both take over the same abandoned preparation hook.
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        name = lease_record_name(event, repo_dir)
+        record = read_private_record(directory, name)
+        if record is not None:
+            if record.get("session_id") != session_identity(event) or record.get("tool_name") != event.get("tool_name"):
+                raise ValueError("persona hook lease record identity mismatch")
+            if record.get("pending") is not True:
+                raise ValueError("this tool-use ID already has an acquired lease; preserve its record for completion")
+            if pending_hook_alive(record):
+                raise ValueError("the previous preparation hook is still running for this tool-use ID")
+            lease_id = record.get("lease_id")
+            if not isinstance(lease_id, str) or re.fullmatch(r"[0-9a-f]{32}", lease_id) is None:
+                raise ValueError("pending lease has no valid acquisition identity")
+        else:
+            lease_id = os.urandom(16).hex()
+        pending = {
+            "session_id": session_identity(event), "tool_name": event.get("tool_name"),
+            "lease_id": lease_id, "session": {"view_generation": 0}, "pending": True,
+            "hook_pid": os.getpid(), "hook_start": hook_process_start(os.getpid()),
+            "persona_bin": os.path.abspath(shutil.which(persona_bin) or persona_bin),
+        }
+        write_private_record(directory, name, pending, replace=record is not None)
+        return pending
     finally:
         os.close(directory)
 
@@ -722,10 +770,27 @@ def handle_pretooluse(event):
         emit_pretooluse("deny", f"invalid persona daemon plugin option: {err}")
         return 0
 
+    record_path = os.path.join(lease_directory_path(), lease_record_name(event, repo_dir))
     try:
-        info, lease_id = daemon_acquire(persona_bin, session_id, daemon_args, cwd)
+        owner_pid = lease_owner_pid()
+        pending = claim_pending_lease_record(event, repo_dir, persona_bin)
+    except (OSError, ValueError) as err:
+        emit_pretooluse("deny", f"persona could not prepare the file-tool lease record at {record_path}: {subprocess_error_text(err)}")
+        return 0
+
+    lease_id = pending["lease_id"]
+    try:
+        info, lease_id = daemon_acquire(persona_bin, session_id, daemon_args, cwd, lease_id, owner_pid)
     except (OSError, subprocess.SubprocessError, ValueError) as err:
-        emit_pretooluse("deny", f"persona daemon lease acquisition failed: {subprocess_error_text(err)}")
+        reason = f"persona daemon lease acquisition failed: {subprocess_error_text(err)}"
+        try:
+            # The response may be lost after acquire committed. The durable
+            # client nonce identifies that lease even without its generation.
+            daemon_release(persona_bin, session_id, lease_id, 0, cwd)
+            remove_lease_record(event, repo_dir)
+        except (OSError, subprocess.SubprocessError, ValueError) as release_err:
+            reason += f"; lease cleanup failed: {subprocess_error_text(release_err)}. Pending lease record retained at {record_path} for retry after this preparation hook exits."
+        emit_pretooluse("deny", reason)
         return 0
 
     view_path = info.get("view_path", "")
@@ -742,13 +807,14 @@ def handle_pretooluse(event):
         save_lease_record(event, repo_dir, {"session_id": session_id, "tool_name": tool_name,
                                          "lease_id": lease_id, "session": info,
                                          "persona_bin": os.path.abspath(shutil.which(persona_bin) or persona_bin),
-                                         "context": managed_tool_context(tool_name, updated_input, repo_dir, view_path, cwd)})
+                                         "context": managed_tool_context(tool_name, updated_input, repo_dir, view_path, cwd)}, replace=True)
     except (OSError, ValueError) as err:
         reason = f"persona could not record the file-tool lease: {subprocess_error_text(err)}"
         try:
             daemon_release(persona_bin, session_id, lease_id, info["view_generation"], cwd)
+            remove_lease_record(event, repo_dir)
         except (OSError, subprocess.SubprocessError, ValueError) as release_err:
-            reason += f"; lease cleanup failed: {subprocess_error_text(release_err)}"
+            reason += f"; lease cleanup failed: {subprocess_error_text(release_err)}. Lease record retained at {record_path}."
         emit_pretooluse("deny", reason)
         return 0
     if denied_reason or not managed:
@@ -784,6 +850,8 @@ def handle_posttooluse(event):
         repo_dir, persona_bin, record = found
         if not persona_bin:
             raise ValueError(persona_not_found_reason())
+        if record.get("pending") is True and pending_hook_alive(record):
+            raise ValueError("the acquisition preparation hook is still running; its pending lease cannot be released yet")
         # Release uses the generation acquired before the tool ran. Never look
         # up a replacement view after a daemon restart and flush that instead.
         daemon_release(persona_bin, session_id, record["lease_id"], record["session"]["view_generation"], repo_dir)

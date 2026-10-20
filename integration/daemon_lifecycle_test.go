@@ -5,6 +5,8 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"os"
@@ -49,12 +51,13 @@ func daemonInfo(t *testing.T, binary, repo, key string) daemonSnapshot {
 
 func acquireFileTool(t *testing.T, binary, repo, key string, ownerPID int, options ...string) fileToolLease {
 	t.Helper()
-	args := append([]string{"acquire", "--session-key", key, "--owner-pid", strconv.Itoa(ownerPID), "--json"}, options...)
+	leaseID := newFileToolLeaseID(t)
+	args := append([]string{"acquire", "--session-key", key, "--owner-pid", strconv.Itoa(ownerPID), "--lease-id", leaseID, "--json"}, options...)
 	var lease fileToolLease
 	if err := json.Unmarshal(daemonCLI(t, binary, repo, args...), &lease); err != nil {
 		t.Fatal(err)
 	}
-	if lease.ID == "" || lease.Session.ViewGeneration == 0 || !lease.Session.Busy || !lease.Session.Dirty {
+	if lease.ID != leaseID || lease.Session.ViewGeneration == 0 || !lease.Session.Busy || !lease.Session.Dirty {
 		t.Fatalf("invalid mutation lease: %#v", lease)
 	}
 	// Release an unfinished test write before daemon cleanup, without spawning a
@@ -64,6 +67,15 @@ func acquireFileTool(t *testing.T, binary, repo, key string, ownerPID int, optio
 			"lease_id": lease.ID, "view_generation": lease.Session.ViewGeneration})
 	})
 	return lease
+}
+
+func newFileToolLeaseID(t *testing.T) string {
+	t.Helper()
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(nonce[:])
 }
 
 func testDaemonRPC(repo string, req map[string]any) (string, error) {
@@ -151,7 +163,7 @@ func TestPersonaIntegrationDaemonMutationLeaseRoundTrip(t *testing.T) {
 	for _, request := range [][]string{
 		{"flush", "--session-key", key},
 		{"end", "--session-key", key},
-		{"acquire", "--session-key", key, "--owner-pid", strconv.Itoa(os.Getpid())},
+		{"acquire", "--session-key", key, "--owner-pid", strconv.Itoa(os.Getpid()), "--lease-id", newFileToolLeaseID(t)},
 		{"exec", "--session-key", key, "--", "sh", "-c", "printf collision > tracked.txt"},
 	} {
 		want := "busy"

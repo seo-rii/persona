@@ -456,7 +456,7 @@ func TestPersonaWrapRoutesNotebookEditsThroughFileToolLease(t *testing.T) {
 		t.Fatalf("notebook completion did not save or map its path: %s", output)
 	}
 	log, err := os.ReadFile(logPath)
-	if err != nil || !bytes.Contains(log, []byte("daemon acquire")) || !bytes.Contains(log, []byte("--lease-id lease-123 --view-generation 7")) {
+	if err != nil || !bytes.Contains(log, []byte("daemon acquire")) || !bytes.Contains(log, []byte("--lease-id "+personaAcquiredLeaseID(t, log)+" --view-generation 7")) {
 		t.Fatalf("notebook lost its lease identity: %s %v", log, err)
 	}
 }
@@ -696,7 +696,7 @@ func TestPersonaWrapFlushesManagedWriteToolsOnPostToolUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read persona stub log: %v", err)
 	}
-	if !strings.Contains(string(logData), "daemon release --session-key session-123 --lease-id lease-123 --view-generation 7") {
+	if !strings.Contains(string(logData), "daemon release --session-key session-123 --lease-id "+personaAcquiredLeaseID(t, logData)+" --view-generation 7") {
 		t.Fatalf("expected generation-aware daemon release, got log:\n%s", logData)
 	}
 }
@@ -942,13 +942,15 @@ func TestPersonaWrapSessionEndIsolatesFailuresAndRetainsRetryState(t *testing.T)
 				}
 			}
 			if failure == "timeout" {
-				env["PERSONA_WRAP_DAEMON_TIMEOUT"] = "500ms"
+				// Allow Python startup under concurrent race/integration tests;
+				// the stalled repository still exceeds its share of the budget.
+				env["PERSONA_WRAP_DAEMON_TIMEOUT"] = "3s"
 				env["PERSONA_TEST_END_SLEEP_REPO"] = broken
 			}
 			event := map[string]any{"session_id": "multi-repo", "cwd": t.TempDir(), "hook_event_name": "SessionEnd"}
 			started := time.Now()
 			output := runPersonaWrap(t, repoRoot, event, env)
-			if failure == "timeout" && time.Since(started) > 2*time.Second {
+			if failure == "timeout" && time.Since(started) > 6*time.Second {
 				t.Fatal("SessionEnd exceeded its shared timeout budget")
 			}
 			if !bytes.Contains(output, []byte("failed during SessionEnd")) {
@@ -1005,7 +1007,7 @@ func TestPersonaWrapPostToolUsesAcquiredRepositoryAfterCwdChanges(t *testing.T) 
 		t.Fatalf("post hook must use original repository and binary: %s", output)
 	}
 	logData, err := os.ReadFile(logPath)
-	if err != nil || !bytes.Contains(logData, []byte(project+" daemon release --session-key moved-cwd --lease-id lease-123 --view-generation 7")) {
+	if err != nil || !bytes.Contains(logData, []byte(project+" daemon release --session-key moved-cwd --lease-id "+personaAcquiredLeaseID(t, logData)+" --view-generation 7")) {
 		t.Fatalf("release lost acquired repository identity: %s %v", logData, err)
 	}
 }
@@ -1413,6 +1415,211 @@ func TestPersonaWrapBoundsDaemonSubprocessTime(t *testing.T) {
 	}
 }
 
+func TestPersonaWrapRecoversAcquisitionWhenItsReplyIsLost(t *testing.T) {
+	repoRoot := repoRoot(t)
+	for _, failCleanup := range []bool{false, true} {
+		t.Run("cleanup-fails="+strconv.FormatBool(failCleanup), func(t *testing.T) {
+			view, leaseDir := t.TempDir(), t.TempDir()
+			active := filepath.Join(t.TempDir(), "active")
+			logPath := filepath.Join(t.TempDir(), "daemon.log")
+			personaStub := writePersonaDaemonStub(t, view, logPath)
+			env := map[string]string{
+				"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub, "PERSONA_TEST_VIEW_PATH": view,
+				"PERSONA_WRAP_LEASE_DIR": leaseDir, "PERSONA_TEST_ACTIVE_LEASE_FILE": active,
+				"PERSONA_TEST_LOG": logPath, "PERSONA_TEST_SKIP_PRETOOL": "1",
+				"PERSONA_TEST_ACQUIRE_REPLY_DELAY": "3", "PERSONA_WRAP_DAEMON_TIMEOUT": "1s",
+			}
+			if failCleanup {
+				failCount := filepath.Join(t.TempDir(), "release-failures")
+				if err := os.WriteFile(failCount, []byte("1"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				env["PERSONA_TEST_RELEASE_FAIL_COUNT_FILE"] = failCount
+			}
+			event := map[string]any{
+				"session_id": "session-123", "tool_use_id": "lost-acquire", "cwd": repoRoot,
+				"hook_event_name": "PreToolUse", "tool_name": "Write",
+				"tool_input": map[string]any{"file_path": filepath.Join(repoRoot, "note.txt"), "content": "saved"},
+			}
+			output := runPersonaWrap(t, repoRoot, event, env)
+			if !bytes.Contains(output, []byte(`"permissionDecision": "deny"`)) || !bytes.Contains(output, []byte("timed out")) {
+				t.Fatalf("lost acquisition response must not deliver a tool: %s", output)
+			}
+			log, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			leaseID := personaAcquiredLeaseID(t, log)
+			if !bytes.Contains(log, []byte("--lease-id "+leaseID+" --view-generation 0")) {
+				t.Fatalf("cleanup did not use the saved identity without a response generation: %s", log)
+			}
+			entries, err := personaLeaseRecordEntries(leaseDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failCleanup {
+				if len(entries) != 1 || !bytes.Contains(output, []byte(filepath.Join(leaseDir, entries[0].Name()))) {
+					t.Fatalf("failed cleanup did not retain and report its record: %s; entries=%v", output, entries)
+				}
+				data, err := os.ReadFile(filepath.Join(leaseDir, entries[0].Name()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var record map[string]any
+				if err := json.Unmarshal(data, &record); err != nil {
+					t.Fatal(err)
+				}
+				if record["pending"] != true || record["lease_id"] != leaseID || record["hook_pid"] == nil || record["hook_start"] == "" {
+					t.Fatalf("pending acquisition lost its recovery identity: %s", data)
+				}
+				if got, err := os.ReadFile(active); err != nil || string(got) != leaseID {
+					t.Fatalf("failed cleanup did not preserve the acquired lease: %q %v", got, err)
+				}
+				env["PERSONA_TEST_ACQUIRE_REPLY_DELAY"] = ""
+				output = runPersonaWrap(t, repoRoot, event, env)
+				if !bytes.Contains(output, []byte("updatedInput")) {
+					t.Fatalf("an exited pending hook could not resume its own acquisition: %s", output)
+				}
+				log, err = os.ReadFile(logPath)
+				if err != nil || bytes.Count(log, []byte("--lease-id "+leaseID+" --owner-pid")) != 2 {
+					t.Fatalf("retry acquired a different lease identity: %s %v", log, err)
+				}
+				event["hook_event_name"] = "PostToolUse"
+				if output = runPersonaWrap(t, repoRoot, event, env); !bytes.Contains(output, []byte("durably flushed")) {
+					t.Fatalf("resumed acquisition did not release normally: %s", output)
+				}
+			} else if len(entries) != 0 {
+				t.Fatalf("successful cleanup left a pending record: %v", entries)
+			}
+			if _, err := os.Stat(active); !os.IsNotExist(err) {
+				t.Fatalf("acquisition remained busy after cleanup: %v", err)
+			}
+		})
+	}
+}
+
+func TestPersonaWrapDoesNotAcquireWhenPendingRecordWriteFails(t *testing.T) {
+	repoRoot := repoRoot(t)
+	view, leaseDir := t.TempDir(), t.TempDir()
+	if err := os.Chmod(leaseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "daemon.log")
+	personaStub := writePersonaDaemonStub(t, view, logPath)
+	launcher := `import importlib.machinery,sys
+module=importlib.machinery.SourceFileLoader("persona_wrap",sys.argv[1]).load_module()
+write=module.write_private_record
+def failing_write(directory,name,record,replace=False):
+    if not name.startswith("repo-"):
+        raise OSError("injected pending-record write failure")
+    return write(directory,name,record,replace)
+module.write_private_record=failing_write
+sys.exit(module.main())
+`
+	cmd := exec.Command("python3", "-c", launcher, filepath.Join(repoRoot, "persona-claude-plugin", "bin", "persona-wrap"))
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "PERSONA_WRAP_PERSONA_BIN="+personaStub, "PERSONA_TEST_VIEW_PATH="+view,
+		"PERSONA_WRAP_LEASE_DIR="+leaseDir, "PERSONA_TEST_LOG="+logPath, "PERSONA_WRAP_OWNER_PID="+strconv.Itoa(os.Getpid()),
+		"PYTHONDONTWRITEBYTECODE=1")
+	input, err := json.Marshal(map[string]any{
+		"session_id": "session-123", "tool_use_id": "record-failure", "cwd": repoRoot,
+		"hook_event_name": "PreToolUse", "tool_name": "Write",
+		"tool_input": map[string]any{"file_path": filepath.Join(repoRoot, "note.txt"), "content": "changed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdin = bytes.NewReader(input)
+	output, err := cmd.CombinedOutput()
+	if err != nil || !bytes.Contains(output, []byte(`"permissionDecision": "deny"`)) || !bytes.Contains(output, []byte("injected pending-record write failure")) {
+		t.Fatalf("pending record failure must deny the tool: %v %s", err, output)
+	}
+	if log, err := os.ReadFile(logPath); err != nil || len(log) != 0 {
+		t.Fatalf("daemon called before pending acquisition was recorded: %s %v", log, err)
+	}
+}
+
+func TestPersonaWrapDoesNotStealAnotherPreparationOrActiveLease(t *testing.T) {
+	repoRoot := repoRoot(t)
+	view, leaseDir := t.TempDir(), t.TempDir()
+	if err := os.Chmod(leaseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	active := filepath.Join(t.TempDir(), "active")
+	gate := filepath.Join(t.TempDir(), "reply-gate")
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "daemon.log")
+	personaStub := writePersonaDaemonStub(t, view, logPath)
+	env := map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PERSONA_BIN": personaStub, "PERSONA_TEST_VIEW_PATH": view,
+		"PERSONA_WRAP_LEASE_DIR": leaseDir, "PERSONA_TEST_ACTIVE_LEASE_FILE": active,
+		"PERSONA_TEST_LOG": logPath, "PERSONA_TEST_SKIP_PRETOOL": "1",
+		"PERSONA_TEST_ACQUIRE_REPLY_GATE": gate, "PERSONA_WRAP_DAEMON_TIMEOUT": "10s",
+	}
+	event := map[string]any{
+		"session_id": "session-123", "tool_use_id": "concurrent-preparation", "cwd": repoRoot,
+		"hook_event_name": "PreToolUse", "tool_name": "Write",
+		"tool_input": map[string]any{"file_path": filepath.Join(repoRoot, "note.txt"), "content": "changed"},
+	}
+	input, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(repoRoot, "persona-claude-plugin", "bin", "persona-wrap"))
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "PERSONA_WRAP_OWNER_PID="+strconv.Itoa(os.Getpid()))
+	for name, value := range env {
+		cmd.Env = append(cmd.Env, name+"="+value)
+	}
+	cmd.Stdin = bytes.NewReader(input)
+	var first bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &first, &first
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(active); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first preparation did not reach the acquisition response barrier")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	output := runPersonaWrap(t, repoRoot, event, env)
+	if !bytes.Contains(output, []byte("previous preparation hook is still running")) {
+		t.Fatalf("duplicate preparation stole a live pending claim: %s", output)
+	}
+	event["hook_event_name"] = "PermissionDenied"
+	output = runPersonaWrap(t, repoRoot, event, env)
+	if !bytes.Contains(output, []byte("pending lease cannot be released yet")) {
+		t.Fatalf("completion released a still-running preparation: %s", output)
+	}
+	if err := os.Remove(gate); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil || !bytes.Contains(first.Bytes(), []byte("updatedInput")) {
+		t.Fatalf("original preparation did not retain ownership: %v %s", err, &first)
+	}
+	event["hook_event_name"] = "PreToolUse"
+	output = runPersonaWrap(t, repoRoot, event, env)
+	if !bytes.Contains(output, []byte("already has an acquired lease")) {
+		t.Fatalf("new preparation reused an active tool-use ID: %s", output)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || bytes.Count(log, []byte("daemon acquire ")) != 1 || bytes.Contains(log, []byte("daemon release ")) {
+		t.Fatalf("another hook acquired or released the original lease: %s %v", log, err)
+	}
+	event["hook_event_name"] = "PostToolUse"
+	if output = runPersonaWrap(t, repoRoot, event, env); !bytes.Contains(output, []byte("durably flushed")) {
+		t.Fatalf("active lease did not complete normally: %s", output)
+	}
+}
+
 func TestPersonaWrapFileToolsShareLeaseAndReleaseAfterFailureOrDenial(t *testing.T) {
 	repoRoot := repoRoot(t)
 	for _, tool := range []string{"Write", "NotebookEdit"} {
@@ -1463,15 +1670,15 @@ func TestPersonaWrapFileToolsShareLeaseAndReleaseAfterFailureOrDenial(t *testing
 					t.Fatalf("failure must flush partial state: %s", output)
 				}
 				entries, err = personaLeaseRecordEntries(leaseDir)
-				if err != nil || len(entries) != 0 {
-					t.Fatalf("completion must release private record: %v %v", entries, err)
+				if err != nil || len(entries) != 1 {
+					t.Fatalf("completion must release its record and retain the rejected reader for retry: %v %v", entries, err)
 				}
 				output = runPersonaWrap(t, repoRoot, read, env)
 				if !bytes.Contains(output, []byte("updatedInput")) {
 					t.Fatalf("next reader did not acquire after release: %s", output)
 				}
 				logData, err := os.ReadFile(logPath)
-				if err != nil || !bytes.Contains(logData, []byte("--lease-id lease-123 --view-generation 7")) {
+				if err != nil || !bytes.Contains(logData, []byte("--lease-id "+personaAcquiredLeaseID(t, logData)+" --view-generation 7")) {
 					t.Fatalf("release lost lease identity: %s %v", logData, err)
 				}
 			})
@@ -1622,7 +1829,7 @@ def option(name, default=""):
     return args[args.index(name) + 1] if name in args else default
 method = args[1] if len(args) > 1 else ""
 if method == "end" and os.getenv("PERSONA_TEST_END_SLEEP_REPO") == os.getcwd():
-    time.sleep(3)
+    time.sleep(10)
 session = option("--session-key")
 git_dir = os.getenv("PERSONA_TEST_GIT_DIR", os.path.join(os.getcwd(), ".git"))
 info = {"session_key": session, "repo_root": os.getcwd(), "git_dir": git_dir,
@@ -1632,20 +1839,33 @@ info = {"session_key": session, "repo_root": os.getcwd(), "git_dir": git_dir,
 active_path = os.getenv("PERSONA_TEST_ACTIVE_LEASE_FILE")
 if method == "acquire":
     os.kill(int(option("--owner-pid")), 0)
+    lease_id = option("--lease-id")
     if active_path:
         try:
             fd = os.open(active_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(fd)
+            with os.fdopen(fd, "w") as active:
+                active.write(lease_id)
         except FileExistsError:
-            sys.stderr.write("session is still busy\n")
-            sys.exit(1)
-    print(json.dumps({"session": info, "lease_id": "lease-123"}))
+            with open(active_path) as active:
+                if active.read() != lease_id:
+                    sys.stderr.write("session is still busy\n")
+                    sys.exit(1)
+    if os.getenv("PERSONA_TEST_ACQUIRE_REPLY_DELAY"):
+        time.sleep(float(os.environ["PERSONA_TEST_ACQUIRE_REPLY_DELAY"]))
+    while os.getenv("PERSONA_TEST_ACQUIRE_REPLY_GATE") and os.path.exists(os.environ["PERSONA_TEST_ACQUIRE_REPLY_GATE"]):
+        time.sleep(0.01)
+    print(json.dumps({"session": info, "lease_id": lease_id}))
 elif method == "info":
     print(json.dumps(info))
 elif method == "release":
-    if int(option("--view-generation", "0")) != info["view_generation"]:
+    if int(option("--view-generation", "0")) not in {0, info["view_generation"]}:
         sys.stderr.write("stale view generation\n")
         sys.exit(1)
+    if active_path and os.path.exists(active_path):
+        with open(active_path) as active:
+            if active.read() != option("--lease-id"):
+                sys.stderr.write("session lease mismatch\n")
+                sys.exit(1)
     fail_count = os.getenv("PERSONA_TEST_RELEASE_FAIL_COUNT_FILE")
     if fail_count and os.path.exists(fail_count):
         with open(fail_count) as stream:
@@ -1689,6 +1909,27 @@ func newPersonaHookRepository(t *testing.T) string {
 		t.Fatalf("init hook repository: %v %s", err, output)
 	}
 	return path
+}
+
+func personaAcquiredLeaseID(t *testing.T, log []byte) string {
+	t.Helper()
+	for _, line := range strings.Split(string(log), "\n") {
+		if !strings.Contains(line, "daemon acquire ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		for index, field := range fields {
+			if field == "--lease-id" && index+1 < len(fields) {
+				id := fields[index+1]
+				if len(id) != 32 || strings.Trim(id, "0123456789abcdef") != "" {
+					t.Fatalf("invalid durable lease identity %q", id)
+				}
+				return id
+			}
+		}
+	}
+	t.Fatalf("missing client lease identity in acquisition: %s", log)
+	return ""
 }
 
 func personaLeaseRecordEntries(directory string) ([]os.DirEntry, error) {

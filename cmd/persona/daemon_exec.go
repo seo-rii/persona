@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,7 +28,12 @@ func addDaemonLeaseCommands(parent *cobra.Command) {
 	var flags daemonFlagValues
 	var owner int
 	var asJSON bool
-	acquire := &cobra.Command{Use: "acquire --session-key <key> --owner-pid <pid>", Short: "Acquire the exclusive mutation lease for a file tool", RunE: func(cmd *cobra.Command, args []string) error {
+	var requestedLease string
+	acquire := &cobra.Command{Use: "acquire --session-key <key> --owner-pid <pid> --lease-id <id>", Short: "Acquire the exclusive mutation lease for a file tool", RunE: func(cmd *cobra.Command, args []string) error {
+		decoded, err := hex.DecodeString(requestedLease)
+		if err != nil || len(decoded) != 16 || strings.ToLower(requestedLease) != requestedLease {
+			return fmt.Errorf("lease-id must be 32 lowercase hexadecimal characters; generate and retain it before acquiring")
+		}
 		cfg, err := buildDaemonSessionConfig(flags)
 		if err != nil {
 			return err
@@ -43,7 +49,7 @@ func addDaemonLeaseCommands(parent *cobra.Command) {
 		if err != nil {
 			return err
 		}
-		resp, err := client.call(cmd.Context(), daemonRequest{Method: "acquire_exec", SessionKey: strings.TrimSpace(flags.sessionKey), OwnerPID: owner, Config: cfg})
+		resp, err := client.call(cmd.Context(), daemonRequest{Method: "acquire_exec", SessionKey: strings.TrimSpace(flags.sessionKey), OwnerPID: owner, Config: cfg, LeaseID: requestedLease})
 		if err != nil {
 			return err
 		}
@@ -51,8 +57,10 @@ func addDaemonLeaseCommands(parent *cobra.Command) {
 	}}
 	bindDaemonSessionFlags(acquire, &flags)
 	acquire.Flags().IntVar(&owner, "owner-pid", 0, "PID of the long-lived tool owner")
+	acquire.Flags().StringVar(&requestedLease, "lease-id", "", "required client-generated 32-character lowercase hex token; retain before acquiring for safe retries")
 	acquire.Flags().BoolVar(&asJSON, "json", false, "print the lease as JSON")
 	_ = acquire.MarkFlagRequired("owner-pid")
+	_ = acquire.MarkFlagRequired("lease-id")
 	var key, lease string
 	var generation uint64
 	release := &cobra.Command{Use: "release --session-key <key> --lease-id <id>", Short: "Release a file-tool lease and durably save its changes", RunE: func(cmd *cobra.Command, args []string) error {
