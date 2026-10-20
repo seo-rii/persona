@@ -704,7 +704,8 @@ func runPersona(t *testing.T, persona, repo string, args []string, cmdArgs []str
 	return code, stdout.String(), stderr.String()
 }
 
-func runPersonaWithSignal(t *testing.T, persona, repo string, args []string, cmdArgs []string, extraEnv map[string]string, sig os.Signal, delay time.Duration) (int, string, string) {
+func runPersonaWithSignal(t *testing.T, persona, repo string, args []string, cmdArgs []string, extraEnv map[string]string, sig os.Signal) (int, string, string) {
+	t.Helper()
 	if os.Getenv("PERSONA_TEST_VERBOSE") == "1" {
 		args = append(args, "--verbose")
 	}
@@ -717,18 +718,54 @@ func runPersonaWithSignal(t *testing.T, persona, repo string, args []string, cmd
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
+	ready := filepath.Join(t.TempDir(), "command-ready")
+	cmd.Env = append(cmd.Env, "PERSONA_TEST_READY_FILE="+ready)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start persona: %v", err)
 	}
-	time.Sleep(delay)
-	_ = cmd.Process.Signal(sig)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	finished := false
+	defer func() {
+		if !finished {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		}
+	}()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+waitReady:
+	for {
+		select {
+		case err := <-done:
+			finished = true
+			t.Fatalf("persona exited before command readiness: %v stderr=%q", err, stderr.String())
+		case <-deadline.C:
+			t.Fatal("command did not report readiness before signal")
+		case <-poll.C:
+			if _, err := os.Stat(ready); err == nil {
+				break waitReady
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("check command readiness: %v", err)
+			}
+		}
+	}
+	if err := cmd.Process.Signal(sig); err != nil {
+		t.Fatalf("signal ready command: %v", err)
+	}
 	select {
 	case err := <-done:
+		finished = true
 		code := 0
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
@@ -739,10 +776,9 @@ func runPersonaWithSignal(t *testing.T, persona, repo string, args []string, cmd
 		}
 		return code, stdout.String(), stderr.String()
 	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
 		t.Fatalf("persona did not exit after signal")
 	}
-	return 127, stdout.String(), stderr.String()
+	return 127, "", ""
 }
 
 func containsNonZeroLine(data []byte) bool {

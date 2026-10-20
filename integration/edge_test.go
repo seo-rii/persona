@@ -381,8 +381,8 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 	t.Run("signal forwarding preserves export", func(t *testing.T) {
 		repo := createRepo(t)
 		patchPath := filepath.Join(t.TempDir(), "state.patch")
-		cmd := "trap 'echo sig > sig.txt; exit 0' INT TERM; sleep 5"
-		code, _, _ := runPersonaWithSignal(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, nil, syscall.SIGINT, 500*time.Millisecond)
+		cmd := "trap 'echo sig > sig.txt; exit 0' INT TERM; : > \"$PERSONA_TEST_READY_FILE\"; while :; do sleep 1; done"
+		code, _, _ := runPersonaWithSignal(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, nil, syscall.SIGINT)
 		if code != 0 {
 			t.Fatalf("expected exit 0 got %d", code)
 		}
@@ -400,9 +400,10 @@ func TestPersonaIntegrationEdge(t *testing.T) {
 			"child=$!",
 			"echo $child > grandchild.pid",
 			"echo before > before.txt",
+			": > \"$PERSONA_TEST_READY_FILE\"",
 			"wait",
 		}, "\n")
-		code, out, errOut := runPersonaWithSignal(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, nil, syscall.SIGTERM, 500*time.Millisecond)
+		code, out, errOut := runPersonaWithSignal(t, persona, repo, []string{"--patch", patchPath}, []string{"sh", "-c", cmd}, nil, syscall.SIGTERM)
 		if code != 143 {
 			t.Fatalf("expected exit 143 got %d stdout=%q stderr=%q", code, out, errOut)
 		}
